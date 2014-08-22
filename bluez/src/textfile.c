@@ -291,7 +291,7 @@ unlock:
 	flock(fd, LOCK_UN);
 
 close:
-	fdatasync(fd);
+//	fdatasync(fd);
 
 	close(fd);
 	errno = -err;
