@@ -1015,6 +1015,15 @@ static void avdtp_sep_set_state(struct avdtp *session,
 
 	if (state == AVDTP_STATE_IDLE &&
 				g_slist_find(session->streams, stream)) {
+		DBG("Removing stream %p. ", stream);
+
+		/* Quick hack to deal with abort requests made by stream callbacks */
+		if (session->req && session->req->stream == stream) {
+			DBG("Resetting stream to NULL for request %p (session %p)",
+				session->req, session);
+			session->req->stream = NULL;
+		}
+
 		session->streams = g_slist_remove(session->streams, stream);
 		stream_free(stream);
 	}
