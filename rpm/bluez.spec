@@ -147,7 +147,8 @@ autoreconf --force --install
     --enable-sixaxis \
     --enable-test \
     --with-systemdsystemunitdir=/lib/systemd/system \
-    --with-systemduserunitdir=/usr/lib/systemd/user
+    --with-systemduserunitdir=/usr/lib/systemd/user \
+    --enable-jolla-dbus-access
 
 make %{?jobs:-j%jobs}
 
