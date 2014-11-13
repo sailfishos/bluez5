@@ -257,6 +257,11 @@ builtin_ldadd =
 
 include Makefile.plugins
 
+if JOLLADBUSACCESSPLUGIN
+builtin_modules += jolla_dbus_access
+builtin_sources += plugins/jolla-dbus-access.c
+endif
+
 if MAINTAINER_MODE
 plugin_LTLIBRARIES += plugins/external-dummy.la
 plugins_external_dummy_la_SOURCES = plugins/external-dummy.c
