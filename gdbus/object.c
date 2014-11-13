@@ -329,6 +329,7 @@ void g_dbus_pending_error(DBusConnection *connection,
 }
 
 int polkit_check_authorization(DBusConnection *conn,
+				DBusMessage *message,
 				const char *action, gboolean interaction,
 				void (*function) (dbus_bool_t authorized,
 							void *user_data),
@@ -353,6 +354,7 @@ static void builtin_security_result(dbus_bool_t authorized, void *user_data)
 }
 
 static void builtin_security_function(DBusConnection *conn,
+						DBusMessage *message,
 						const char *action,
 						gboolean interaction,
 						GDBusPendingReply pending)
@@ -363,7 +365,7 @@ static void builtin_security_function(DBusConnection *conn,
 	data->conn = conn;
 	data->pending = pending;
 
-	if (polkit_check_authorization(conn, action, interaction,
+	if (polkit_check_authorization(conn, message, action, interaction,
 				builtin_security_result, data, 30000) < 0)
 		g_dbus_pending_error(conn, pending, NULL, NULL);
 }
@@ -396,10 +398,10 @@ static gboolean check_privilege(DBusConnection *conn, DBusMessage *msg,
 
 		if (!(security->flags & G_DBUS_SECURITY_FLAG_BUILTIN) &&
 							security->function)
-			security->function(conn, security->action,
+			security->function(conn, msg, security->action,
 						interaction, secdata->pending);
 		else
-			builtin_security_function(conn, security->action,
+			builtin_security_function(conn, msg, security->action,
 						interaction, secdata->pending);
 
 		return TRUE;
