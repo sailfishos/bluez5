@@ -19,6 +19,7 @@
 #include <glib.h>
 
 int polkit_check_authorization(DBusConnection *conn,
+				DBusMessage *message,
 				const char *action, gboolean interaction,
 				void (*function) (dbus_bool_t authorized,
 							void *user_data),
@@ -59,10 +60,9 @@ static void add_empty_string_dict(DBusMessageIter *iter)
 	dbus_message_iter_close_container(iter, &dict);
 }
 
-static void add_arguments(DBusConnection *conn, DBusMessageIter *iter,
+static void add_arguments(const char *sender, DBusMessageIter *iter,
 				const char *action, dbus_uint32_t flags)
 {
-	const char *busname = dbus_bus_get_unique_name(conn);
 	const char *kind = "system-bus-name";
 	const char *cancel = "";
 	DBusMessageIter subject;
@@ -70,7 +70,7 @@ static void add_arguments(DBusConnection *conn, DBusMessageIter *iter,
 	dbus_message_iter_open_container(iter, DBUS_TYPE_STRUCT,
 							NULL, &subject);
 	dbus_message_iter_append_basic(&subject, DBUS_TYPE_STRING, &kind);
-	add_dict_with_string_value(&subject, "name", busname);
+	add_dict_with_string_value(&subject, "name", sender);
 	dbus_message_iter_close_container(iter, &subject);
 
 	dbus_message_iter_append_basic(iter, DBUS_TYPE_STRING, &action);
@@ -130,6 +130,7 @@ done:
 #define AUTHORITY_PATH	"/org/freedesktop/PolicyKit1/Authority"
 
 int polkit_check_authorization(DBusConnection *conn,
+				DBusMessage *message,
 				const char *action, gboolean interaction,
 				void (*function) (dbus_bool_t authorized,
 							void *user_data),
@@ -140,8 +141,13 @@ int polkit_check_authorization(DBusConnection *conn,
 	DBusMessageIter iter;
 	DBusPendingCall *call;
 	dbus_uint32_t flags = 0x00000000;
+	const char *sender = NULL;
 
-	if (conn == NULL)
+	if (conn == NULL || message == NULL)
+		return -EINVAL;
+
+	sender = dbus_message_get_sender(message);
+	if (!sender)
 		return -EINVAL;
 
 	data = dbus_malloc0(sizeof(*data));
@@ -162,7 +168,7 @@ int polkit_check_authorization(DBusConnection *conn,
 		action = "org.freedesktop.policykit.exec";
 
 	dbus_message_iter_init_append(msg, &iter);
-	add_arguments(conn, &iter, action, flags);
+	add_arguments(sender, &iter, action, flags);
 
 	if (dbus_connection_send_with_reply(conn, msg,
 						&call, timeout) == FALSE) {
