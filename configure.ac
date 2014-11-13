@@ -479,5 +479,10 @@ if (test "${plugin_phonebook}" = "ebook"); then
 fi
 AC_SUBST(PLUGIN_PHONEBOOK, [${plugin_phonebook}])
 
+AC_ARG_ENABLE(jolla_dbus_access, AC_HELP_STRING([--enable-jolla-dbus-access],
+				[compile with Jolla D-Bus access control plugin]),
+				[enable_jolla_dbus_access=${enableval}])
+AM_CONDITIONAL(JOLLADBUSACCESSPLUGIN, test "${enable_jolla_dbus_access}" = "yes")
+
 AC_CONFIG_FILES(Makefile src/bluetoothd.rst lib/bluez.pc mesh/bluetooth-meshd.rst)
 AC_OUTPUT
