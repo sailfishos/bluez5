@@ -305,6 +305,11 @@ builtin_ldadd =
 
 include Makefile.plugins
 
+if JOLLADBUSACCESSPLUGIN
+builtin_modules += jolla_dbus_access
+builtin_sources += plugins/jolla-dbus-access.c
+endif
+
 pkglibexec_PROGRAMS += src/bluetoothd
 
 bluetoothd_internal_sources = \
