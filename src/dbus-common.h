@@ -21,6 +21,10 @@
  *
  */
 
+#define BLUEZ_PRIVILEGED_ACCESS 1
+
+void dict_append_basic(DBusMessageIter *dict, int key_type, const void *key,
+						int type, void *val);
 void dict_append_entry(DBusMessageIter *dict,
 			const char *key, int type, void *val);
 void dict_append_array(DBusMessageIter *dict, const char *key, int type,
