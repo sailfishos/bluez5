@@ -60,7 +60,7 @@ static int opp_chkput(struct obex_session *os, void *user_data)
 		return -EBADR;
 
 	if (!contentfilter_receive_file(t))
-		return -EBADR;
+		return -EMEDIUMTYPE;
 
 	manager_emit_transfer_queued(user_data);
 
