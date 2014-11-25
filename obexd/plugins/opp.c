@@ -73,7 +73,7 @@ static int opp_chkput(struct obex_session *os, void *user_data)
 		return -EBADR;
 
 	if (!contentfilter_receive_file(t))
-		return -EBADR;
+		return -EMEDIUMTYPE;
 
 	if (obex_option_auto_accept()) {
 		folder = g_strdup(obex_option_root_folder());
