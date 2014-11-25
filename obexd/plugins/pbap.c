@@ -643,8 +643,13 @@ static void pbap_disconnect(struct obex_session *os, void *user_data)
 
 	manager_unregister_session(os);
 
-	if (pbap->obj)
+	if (pbap->obj) {
+		if (pbap->obj->request) {
+			phonebook_req_finalize(pbap->obj->request);
+			pbap->obj->request = NULL;
+		}
 		pbap->obj->session = NULL;
+	}
 
 	if (pbap->params) {
 		g_free(pbap->params->searchval);
@@ -744,14 +749,20 @@ static int vobject_close(void *object)
 	if (obj->session)
 		obj->session->obj = NULL;
 
-	if (obj->buffer)
+	if (obj->buffer) {
 		g_string_free(obj->buffer, TRUE);
+		obj->buffer = NULL;
+	}
 
-	if (obj->apparam)
+	if (obj->apparam) {
 		g_obex_apparam_free(obj->apparam);
+		obj->apparam = NULL;
+	}
 
-	if (obj->request)
+	if (obj->request) {
 		phonebook_req_finalize(obj->request);
+		obj->request = NULL;
+	}
 
 	g_free(obj);
 
