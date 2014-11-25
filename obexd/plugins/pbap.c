@@ -55,6 +55,7 @@
 struct cache {
 	gboolean valid;
 	uint32_t index;
+	gchar *path;
 	GSList *entries;
 };
 
@@ -152,8 +153,13 @@ static const char *cache_find(struct cache *cache, uint32_t handle)
 	return NULL;
 }
 
-static void cache_clear(struct cache *cache)
+static void invalidate_cache(struct cache *cache)
 {
+	DBG("invalidating cache (path %s)", cache->path ? cache->path : "<null>");
+	cache->valid = FALSE;
+	cache->index = 0;
+	g_free(cache->path);
+	cache->path = NULL;
 	g_slist_free_full(cache->entries, cache_entry_free);
 	cache->entries = NULL;
 }
@@ -537,12 +543,26 @@ static int pbap_get(struct obex_session *os, void *user_data)
 
 	pbap->params = params;
 
+	DBG("cache check NAME='%s', FOLDER='%s', CACHEPATH='%s', VALID=%s",
+		name,
+		pbap->folder ? pbap->folder : "<null>",
+		pbap->cache.path ? pbap->cache.path : "<null>",
+		pbap->cache.valid ? "yes" : "no");
+
 	if (g_ascii_strcasecmp(type, PHONEBOOK_TYPE) == 0) {
 		/* Always contains the absolute path */
 		if (g_path_is_absolute(name))
 			path = g_strdup(name);
 		else
 			path = g_build_filename("/", name, NULL);
+
+		if (!pbap->cache.valid) {
+			g_free(pbap->cache.path);
+			pbap->cache.path = g_strdup(path);
+		} else if (g_strcmp0(path, pbap->cache.path)) {
+			invalidate_cache(&pbap->cache);
+			pbap->cache.path = g_strdup(path);
+		}
 
 	} else if (g_ascii_strcasecmp(type, VCARDLISTING_TYPE) == 0) {
 		/* Always relative */
@@ -552,15 +572,28 @@ static int pbap_get(struct obex_session *os, void *user_data)
 		} else {
 			/* Current folder + relative path */
 			path = g_build_filename(pbap->folder, name, NULL);
-
-			/* clear cache */
-			pbap->cache.valid = FALSE;
-			pbap->cache.index = 0;
-			cache_clear(&pbap->cache);
 		}
+
+		if (!pbap->cache.valid) {
+			g_free(pbap->cache.path);
+			pbap->cache.path = g_strdup(path);
+		} else if (g_strcmp0(path, pbap->cache.path)) {
+			invalidate_cache(&pbap->cache);
+			pbap->cache.path = g_strdup(path);
+		}
+
 	} else if (g_ascii_strcasecmp(type, VCARDENTRY_TYPE) == 0) {
 		/* File name only */
 		path = g_strdup(name);
+
+		if (!pbap->cache.valid) {
+			g_free(pbap->cache.path);
+			pbap->cache.path = g_strdup(pbap->folder);
+		} else if (g_strcmp0(pbap->folder, pbap->cache.path)) {
+			invalidate_cache(&pbap->cache);
+			pbap->cache.path = g_strdup(pbap->folder);
+		}
+
 	} else
 		return -EBADR;
 
@@ -602,9 +635,7 @@ static int pbap_setpath(struct obex_session *os, void *user_data)
 	/*
 	 * FIXME: Define a criteria to mark the cache as invalid
 	 */
-	pbap->cache.valid = FALSE;
-	pbap->cache.index = 0;
-	cache_clear(&pbap->cache);
+	invalidate_cache(&pbap->cache);
 
 	return 0;
 }
@@ -623,7 +654,7 @@ static void pbap_disconnect(struct obex_session *os, void *user_data)
 		g_free(pbap->params);
 	}
 
-	cache_clear(&pbap->cache);
+	invalidate_cache(&pbap->cache);
 	g_free(pbap->folder);
 	g_free(pbap);
 }
