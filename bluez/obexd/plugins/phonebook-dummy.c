@@ -324,7 +324,7 @@ static gboolean create_cache(void *user_data)
 	 */
 	foreach_vcard(query->dp, entry_notify, 0, 0xffff, query, NULL);
 
-	query->ready_cb(query->user_data);
+	query->ready_cb(query->user_data, 0);
 
 	return FALSE;
 }

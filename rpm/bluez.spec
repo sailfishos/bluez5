@@ -150,7 +150,8 @@ autoreconf --force --install
     --with-systemduserunitdir=/usr/lib/systemd/user \
     --enable-jolla-dbus-access \
     --enable-jolla-did \
-    --enable-jolla-logcontrol
+    --enable-jolla-logcontrol \
+    --with-phonebook=sailfish
 
 make %{?jobs:-j%jobs}
 
