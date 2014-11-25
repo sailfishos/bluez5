@@ -52,6 +52,9 @@ obexd_builtin_modules += mns
 obexd_builtin_sources += obexd/client/mns.c obexd/src/map_ap.h \
 				obexd/client/map-event.h
 
+obexd_builtin_sources += obexd/plugins/contentfilter.h \
+			obexd/plugins/contentfilter-@PLUGIN_CONTENTFILTER@.c
+
 libexec_PROGRAMS += obexd/src/obexd
 
 obexd_src_obexd_SOURCES = $(btio_sources) $(gobex_sources) \

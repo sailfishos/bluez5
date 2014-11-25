@@ -151,7 +151,8 @@ autoreconf --force --install
     --enable-jolla-dbus-access \
     --enable-jolla-did \
     --enable-jolla-logcontrol \
-    --with-phonebook=sailfish
+    --with-phonebook=sailfish \
+    --with-contentfilter=helperapp
 
 make %{?jobs:-j%jobs}
 
