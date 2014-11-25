@@ -676,6 +676,8 @@ int phonebook_pull_read(void *request)
 				cb,
 				data,
 				NULL);
+	dbus_message_unref(msg);
+
 	return 0;
 }
 
@@ -749,6 +751,7 @@ void *phonebook_get_entry(const char *folder, const char *id,
 				fetch_one_cb, 
 				data,
 				NULL);
+	dbus_message_unref(msg);
 
 	if (err)
 		*err = 0;
@@ -829,6 +832,7 @@ void *phonebook_create_cache(const char *name,
 				fetch_many_cb,
 				data,
 				NULL);
+	dbus_message_unref(msg);
 
 	if (err)
 		*err = 0;
@@ -845,8 +849,10 @@ void phonebook_req_finalize(void *request)
 	if (!data)
 		return;
 
-	if (data->pend != NULL)
+	if (data->pend != NULL) {
 		dbus_pending_call_cancel(data->pend);
+		dbus_pending_call_unref(data->pend);
+	}
 
 	g_free(data->pull_buf);
 	g_free(data->name);
