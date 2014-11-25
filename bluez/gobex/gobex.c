@@ -1706,6 +1706,8 @@ guint8 g_obex_errno_to_rsp(int err)
 	case -ENOTEMPTY:
 	case -EEXIST:
 		return G_OBEX_RSP_PRECONDITION_FAILED;
+	case -EMEDIUMTYPE:
+		return G_OBEX_RSP_UNSUPPORTED_MEDIA_TYPE;
 	default:
 		return G_OBEX_RSP_INTERNAL_SERVER_ERROR;
 	}
