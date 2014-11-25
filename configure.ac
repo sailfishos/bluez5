@@ -418,4 +418,12 @@ AC_ARG_ENABLE(jolla_did, AC_HELP_STRING([--enable-jolla-did],
 			 [enable_jolla_did=${enableval}])
 AM_CONDITIONAL(JOLLADIDPLUGIN, test "${enable_jolla_did}" = "yes")
 
+AC_ARG_WITH([phonebook], AC_HELP_STRING([--with-phonebook=PLUGIN],
+				[obexd phonebook plugin (default=dummy)]),
+					[plugin_phonebook=${withval}])
+if (test -z "${plugin_phonebook}"); then
+	plugin_phonebook=dummy
+fi
+AC_SUBST(PLUGIN_PHONEBOOK, [${plugin_phonebook}])
+
 AC_OUTPUT(Makefile src/bluetoothd.8 lib/bluez.pc)
