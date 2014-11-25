@@ -354,6 +354,26 @@ struct capability_object {
 	GString *buffer;
 };
 
+/*This function should be called after get capability object are done.
+  Close output & err pipe fds and free struct capability_object        */
+static void capability_deallocation(struct capability_object *object )
+{
+	DBG("");
+	if (object->output > 0) {
+		close(object->output);
+		object->output = -1;
+	}
+	if (object->err > 0) {
+		close(object->err);
+		object->err = -1;
+	}
+	
+	if (object->buffer != NULL)
+		g_string_free(object->buffer, TRUE);
+
+	g_free(object);
+}
+
 static void script_exited(GPid pid, int status, void *data)
 {
 	struct capability_object *object = data;
@@ -367,10 +387,8 @@ static void script_exited(GPid pid, int status, void *data)
 
 	/* free the object if aborted */
 	if (object->aborted) {
-		if (object->buffer != NULL)
-			g_string_free(object->buffer, TRUE);
+		capability_deallocation(object);
 
-		g_free(object);
 		return;
 	}
 
@@ -646,10 +664,7 @@ static int capability_close(void *object)
 	return 0;
 
 done:
-	if (obj->buffer != NULL)
-		g_string_free(obj->buffer, TRUE);
-
-	g_free(obj);
+	capability_deallocation(obj);
 
 	return err;
 }
