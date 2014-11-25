@@ -379,4 +379,12 @@ AC_ARG_ENABLE(jolla_logcontrol, AC_HELP_STRING([--enable-jolla-logcontrol],
 				[enable_jolla_logcontrol=${enableval}])
 AM_CONDITIONAL(JOLLALOGCONTROLPLUGIN, test "${enable_jolla_logcontrol}" = "yes")
 
+AC_ARG_WITH([phonebook], AC_HELP_STRING([--with-phonebook=PLUGIN],
+				[obexd phonebook plugin (default=dummy)]),
+					[plugin_phonebook=${withval}])
+if (test -z "${plugin_phonebook}"); then
+	plugin_phonebook=dummy
+fi
+AC_SUBST(PLUGIN_PHONEBOOK, [${plugin_phonebook}])
+
 AC_OUTPUT(Makefile src/bluetoothd.8 lib/bluez5.pc)
