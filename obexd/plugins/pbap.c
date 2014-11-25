@@ -220,7 +220,7 @@ static void query_result(const char *buffer, size_t bufsize, int vcards,
 	struct pbap_session *pbap = user_data;
 
 	DBG("size=%d, vcards=%d, lastpart=%s",
-		vcards, bufsize, lastpart ? "yes" : "no");
+		bufsize, vcards, lastpart ? "yes" : "no");
 
 	if (pbap->obj->request && lastpart) {
 		phonebook_req_finalize(pbap->obj->request);
