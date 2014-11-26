@@ -378,15 +378,6 @@ static void fetch_one_cb(DBusPendingCall *pend,
 
 	DBG("");
 
-	if (!g_strcmp0(data->name, PB_CONTACTS) ||
-		!g_strcmp0(data->name, PB_CONTACTS_FOLDER)) {
-		contacts_cb = TRUE;
-		signature = "u(ssss)";
-	} else {
-		contacts_cb = FALSE;
-		signature = "uu(ssss)";
-	}
-
 	reply = dbus_pending_call_steal_reply(data->pend);
 	if (reply == NULL)
 		return;
@@ -396,6 +387,15 @@ static void fetch_one_cb(DBusPendingCall *pend,
 	if (dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_ERROR) {
 		DBG("D-Bus error");
 		goto done;
+	}
+
+	if (!g_strcmp0(data->name, PB_CONTACTS) ||
+		!g_strcmp0(data->name, PB_CONTACTS_FOLDER)) {
+		contacts_cb = TRUE;
+		signature = "u(ssss)";
+	} else {
+		contacts_cb = FALSE;
+		signature = "uu(ssss)";
 	}
 
 	if (g_strcmp0(dbus_message_get_signature(reply), signature) != 0) {
@@ -448,15 +448,6 @@ static void fetch_many_cb(DBusPendingCall *pend,
 
 	DBG("");
 
-	if (!g_strcmp0(data->name, PB_CONTACTS) ||
-		!g_strcmp0(data->name, PB_CONTACTS_FOLDER)) {
-		contacts_cb = TRUE;
-		signature = "ua(ssss)";
-	} else {
-		contacts_cb = FALSE;
-		signature = "uua(ssss)";
-	}
-
 	reply = dbus_pending_call_steal_reply(data->pend);
 	if (reply == NULL)
 		return;
@@ -468,6 +459,15 @@ static void fetch_many_cb(DBusPendingCall *pend,
 	if (dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_ERROR) {
 		DBG("D-Bus error");
 		goto done;
+	}
+
+	if (!g_strcmp0(data->name, PB_CONTACTS) ||
+		!g_strcmp0(data->name, PB_CONTACTS_FOLDER)) {
+		contacts_cb = TRUE;
+		signature = "ua(ssss)";
+	} else {
+		contacts_cb = FALSE;
+		signature = "uua(ssss)";
 	}
 
 	if (g_strcmp0(dbus_message_get_signature(reply), signature) != 0) {
@@ -523,11 +523,9 @@ done:
 			data->chunk_offset < data->chunk_end) {
 		/* Full chunk read but not at the end -> read more later */
 		(data->process_end)(data, FALSE);
-
 	} else {
 		/* Everything read or error */
 		(data->process_end)(data, TRUE);
-
 	}
 }
 
