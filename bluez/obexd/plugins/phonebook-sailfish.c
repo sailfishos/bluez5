@@ -56,8 +56,13 @@
 
 #define VERSION_UNSET 0
 
-#define PB_FORMAT_VCARD21 0
-#define PB_FORMAT_VCARD30 1
+#define PB_FORMAT_VCARD21	0
+#define PB_FORMAT_VCARD30	1
+#define PB_FORMAT_NONE		2
+
+#define PB_FORMAT_VCARD21_STRING	"vcard21"
+#define PB_FORMAT_VCARD30_STRING	"vcard30"
+#define PB_FORMAT_NONE_STRING		"none"
 
 #define FILTER_BIT_MAX 28
 
@@ -141,7 +146,9 @@ static void append_filter(DBusMessage *msg, uint8_t format, uint64_t filter)
 		filter |= 
 			format == PB_FORMAT_VCARD30
 			? 0x87 /* VERSION, N, FN, TEL */
-			: 0x85 /* VERSION, N, TEL */;
+			: format == PB_FORMAT_VCARD21
+			? 0x85 /* VERSION, N, TEL */
+			: 0x00 /* Nothing (will be ignored anyway) */;
 		for (i = 0; i <= FILTER_BIT_MAX; i++) {
 			if (filter & (1ULL << i)) {
 				const char *f = filter_name[i];
@@ -174,6 +181,14 @@ static const char *name_to_calltype(const char *name)
 			g_strcmp0(name, PB_CALLS_COMBINED_FOLDER) == 0)
 		? "combined" :
 		NULL;
+}
+
+static const char *format_to_string(uint8_t format)
+{
+	return
+		format == PB_FORMAT_VCARD30 ? PB_FORMAT_VCARD30_STRING :
+		format == PB_FORMAT_VCARD21 ? PB_FORMAT_VCARD21_STRING :
+		PB_FORMAT_NONE_STRING;
 }
 
 static DBusMessage *next_chunk_request(struct phonebook_data *data,
@@ -665,9 +680,7 @@ int phonebook_pull_read(void *request)
 	if (!data)
 		return -ENOENT;
 
-	fmt = data->params->format == PB_FORMAT_VCARD30
-		? "vcard30"
-		: "vcard21";
+	fmt = format_to_string(data->params->format);
 
 	if (g_strcmp0(data->name, PB_CONTACTS) == 0) {
 
@@ -754,9 +767,7 @@ void *phonebook_get_entry(const char *folder, const char *id,
 	data->process = pull_process;
 	data->process_end = pull_end;
 
-	fmt = data->params->format == PB_FORMAT_VCARD30
-		? "vcard30"
-		: "vcard21";
+	fmt = format_to_string(data->params->format);
 
 	if (g_strcmp0(folder, PB_CONTACTS_FOLDER) == 0) {
 		DBG("Fetching contact entry");
@@ -810,12 +821,12 @@ void *phonebook_create_cache(const char *name,
 	static const struct apparam_field dummy_cache_params = {
 		.liststartoffset = 0,
 		.maxlistcount = ~0,
-		.format = PB_FORMAT_VCARD21,
+		.format = PB_FORMAT_NONE,
 		.filter = 0
 	};
 	struct phonebook_data *data;
 	DBusMessage *msg;
-	const char *fmt = "vcard21";
+	const char *fmt = NULL;
 
 	DBG("name %s", name);
 
@@ -844,6 +855,8 @@ void *phonebook_create_cache(const char *name,
 	data->chunk_offset = 0;
 	data->chunk_length = ~0;
 	data->chunk_end = ~0;
+
+	fmt = format_to_string(data->params->format);
 
 	if (g_strcmp0(name, PB_CONTACTS_FOLDER) == 0) {
 		DBG("Caching contacts");
