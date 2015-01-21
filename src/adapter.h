@@ -232,3 +232,5 @@ void btd_adapter_for_each_device(struct btd_adapter *adapter,
 
 bool btd_le_connect_before_pairing(void);
 
+int btd_adapter_set_did(struct btd_adapter *adapter, uint16_t vendor,
+			uint16_t product, uint16_t version, uint16_t source);
