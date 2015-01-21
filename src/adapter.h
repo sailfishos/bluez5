@@ -299,3 +299,6 @@ void btd_adapter_store_conn_param(struct btd_adapter *adapter,
 				const bdaddr_t *peer, uint8_t bdaddr_type,
 				uint16_t min_interval, uint16_t max_interval,
 				uint16_t latency, uint16_t timeout);
+
+int btd_adapter_set_did(struct btd_adapter *adapter, uint16_t vendor,
+			uint16_t product, uint16_t version, uint16_t source);
