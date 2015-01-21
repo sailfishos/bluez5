@@ -8944,7 +8944,7 @@ void adapter_foreach(adapter_cb func, gpointer user_data)
 	g_slist_foreach(adapters, (GFunc) func, user_data);
 }
 
-static int set_did(struct btd_adapter *adapter, uint16_t vendor,
+int btd_adapter_set_did(struct btd_adapter *adapter, uint16_t vendor,
 			uint16_t product, uint16_t version, uint16_t source)
 {
 	struct mgmt_cp_set_device_id cp;
@@ -9083,7 +9083,7 @@ load:
 		/* DeviceID record is added by sdpd-server before any other
 		 * record is registered. */
 		adapter_service_insert(adapter, sdp_record_find(0x10000));
-		set_did(adapter, btd_opts.did_vendor, btd_opts.did_product,
+		btd_adapter_set_did(adapter, btd_opts.did_vendor, btd_opts.did_product,
 				btd_opts.did_version, btd_opts.did_source);
 	}
 
