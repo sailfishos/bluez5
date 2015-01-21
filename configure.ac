@@ -484,5 +484,10 @@ AC_ARG_ENABLE(jolla_dbus_access, AC_HELP_STRING([--enable-jolla-dbus-access],
 				[enable_jolla_dbus_access=${enableval}])
 AM_CONDITIONAL(JOLLADBUSACCESSPLUGIN, test "${enable_jolla_dbus_access}" = "yes")
 
+AC_ARG_ENABLE(jolla_did, AC_HELP_STRING([--enable-jolla-did],
+			 [compile with Jolla device ID plugin]),
+			 [enable_jolla_did=${enableval}])
+AM_CONDITIONAL(JOLLADIDPLUGIN, test "${enable_jolla_did}" = "yes")
+
 AC_CONFIG_FILES(Makefile src/bluetoothd.rst lib/bluez.pc mesh/bluetooth-meshd.rst)
 AC_OUTPUT
