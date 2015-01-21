@@ -148,7 +148,8 @@ autoreconf --force --install
     --enable-test \
     --with-systemdsystemunitdir=/lib/systemd/system \
     --with-systemduserunitdir=/usr/lib/systemd/user \
-    --enable-jolla-dbus-access
+    --enable-jolla-dbus-access \
+    --enable-jolla-did
 
 make %{?jobs:-j%jobs}
 
