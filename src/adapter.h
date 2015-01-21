@@ -300,3 +300,6 @@ void btd_adapter_store_conn_param(struct btd_adapter *adapter,
 				uint16_t latency, uint16_t timeout);
 void btd_adapter_cancel_service_auth(struct btd_adapter *adapter,
 				struct btd_device *device);
+
+int btd_adapter_set_did(struct btd_adapter *adapter, uint16_t vendor,
+			uint16_t product, uint16_t version, uint16_t source);
