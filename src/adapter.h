@@ -320,3 +320,6 @@ unsigned int btd_adapter_send_cmd_event_sync(struct btd_adapter *adapter,
 					void *user_data,
 					btd_adapter_destroy_func_t destroy,
 					uint8_t timeout);
+
+int btd_adapter_set_did(struct btd_adapter *adapter, uint16_t vendor,
+			uint16_t product, uint16_t version, uint16_t source);

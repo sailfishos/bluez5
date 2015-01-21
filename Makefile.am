@@ -310,6 +310,11 @@ builtin_modules += jolla_dbus_access
 builtin_sources += plugins/jolla-dbus-access.c
 endif
 
+if JOLLADIDPLUGIN
+builtin_modules += jolla_did
+builtin_sources += plugins/jolla-did.c
+endif
+
 pkglibexec_PROGRAMS += src/bluetoothd
 
 bluetoothd_internal_sources = \
