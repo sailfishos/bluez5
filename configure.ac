@@ -466,5 +466,10 @@ if (test -z "${plugin_contentfilter}"); then
 fi
 AC_SUBST(PLUGIN_CONTENTFILTER, [${plugin_contentfilter}])
 
+AC_ARG_ENABLE(jolla_blacklist, AC_HELP_STRING([--enable-jolla-blacklist],
+		[enable obexd jolla-blacklist plugin]),
+		[enable_jolla_blacklist=${enableval}])
+AM_CONDITIONAL(JOLLABLACKLIST, test "${enable_jolla_blacklist}" = "yes")
+
 AC_CONFIG_FILES(Makefile src/bluetoothd.rst lib/bluez.pc mesh/bluetooth-meshd.rst)
 AC_OUTPUT
