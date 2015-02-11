@@ -36,6 +36,7 @@
 #include "obexd/src/service.h"
 #include "ftp.h"
 #include "filesystem.h"
+#include "access.h"
 
 #define LST_TYPE "x-obex/folder-listing"
 #define CAP_TYPE "x-obex/capability"
@@ -145,8 +146,7 @@ static int ftp_delete(struct ftp_session *ftp, const char *name)
 
 	path = g_build_filename(ftp->folder, name, NULL);
 
-	if (obex_remove(ftp->os, path) < 0)
-		ret = -errno;
+	ret = obex_remove(ftp->os, path);
 
 	g_free(path);
 
@@ -271,6 +271,12 @@ int ftp_setpath(struct obex_session *os, void *user_data)
 	if (err < 0)
 		goto done;
 
+	err = access_check(FTP_TARGET, TARGET_SIZE, ACCESS_OP_READ, fullname);
+	if (err < 0) {
+		DBG("access_check: %s(%d)", strerror(-err), -err);
+		goto done;
+	}
+
 	err = stat(fullname, &dstat);
 
 	if (err < 0) {
@@ -296,6 +302,12 @@ int ftp_setpath(struct obex_session *os, void *user_data)
 not_found:
 	if (nonhdr[0] != 0) {
 		err = -ENOENT;
+		goto done;
+	}
+
+	err = access_check(FTP_TARGET, TARGET_SIZE, ACCESS_OP_WRITE, fullname);
+	if (err < 0) {
+		DBG("access_check: %s(%d)", strerror(-err), -err);
 		goto done;
 	}
 
