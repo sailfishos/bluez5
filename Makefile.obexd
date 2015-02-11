@@ -57,6 +57,11 @@ obexd_builtin_sources += obexd/plugins/contentfilter.h \
 
 obexd_builtin_sources += obexd/src/access.c
 
+#if JOLLABLACKLIST
+obexd_builtin_modules += jolla_blacklist
+obexd_builtin_sources += obexd/plugins/jolla-blacklist.c
+#endif
+
 libexec_PROGRAMS += obexd/src/obexd
 
 obexd_src_obexd_SOURCES = $(btio_sources) $(gobex_sources) \
