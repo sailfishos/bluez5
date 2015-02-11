@@ -47,6 +47,7 @@
 #include "obexd/src/log.h"
 #include "obexd/src/mimetype.h"
 #include "filesystem.h"
+#include "access.h"
 
 #define EOL_CHARS "\n"
 
@@ -169,6 +170,21 @@ static void *filesystem_open(const char *name, int oflag, mode_t mode,
 	struct statvfs buf;
 	int fd, ret;
 	uint64_t avail;
+	enum access_op op;
+
+	if (oflag & O_CREAT)
+		op = ACCESS_OP_CREATE;
+	else if ((oflag & O_WRONLY) || (oflag & O_RDWR))
+		op = ACCESS_OP_WRITE;
+	else
+		op = ACCESS_OP_READ;
+
+	ret = access_check(FTP_TARGET, FTP_TARGET_SIZE, op, name);
+	if (ret < 0) {
+		if (err)
+			*err = ret;
+		return NULL;
+	}
 
 	fd = open(name, oflag, mode);
 	if (fd < 0) {
@@ -253,9 +269,41 @@ static ssize_t filesystem_write(void *object, const void *buf, size_t count)
 	return ret;
 }
 
+static int filesystem_remove(const char *name)
+{
+	int ret;
+
+	ret = access_check(FTP_TARGET, FTP_TARGET_SIZE, ACCESS_OP_DELETE, name);
+	if (ret < 0) {
+		error("remove(%s, %s): %s (%d)", name, name,
+						strerror(-ret), -ret);
+		return ret;
+	}
+
+	if (remove(name) < 0)
+		return -errno;
+
+	return 0;
+}
+
 static int filesystem_rename(const char *name, const char *destname)
 {
 	int ret;
+
+	ret = access_check(FTP_TARGET, FTP_TARGET_SIZE, ACCESS_OP_DELETE, name);
+	if (ret < 0) {
+		error("rename(%s, %s): %s (%d)", name, destname,
+						strerror(-ret), -ret);
+		return ret;
+	}
+
+	ret = access_check(FTP_TARGET, FTP_TARGET_SIZE, ACCESS_OP_CREATE,
+			destname);
+	if (ret < 0) {
+		error("rename(%s, %s): %s (%d)", name, destname,
+						strerror(-ret), -ret);
+		return ret;
+	}
 
 	ret = rename(name, destname);
 	if (ret < 0) {
@@ -429,6 +477,9 @@ static void *capability_open(const char *name, int oflag, mode_t mode,
 	if (oflag != O_RDONLY)
 		goto fail;
 
+	if (access_check(FTP_TARGET, FTP_TARGET_SIZE, ACCESS_OP_READ, name) < 0)
+		goto fail;
+
 	object = g_new0(struct capability_object, 1);
 	object->pid = -1;
 	object->output = -1;
@@ -492,11 +543,18 @@ static GString *append_listing(GString *object, const char *name,
 {
 	struct stat fstat, dstat;
 	struct dirent *ep;
-	DIR *dp;
+	DIR *dp = NULL;
 	gboolean root;
 	int ret;
 
 	root = g_str_equal(name, obex_option_root_folder());
+
+	ret = access_check(FTP_TARGET, FTP_TARGET_SIZE, ACCESS_OP_READ, name);
+	if (ret < 0) {
+		if (err)
+			*err = ret;
+		goto failed;
+	}
 
 	dp = opendir(name);
 	if (dp == NULL) {
@@ -527,6 +585,10 @@ static GString *append_listing(GString *object, const char *name,
 		char *line;
 
 		if (ep->d_name[0] == '.')
+			continue;
+
+		if (access_check_at(FTP_TARGET, FTP_TARGET_SIZE, ACCESS_OP_LIST,
+					name, ep->d_name) < 0)
 			continue;
 
 		filename = g_filename_to_utf8(ep->d_name, -1, NULL, NULL, NULL);
@@ -674,7 +736,7 @@ static struct obex_mime_type_driver file = {
 	.close = filesystem_close,
 	.read = filesystem_read,
 	.write = filesystem_write,
-	.remove = remove,
+	.remove = filesystem_remove,
 	.move = filesystem_rename,
 	.copy = filesystem_copy,
 };
