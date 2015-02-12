@@ -442,6 +442,12 @@ unit_test_gattrib_LDADD = lib/libbluetooth-internal.la \
 			src/libshared-glib.la \
 			@GLIB_LIBS@ @DBUS_LIBS@ -ldl -lrt
 
+unit_tests += unit/test-jolla-blacklist
+
+unit_test_jolla_blacklist_SOURCES = src/access.c src/access.h src/log.c \
+					src/log.h unit/test-jolla-blacklist.c
+unit_test_jolla_blacklist_LDADD = @GLIB_LIBS@
+
 if MIDI
 unit_tests += unit/test-midi
 unit_test_midi_CFLAGS = $(AM_CFLAGS) @ALSA_CFLAGS@ -DMIDI_TEST
