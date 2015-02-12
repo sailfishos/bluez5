@@ -708,6 +708,12 @@ unit_test_vcp_SOURCES = unit/test-vcp.c $(btio_sources)
 unit_test_vcp_LDADD = src/libshared-glib.la \
 				lib/libbluetooth-internal.la $(GLIB_LIBS)
 
+unit_tests += unit/test-jolla-blacklist
+
+unit_test_jolla_blacklist_SOURCES = src/access.c src/access.h src/log.c \
+					src/log.h unit/test-jolla-blacklist.c
+unit_test_jolla_blacklist_LDADD = @GLIB_LIBS@
+
 if MIDI
 unit_tests += unit/test-midi
 unit_test_midi_CPPFLAGS = $(AM_CPPFLAGS) $(ALSA_CFLAGS) -DMIDI_TEST
