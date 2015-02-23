@@ -18,6 +18,10 @@
 #define OBEX_MAS	(1 << 8)
 #define OBEX_MNS	(1 << 9)
 
+#define OBEX_ALL_SERVICES \
+	(OBEX_OPP | OBEX_FTP | OBEX_BIP | OBEX_PBAP | OBEX_IRMC |\
+		OBEX_PCSUITE | OBEX_SYNCEVOLUTION | OBEX_MAS)
+
 gboolean plugin_init(const char *pattern, const char *exclude);
 void plugin_cleanup(void);
 
@@ -28,3 +32,4 @@ gboolean obex_option_auto_accept(void);
 const char *obex_option_root_folder(void);
 gboolean obex_option_symlinks(void);
 const char *obex_option_capability(void);
+uint16_t obex_option_exclude(const char *transport);
