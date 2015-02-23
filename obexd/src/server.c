@@ -56,8 +56,7 @@ static void init_server(uint16_t service, GSList *transports)
 		struct obex_server *server;
 		int err;
 
-		if (transport->service != 0 &&
-				(transport->service & service) == FALSE)
+		if ((transport->service & service) == FALSE)
 			continue;
 
 		server = g_new0(struct obex_server, 1);
