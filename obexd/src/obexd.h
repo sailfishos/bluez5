@@ -9,6 +9,7 @@
  */
 
 #include <dbus/dbus.h>
+#include <stdint.h>
 
 #define OBEX_OPP	(1 << 1)
 #define OBEX_FTP	(1 << 2)
@@ -19,6 +20,10 @@
 #define OBEX_SYNCEVOLUTION	(1 << 7)
 #define OBEX_MAS	(1 << 8)
 #define OBEX_MNS	(1 << 9)
+
+#define OBEX_ALL_SERVICES \
+	(OBEX_OPP | OBEX_FTP | OBEX_BIP | OBEX_PBAP | OBEX_IRMC |\
+		OBEX_PCSUITE | OBEX_SYNCEVOLUTION | OBEX_MAS)
 
 void plugin_init(const char *pattern, const char *exclude);
 void plugin_cleanup(void);
@@ -33,3 +38,4 @@ const char *obex_option_capability(void);
 DBusConnection *obex_get_dbus_connection(void);
 DBusConnection *obex_setup_dbus_connection(const char *name,
 					DBusError *error);
+uint16_t obex_option_exclude(const char *transport);
