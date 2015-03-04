@@ -120,6 +120,33 @@ int verify_path(const char *path)
 	return ret;
 }
 
+static int verify_path_many(const char *path, const char *roots[])
+{
+	int i;
+	char *t;
+	int ret = 0;
+
+	if (obex_option_symlinks())
+		return 0;
+
+	t = realpath(path, NULL);
+	if (t == NULL)
+		return -errno;
+
+	ret = -EPERM;
+	for (i = 0; roots[i]; i++) {
+		if (g_str_has_prefix(t, roots[i])) {
+			ret = 0;
+			break;
+		}
+	}
+
+	free(t);
+
+	return ret;
+}
+
+
 static char *file_stat_line(char *filename, struct stat *fstat,
 					struct stat *dstat, gboolean root,
 					gboolean pcsuite)
@@ -163,8 +190,11 @@ static char *file_stat_line(char *filename, struct stat *fstat,
 	return ret;
 }
 
-static void *filesystem_open(const char *name, int oflag, mode_t mode,
-					void *context, size_t *size, int *err)
+static void *common_filesystem_open(const char *name, int oflag, mode_t mode,
+					void *context, size_t *size, int *err,
+					const uint8_t *target,
+					gsize target_size,
+					const char *roots[])
 {
 	struct stat stats;
 	struct statvfs buf;
@@ -179,7 +209,7 @@ static void *filesystem_open(const char *name, int oflag, mode_t mode,
 	else
 		op = ACCESS_OP_READ;
 
-	ret = access_check(FTP_TARGET, FTP_TARGET_SIZE, op, name);
+	ret = access_check(target, target_size, op, name);
 	if (ret < 0) {
 		if (err)
 			*err = ret;
@@ -199,7 +229,7 @@ static void *filesystem_open(const char *name, int oflag, mode_t mode,
 		goto failed;
 	}
 
-	ret = verify_path(name);
+	ret = verify_path_many(name, roots);
 	if (ret < 0) {
 		if (err)
 			*err = ret;
@@ -237,6 +267,30 @@ done:
 failed:
 	close(fd);
 	return NULL;
+}
+
+static void *filesystem_open(const char *name, int oflag, mode_t mode,
+				void *context, size_t *size, int *err)
+{
+	const char *roots[] = {
+		obex_option_root_folder(), NULL
+	};
+
+	DBG("name '%s'", name);
+	return common_filesystem_open(name, oflag, mode, context, size, err,
+					FTP_TARGET, FTP_TARGET_SIZE, roots);
+}
+
+static void *opp_filesystem_open(const char *name, int oflag, mode_t mode,
+				void *context, size_t *size, int *err)
+{
+	const char *roots[] = {
+		obex_option_root_folder(), g_get_tmp_dir(), NULL
+	};
+
+	DBG("name '%s'", name);
+	return common_filesystem_open(name, oflag, mode, context, size, err,
+					NULL, 0, roots);
 }
 
 static int filesystem_close(void *object)
@@ -731,7 +785,16 @@ done:
 	return err;
 }
 
+static struct obex_mime_type_driver opp_file = {
+	.open = opp_filesystem_open,
+	.close = filesystem_close,
+	.read = filesystem_read,
+	.write = filesystem_write,
+};
+
 static struct obex_mime_type_driver file = {
+	.target = FTP_TARGET,
+	.target_size = FTP_TARGET_SIZE,
 	.open = filesystem_open,
 	.close = filesystem_close,
 	.read = filesystem_read,
@@ -786,6 +849,10 @@ static int filesystem_init(void)
 	if (err < 0)
 		return err;
 
+	err = obex_mime_type_driver_register(&opp_file);
+	if (err < 0)
+		return err;
+
 	return obex_mime_type_driver_register(&file);
 }
 
@@ -793,6 +860,7 @@ static void filesystem_exit(void)
 {
 	obex_mime_type_driver_unregister(&folder);
 	obex_mime_type_driver_unregister(&capability);
+	obex_mime_type_driver_unregister(&opp_file);
 	obex_mime_type_driver_unregister(&file);
 }
 
