@@ -1361,7 +1361,10 @@ static GSList *caps_to_list(uint8_t *data, size_t size,
 static gboolean avdtp_unknown_cmd(struct avdtp *session, uint8_t transaction,
 							uint8_t signal_id)
 {
-	return avdtp_send(session, transaction, AVDTP_MSG_TYPE_GEN_REJECT,
+	uint8_t message_type = session->version < 0x0103
+		? 0x00
+		: AVDTP_MSG_TYPE_GEN_REJECT;
+	return avdtp_send(session, transaction, message_type,
 							signal_id, NULL, 0);
 }
 
