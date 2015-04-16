@@ -1037,7 +1037,28 @@ static struct obex_mime_type_driver mime_vcard = {
 static int pbap_init(void)
 {
 	int err;
+	GKeyFile *config = NULL;
 
+	config = g_key_file_new();
+	if (config == NULL)
+		goto init;
+
+	if (g_key_file_load_from_file(config, "/etc/obexd/pbap.conf",
+					G_KEY_FILE_NONE, NULL) == TRUE) {
+		gint channel;
+
+		/* returns 0 on error; 0 is also a reserved channel */
+		channel = g_key_file_get_integer(config, "PBAP", "Channel",
+						NULL);
+		if (channel >= 1 && channel <= 30) {
+			DBG("PBAP channel set to %d", channel);
+			pbap.channel = channel;
+		}
+	}
+
+	g_key_file_free(config);
+
+init:
 	err = phonebook_init();
 	if (err < 0)
 		return err;
