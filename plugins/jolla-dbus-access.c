@@ -94,8 +94,8 @@ static void busname_exit_callback(DBusConnection *conn, void *user_data)
 {
 	char *busname = user_data;
 	DBG("D-Bus name '%s' gone.", busname);
-	g_hash_table_remove(watch_hash, busname);
 	g_hash_table_remove(gid_hash, busname);
+	g_hash_table_remove(watch_hash, busname);
 }
 
 static void pid_query_result(DBusPendingCall *pend,
