@@ -374,4 +374,9 @@ AC_ARG_ENABLE(jolla_did, AC_HELP_STRING([--enable-jolla-did],
 			 [enable_jolla_did=${enableval}])
 AM_CONDITIONAL(JOLLADIDPLUGIN, test "${enable_jolla_did}" = "yes")
 
+AC_ARG_ENABLE(jolla_logcontrol, AC_HELP_STRING([--enable-jolla-logcontrol],
+				[compile with Jolla logcontrol plugin]),
+				[enable_jolla_logcontrol=${enableval}])
+AM_CONDITIONAL(JOLLALOGCONTROLPLUGIN, test "${enable_jolla_logcontrol}" = "yes")
+
 AC_OUTPUT(Makefile src/bluetoothd.8 lib/bluez5.pc)
