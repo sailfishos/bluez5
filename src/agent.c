@@ -1025,11 +1025,13 @@ static DBusMessage *request_default(DBusConnection *conn, DBusMessage *msg,
 static const GDBusMethodTable methods[] = {
 	{ GDBUS_METHOD("RegisterAgent",
 			GDBUS_ARGS({ "agent", "o"}, { "capability", "s" }),
-			NULL, register_agent) },
+			NULL, register_agent),
+		.privilege = BLUEZ_PRIVILEGED_ACCESS },
 	{ GDBUS_METHOD("UnregisterAgent", GDBUS_ARGS({ "agent", "o" }),
 			NULL, unregister_agent) },
 	{ GDBUS_METHOD("RequestDefaultAgent", GDBUS_ARGS({ "agent", "o" }),
-			NULL, request_default ) },
+			NULL, request_default ),
+		.privilege = BLUEZ_PRIVILEGED_ACCESS },
 	{ }
 };
 
