@@ -2447,6 +2447,13 @@ struct avdtp *avdtp_new(GIOChannel *chan, struct btd_device *device,
 	avdtp_set_state(session, AVDTP_SESSION_STATE_CONNECTING);
 
 	btd_device_add_uuid(device, ADVANCED_AUDIO_UUID);
+	if (!btd_opts.reverse_discovery) {
+		uint32_t class = btd_device_get_class(device);
+		if ((class & (1 << 21)) && (class & (1 << 18)))
+			btd_device_add_uuid(device, A2DP_SINK_UUID);
+		if ((class & (1 << 21)) && (class & (1 << 19)))
+			btd_device_add_uuid(device, A2DP_SOURCE_UUID);
+	}
 
 	session->io = g_io_channel_ref(chan);
 	session->io_id = g_io_add_watch(chan, G_IO_ERR | G_IO_HUP | G_IO_NVAL,
