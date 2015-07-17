@@ -1289,6 +1289,11 @@ static void abort_cfm(struct avdtp *session, struct avdtp_local_sep *sep,
 		return;
 	}
 
+	finalize_setup_errno(setup, -ECONNRESET, finalize_suspend,
+							finalize_resume,
+							finalize_config,
+							NULL);
+
 	setup_unref(setup);
 }
 
