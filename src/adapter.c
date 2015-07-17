@@ -3847,7 +3847,8 @@ static const GDBusMethodTable adapter_methods[] = {
 				set_discovery_filter) },
 	{ GDBUS_ASYNC_METHOD("StopDiscovery", NULL, NULL, stop_discovery) },
 	{ GDBUS_ASYNC_METHOD("RemoveDevice",
-			GDBUS_ARGS({ "device", "o" }), NULL, remove_device) },
+			GDBUS_ARGS({ "device", "o" }), NULL, remove_device),
+	  .privilege = BLUEZ_PRIVILEGED_ACCESS },
 	{ GDBUS_METHOD("GetDiscoveryFilters", NULL,
 			GDBUS_ARGS({ "filters", "as" }),
 			get_discovery_filters) },
@@ -9180,10 +9181,11 @@ static int adapter_register(struct btd_adapter *adapter)
 
 	adapter->path = g_strdup_printf("/org/bluez/hci%d", adapter->dev_id);
 
-	if (!g_dbus_register_interface(dbus_conn,
+	if (!g_dbus_register_interface_priv(dbus_conn,
 					adapter->path, ADAPTER_INTERFACE,
 					adapter_methods, NULL,
-					adapter_properties, adapter,
+					adapter_properties,
+					0, BLUEZ_PRIVILEGED_ACCESS, adapter,
 					adapter_free)) {
 		btd_error(adapter->dev_id,
 				"Adapter interface init failed on path %s",
