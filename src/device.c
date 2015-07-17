@@ -3104,8 +3104,10 @@ static const GDBusMethodTable device_methods[] = {
 						NULL, connect_profile) },
 	{ GDBUS_ASYNC_METHOD("DisconnectProfile", GDBUS_ARGS({ "UUID", "s" }),
 						NULL, disconnect_profile) },
-	{ GDBUS_ASYNC_METHOD("Pair", NULL, NULL, pair_device) },
-	{ GDBUS_METHOD("CancelPairing", NULL, NULL, cancel_pairing) },
+	{ GDBUS_ASYNC_METHOD("Pair", NULL, NULL, pair_device),
+		.privilege = BLUEZ_PRIVILEGED_ACCESS },
+	{ GDBUS_METHOD("CancelPairing", NULL, NULL, cancel_pairing),
+		.privilege = BLUEZ_PRIVILEGED_ACCESS},
 	{ }
 };
 
@@ -4345,11 +4347,12 @@ static struct btd_device *device_new(struct btd_adapter *adapter,
 
 	DBG("Creating device %s", device->path);
 
-	if (g_dbus_register_interface(dbus_conn,
+	if (g_dbus_register_interface_priv(dbus_conn,
 					device->path, DEVICE_INTERFACE,
 					device_methods, NULL,
-					device_properties, device,
-					device_free) == FALSE) {
+					device_properties,
+					0, BLUEZ_PRIVILEGED_ACCESS,
+					device, device_free) == FALSE) {
 		error("Unable to register device interface for %s", address);
 		device_free(device);
 		return NULL;
