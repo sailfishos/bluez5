@@ -241,6 +241,15 @@ gboolean g_dbus_register_interface(DBusConnection *connection,
 					const GDBusPropertyTable *properties,
 					void *user_data,
 					GDBusDestroyFunction destroy);
+gboolean g_dbus_register_interface_priv(DBusConnection *connection,
+					const char *path, const char *name,
+					const GDBusMethodTable *methods,
+					const GDBusSignalTable *signals,
+					const GDBusPropertyTable *properties,
+					unsigned int properties_get_privilege,
+					unsigned int properties_set_privilege,
+					void *user_data,
+					GDBusDestroyFunction destroy);
 gboolean g_dbus_unregister_interface(DBusConnection *connection,
 					const char *path, const char *name);
 

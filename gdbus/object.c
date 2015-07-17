@@ -49,6 +49,18 @@ struct generic_data {
 	struct generic_data *parent;
 };
 
+struct properties_data {
+	struct generic_data *parent;
+	GDBusMethodTable *methods;
+};
+
+static void properties_data_destroy(void *ptr)
+{
+	struct properties_data *data = ptr;
+	g_free(data->methods);
+	g_free(data);
+}
+
 struct interface_data {
 	char *name;
 	const GDBusMethodTable *methods;
@@ -785,7 +797,8 @@ static inline const GDBusPropertyTable *find_property(const GDBusPropertyTable *
 static DBusMessage *properties_get(DBusConnection *connection,
 					DBusMessage *message, void *user_data)
 {
-	struct generic_data *data = user_data;
+	struct properties_data *prop_data = user_data;
+	struct generic_data *data = prop_data->parent;
 	struct interface_data *iface;
 	const GDBusPropertyTable *property;
 	const char *interface, *name;
@@ -838,7 +851,8 @@ static DBusMessage *properties_get(DBusConnection *connection,
 static DBusMessage *properties_get_all(DBusConnection *connection,
 					DBusMessage *message, void *user_data)
 {
-	struct generic_data *data = user_data;
+	struct properties_data *prop_data = user_data;
+	struct generic_data *data = prop_data->parent;
 	struct interface_data *iface;
 	const char *interface;
 	DBusMessageIter iter;
@@ -868,7 +882,8 @@ static DBusMessage *properties_get_all(DBusConnection *connection,
 static DBusMessage *properties_set(DBusConnection *connection,
 					DBusMessage *message, void *user_data)
 {
-	struct generic_data *data = user_data;
+	struct properties_data *prop_data = user_data;
+	struct generic_data *data = prop_data->parent;
 	DBusMessageIter iter, sub;
 	struct interface_data *iface;
 	const GDBusPropertyTable *property;
@@ -1367,11 +1382,13 @@ static gboolean check_signal(DBusConnection *conn, const char *path,
 	return FALSE;
 }
 
-gboolean g_dbus_register_interface(DBusConnection *connection,
+gboolean g_dbus_register_interface_priv(DBusConnection *connection,
 					const char *path, const char *name,
 					const GDBusMethodTable *methods,
 					const GDBusSignalTable *signals,
 					const GDBusPropertyTable *properties,
+					unsigned int get_privilege,
+					unsigned int set_privilege,
 					void *user_data,
 					GDBusDestroyFunction destroy)
 {
@@ -1403,15 +1420,36 @@ gboolean g_dbus_register_interface(DBusConnection *connection,
 	}
 
 	if (properties != NULL && !find_interface(data->interfaces,
-						DBUS_INTERFACE_PROPERTIES))
+						DBUS_INTERFACE_PROPERTIES)) {
+		struct properties_data *p = g_new0(struct properties_data, 1);
+		p->parent = data;
+		p->methods = g_new0(GDBusMethodTable, 4);
+		memcpy(p->methods, properties_methods,
+					4*sizeof(GDBusMethodTable));
+		p->methods[0].privilege = get_privilege; /* Get */
+		p->methods[1].privilege = set_privilege; /* Set */
+		p->methods[2].privilege = get_privilege; /* GetAll */
 		add_interface(data, DBUS_INTERFACE_PROPERTIES,
-				properties_methods, properties_signals, NULL,
-				data, NULL);
-
+				p->methods, properties_signals, NULL,
+				p, properties_data_destroy);
+	}
 	g_free(data->introspect);
 	data->introspect = NULL;
 
 	return TRUE;
+}
+
+gboolean g_dbus_register_interface(DBusConnection *connection,
+					const char *path, const char *name,
+					const GDBusMethodTable *methods,
+					const GDBusSignalTable *signals,
+					const GDBusPropertyTable *properties,
+					void *user_data,
+					GDBusDestroyFunction destroy)
+{
+	return g_dbus_register_interface_priv(connection, path, name, methods,
+						signals, properties, 0, 0,
+						user_data, destroy);
 }
 
 gboolean g_dbus_unregister_interface(DBusConnection *connection,
