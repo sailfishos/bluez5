@@ -1,0 +1,2 @@
+TRACING=-d
+MGMT_DEBUG=1
