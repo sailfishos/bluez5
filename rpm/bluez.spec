@@ -116,8 +116,6 @@ Requires:   %{name} = %{version}-%{release}
 Summary:    OBEX server
 Group:      System/Daemons
 Requires:   %{name} = %{version}-%{release}
-#Requires:   bluez5-obexd-configs
-Requires:   bluez-obexd-configs
 Requires:   obex-capability
 Conflicts:  obexd
 Conflicts:  obexd-server
@@ -127,7 +125,6 @@ Conflicts:  obexd-server
 %package obexd-tools
 Summary:    Command line tools for OBEX
 Group:      Applications/System
-Requires:   obexd-server = %{version}-%{release}
 %description obexd-tools
 %{summary}.
 
