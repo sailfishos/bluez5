@@ -146,15 +146,8 @@ autoreconf --force --install
 
 %configure \
     --enable-option-checking \
-    --disable-static \
-    --enable-client \
-    --enable-cups \
     --enable-library \
-    --enable-monitor \
-    --enable-obex \
     --enable-sixaxis \
-    --enable-systemd \
-    --enable-tools \
     --enable-test \
     --with-systemdsystemunitdir=/lib/systemd/system \
     --with-systemduserunitdir=/usr/lib/systemd/user
@@ -182,6 +175,7 @@ ln -s ../bluetooth.service $RPM_BUILD_ROOT/%{_lib}/systemd/system/network.target
 install -d -m 0755 $RPM_BUILD_ROOT/%{_localstatedir}/lib/bluetooth
 
 # bluez configuration
+mkdir -p ${RPM_BUILD_ROOT}%{_sysconfdir}/bluetooth
 for CONFFILE in profiles/input/input.conf profiles/network/network.conf profiles/proximity/proximity.conf src/main.conf ; do
 install -v -m644 ${CONFFILE} ${RPM_BUILD_ROOT}%{_sysconfdir}/bluetooth/`basename ${CONFFILE}`
 done
@@ -292,7 +286,7 @@ systemctl-user daemon-reload ||:
 %files test
 %defattr(-,root,root,-)
 # >> files test
-%{_libdir}/bluez/test/*
+%{_libdir}/%{name}/test/*
 # << files test
 
 %files tools
