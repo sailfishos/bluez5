@@ -34,105 +34,117 @@ BuildRequires:  readline
 BuildRequires:  readline-devel
 BuildRequires:  automake
 BuildRequires:  autoconf
-#Conflicts: bluez
+Conflicts: %{name} <= 4.99
 
 %description
 %{summary}.
 
 %package configs-mer
-Summary:    Bluetooth default configuration
+Summary:    Bluetooth (bluez5) default configuration
 Group:      Applications/System
 Requires:   %{name} = %{version}-%{release}
-#Provides:   bluez5-configs
-#Conflicts:  bluez-configs-mer
+Provides:   bluez-configs-mer
+Conflicts:  bluez-configs-mer <= 4.99
 %description configs-mer
 %{summary}.
 
 %package cups
-Summary:    Bluetooth CUPS support
+Summary:    Bluetooth (bluez5) CUPS support
 Group:      System/Daemons
 Requires:   %{name} = %{version}-%{release}
 #Requires:   bluez5-libs = %{version}
-Requires:   bluez-libs = %{version}
+Provides:   bluez-cups
+#Requires:   bluez5-libs = %{version}
 Requires:   cups
-#Conflicts:  bluez-cups
+Conflicts:  bluez-cups <= 4.99
 %description cups
 %{summary}.
 
 %package doc
-Summary:    Bluetooth daemon documentation
+Summary:    Bluetooth (bluez5) daemon documentation
 Group:      Documentation
 Requires:   %{name} = %{version}-%{release}
-#Conflicts:  bluez-doc
+Provides:   bluez-doc
+Conflicts:  bluez-doc <= 4.99
 %description doc
 %{summary}.
 
 %package hcidump
-Summary:    Bluetooth packet analyzer
+Summary:    Bluetooth (bluez5) packet analyzer
 Group:      Applications/System
 Requires:   %{name} = %{version}-%{release}
-#Conflicts:  bluez-hcidump
+Provides:   bluez-hcidump
+Conflicts:  bluez-hcidump <= 4.99
 %description hcidump
 %{summary}.
 
 %package libs
-Summary:    Bluetooth library
+Summary:    Bluetooth (bluez5) library
 Group:      System/Libraries
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
-#Conflicts:  bluez-libs
+Provides:   bluez-libs
+Conflicts:  bluez-libs <= 4.99
 %description libs
 %{summary}.
 
 %package libs-devel
-Summary:    Bluetooth library development package
+Summary:    Bluetooth (bluez5) library development package
 Group:      Development/Libraries
 #Requires:   bluez5-libs = %{version}
+Provides:   bluez-libs-devel
 Requires:   bluez-libs = %{version}
-#Conflicts:  bluez-libs-devel
+Conflicts:  bluez-libs-devel <= 4.99
 %description libs-devel
 %{summary}.
 
 %package test
-Summary:    Test utilities for Bluetooth
+Summary:    Test utilities for Bluetooth (bluez5)
 Group:      Development/Tools
 Requires:   %{name} = %{version}-%{release}
 #Requires:   bluez5-libs = %{version}
 Requires:   bluez-libs = %{version}
 Requires:   dbus-python
 Requires:   pygobject2 >= 3.10.2
-#Conflicts:  bluez-test
+Provides:   bluez-test
+Conflicts:  bluez-test <= 4.99
 %description test
 %{summary}.
 
 %package tools
-Summary:    Command line tools for Bluetooth
+Summary:    Command line tools for Bluetooth (bluez5)
 Group:      Applications/System
 Requires:   %{name} = %{version}-%{release}
+Provides:   bluez-tools
+Conflicts:  bluez-tools <= 4.99
 %description tools
 %{summary}.
 
 %package obexd
-Summary:    OBEX server
+Summary:    OBEX server (bluez5)
 Group:      System/Daemons
 Requires:   %{name} = %{version}-%{release}
 Requires:   obex-capability
+Provides:   bluez-obexd
 Conflicts:  obexd
 Conflicts:  obexd-server
 %description obexd
 %{summary}.
 
 %package obexd-tools
-Summary:    Command line tools for OBEX
+Summary:    Command line tools for OBEX (bluez5)
 Group:      Applications/System
+Provides:   bluez-obexd-tools
+#Conflicts:  obexd-tools
 %description obexd-tools
 %{summary}.
 
 %package tracing
-Summary:    Configuration for bluez to enable tracing
+Summary:    Configuration for bluez5 to enable tracing
 Group:      Development/Tools
 Requires:   %{name} = %{version}-%{release}
-#Conflicts:  bluez-tracing
+Provides:   bluez-tracing
+Conflicts:  bluez-tracing <= 4.99
 %description tracing
 Will enable tracing for BlueZ
 
