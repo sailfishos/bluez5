@@ -43,8 +43,8 @@ Conflicts: %{name} <= 4.99
 Summary:    Bluetooth (bluez5) default configuration
 Group:      Applications/System
 Requires:   %{name} = %{version}-%{release}
-Provides:   bluez-configs-mer
-Conflicts:  bluez-configs-mer <= 4.99
+Provides:   bluez-configs
+Conflicts:  bluez-configs <= 4.99
 %description configs-mer
 %{summary}.
 
