@@ -1,11 +1,11 @@
-Name:       bluez
+Name:       bluez5
 
 # >> macros
 %define _system_groupadd() getent group %{1} >/dev/null || groupadd -g 1002 %{1}
 # << macros
 
 Summary:    Bluetooth daemon
-Version:    5.37
+Version:    5.39
 Release:    1
 Group:      Applications/System
 License:    GPLv2+
@@ -34,7 +34,7 @@ BuildRequires:  readline
 BuildRequires:  readline-devel
 BuildRequires:  automake
 BuildRequires:  autoconf
-Conflicts: %{name} <= 4.99
+Conflicts: bluez
 
 %description
 %{summary}.
@@ -43,8 +43,7 @@ Conflicts: %{name} <= 4.99
 Summary:    Bluetooth (bluez5) default configuration
 Group:      Applications/System
 Requires:   %{name} = %{version}-%{release}
-Provides:   bluez-configs
-Conflicts:  bluez-configs <= 4.99
+Conflicts:  bluez-configs
 %description configs-mer
 %{summary}.
 
@@ -52,11 +51,8 @@ Conflicts:  bluez-configs <= 4.99
 Summary:    Bluetooth (bluez5) CUPS support
 Group:      System/Daemons
 Requires:   %{name} = %{version}-%{release}
-#Requires:   bluez5-libs = %{version}
-Provides:   bluez-cups
-#Requires:   bluez5-libs = %{version}
 Requires:   cups
-Conflicts:  bluez-cups <= 4.99
+Conflicts:  bluez-cups
 %description cups
 %{summary}.
 
@@ -64,8 +60,7 @@ Conflicts:  bluez-cups <= 4.99
 Summary:    Bluetooth (bluez5) daemon documentation
 Group:      Documentation
 Requires:   %{name} = %{version}-%{release}
-Provides:   bluez-doc
-Conflicts:  bluez-doc <= 4.99
+Conflicts:  bluez-doc
 %description doc
 %{summary}.
 
@@ -73,8 +68,7 @@ Conflicts:  bluez-doc <= 4.99
 Summary:    Bluetooth (bluez5) packet analyzer
 Group:      Applications/System
 Requires:   %{name} = %{version}-%{release}
-Provides:   bluez-hcidump
-Conflicts:  bluez-hcidump <= 4.99
+Conflicts:  bluez-hcidump
 %description hcidump
 %{summary}.
 
@@ -83,18 +77,15 @@ Summary:    Bluetooth (bluez5) library
 Group:      System/Libraries
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
-Provides:   bluez-libs
-Conflicts:  bluez-libs <= 4.99
+Conflicts:  bluez-libs
 %description libs
 %{summary}.
 
 %package libs-devel
 Summary:    Bluetooth (bluez5) library development package
 Group:      Development/Libraries
-#Requires:   bluez5-libs = %{version}
-Provides:   bluez-libs-devel
 Requires:   bluez-libs = %{version}
-Conflicts:  bluez-libs-devel <= 4.99
+Conflicts:  bluez-libs-devel
 %description libs-devel
 %{summary}.
 
@@ -102,12 +93,10 @@ Conflicts:  bluez-libs-devel <= 4.99
 Summary:    Test utilities for Bluetooth (bluez5)
 Group:      Development/Tools
 Requires:   %{name} = %{version}-%{release}
-#Requires:   bluez5-libs = %{version}
-Requires:   bluez-libs = %{version}
+Requires:   %{name}-libs = %{version}
 Requires:   dbus-python
 Requires:   pygobject2 >= 3.10.2
-Provides:   bluez-test
-Conflicts:  bluez-test <= 4.99
+Conflicts:  bluez-test
 %description test
 %{summary}.
 
@@ -115,8 +104,7 @@ Conflicts:  bluez-test <= 4.99
 Summary:    Command line tools for Bluetooth (bluez5)
 Group:      Applications/System
 Requires:   %{name} = %{version}-%{release}
-Provides:   bluez-tools
-Conflicts:  bluez-tools <= 4.99
+Conflicts:  bluez-tools
 %description tools
 %{summary}.
 
@@ -125,7 +113,6 @@ Summary:    OBEX server (bluez5)
 Group:      System/Daemons
 Requires:   %{name} = %{version}-%{release}
 Requires:   obex-capability
-Provides:   bluez-obexd
 Conflicts:  obexd
 Conflicts:  obexd-server
 %description obexd
@@ -134,8 +121,6 @@ Conflicts:  obexd-server
 %package obexd-tools
 Summary:    Command line tools for OBEX (bluez5)
 Group:      Applications/System
-Provides:   bluez-obexd-tools
-#Conflicts:  obexd-tools
 %description obexd-tools
 %{summary}.
 
@@ -143,13 +128,12 @@ Provides:   bluez-obexd-tools
 Summary:    Configuration for bluez5 to enable tracing
 Group:      Development/Tools
 Requires:   %{name} = %{version}-%{release}
-Provides:   bluez-tracing
-Conflicts:  bluez-tracing <= 4.99
+Conflicts:  bluez-tracing
 %description tracing
 Will enable tracing for BlueZ
 
 %prep
-%setup -q -n %{name}-%{version}/%{name}
+%setup -q -n %{name}-%{version}/bluez
 
 ./bootstrap
 
@@ -184,7 +168,7 @@ ln -s ../bluetooth.service $RPM_BUILD_ROOT/%{_lib}/systemd/system/network.target
 (cd $RPM_BUILD_ROOT/%{_lib}/systemd/system && ln -s bluetooth.service dbus-org.bluez.service)
 
 # bluez runtime files
-install -d -m 0755 $RPM_BUILD_ROOT/%{_localstatedir}/lib/bluetooth
+install -d -m 0755 $RPM_BUILD_ROOT/{}{{_localstatedir}/lib/bluetooth
 
 # bluez configuration
 mkdir -p ${RPM_BUILD_ROOT}%{_sysconfdir}/bluetooth
@@ -298,7 +282,7 @@ systemctl-user daemon-reload ||:
 %files test
 %defattr(-,root,root,-)
 # >> files test
-%{_libdir}/%{name}/test/*
+%{_libdir}/bluez/test/*
 # << files test
 
 %files tools
