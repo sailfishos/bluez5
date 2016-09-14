@@ -12,7 +12,7 @@ License:    GPLv2+
 URL:        http://www.bluez.org/
 Source0:    http://www.kernel.org/pub/linux/bluetooth/%{name}-%{version}.tar.gz
 Source1:    bluez.tracing
-Requires:   bluez-libs = %{version}
+Requires:   bluez5-libs = %{version}
 Requires:   dbus >= 0.60
 Requires:   hwdata >= 0.215
 Requires:   bluez-configs
@@ -168,7 +168,7 @@ ln -s ../bluetooth.service $RPM_BUILD_ROOT/%{_lib}/systemd/system/network.target
 (cd $RPM_BUILD_ROOT/%{_lib}/systemd/system && ln -s bluetooth.service dbus-org.bluez.service)
 
 # bluez runtime files
-install -d -m 0755 $RPM_BUILD_ROOT/{}{{_localstatedir}/lib/bluetooth
+install -d -m 0755 $RPM_BUILD_ROOT/%{_localstatedir}/lib/bluetooth
 
 # bluez configuration
 mkdir -p ${RPM_BUILD_ROOT}%{_sysconfdir}/bluetooth
