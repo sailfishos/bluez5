@@ -84,7 +84,7 @@ Conflicts:  bluez-libs
 %package libs-devel
 Summary:    Bluetooth (bluez5) library development package
 Group:      Development/Libraries
-Requires:   bluez-libs = %{version}
+Requires:   bluez5-libs = %{version}
 Conflicts:  bluez-libs-devel
 %description libs-devel
 %{summary}.
