@@ -11,7 +11,9 @@ Group:      Applications/System
 License:    GPLv2+
 URL:        http://www.bluez.org/
 Source0:    http://www.kernel.org/pub/linux/bluetooth/%{name}-%{version}.tar.gz
-Source1:    bluez.tracing
+Source1:    obexd-wrapper
+Source2:    obexd.conf
+Source3:    bluez.tracing
 Requires:   bluez5-libs = %{version}
 Requires:   dbus >= 0.60
 Requires:   hwdata >= 0.215
@@ -184,10 +186,18 @@ install -v -m644 ${CONFFILE} ${RPM_BUILD_ROOT}%{_sysconfdir}/bluetooth/`basename
 done
 
 mkdir -p %{buildroot}%{_sysconfdir}/tracing/bluez/
-cp -a %{SOURCE1} %{buildroot}%{_sysconfdir}/tracing/bluez/
+cp -a %{SOURCE3} %{buildroot}%{_sysconfdir}/tracing/bluez/
 
 # obexd systemd/D-Bus integration
 (cd $RPM_BUILD_ROOT/%{_libdir}/systemd/user && ln -s obex.service dbus-org.bluez.obex.service)
+
+# obexd wrapper
+install -m755 -D %{SOURCE1} ${RPM_BUILD_ROOT}/%{_libexecdir}/obexd-wrapper
+install -m644 -D %{SOURCE2} ${RPM_BUILD_ROOT}/%{_sysconfdir}/obexd.conf
+sed -i 's,Exec=.*,Exec=/usr/libexec/obexd-wrapper,' \
+    ${RPM_BUILD_ROOT}/%{_datadir}/dbus-1/services/org.bluez.obex.service
+sed -i 's,ExecStart=.*,ExecStart=/usr/libexec/obexd-wrapper,' \
+${RPM_BUILD_ROOT}/%{_libdir}/systemd/user/obex.service
 
 # obexd configuration
 mkdir -p ${RPM_BUILD_ROOT}/%{_sysconfdir}/obexd/{plugins,noplugins}
@@ -319,11 +329,12 @@ systemctl-user daemon-reload ||:
 %files obexd
 %defattr(-,root,root,-)
 # >> files obexd
-#%config %{_sysconfdir}/obexd.conf
+%config %{_sysconfdir}/obexd.conf
 %dir %{_sysconfdir}/obexd/
 %dir %{_sysconfdir}/obexd/plugins/
 %dir %{_sysconfdir}/obexd/noplugins/
 %attr(2755,root,privileged) %{_libexecdir}/bluetooth/obexd
+%{_libexecdir}/obexd-wrapper
 %{_datadir}/dbus-1/services/org.bluez.obex.service
 %{_libdir}/systemd/user/obex.service
 %{_libdir}/systemd/user/dbus-org.bluez.obex.service
