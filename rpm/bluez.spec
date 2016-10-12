@@ -15,7 +15,7 @@ Source1:    bluez.tracing
 Requires:   bluez5-libs = %{version}
 Requires:   dbus >= 0.60
 Requires:   hwdata >= 0.215
-Requires:   bluez-configs
+Requires:   bluez5-configs
 Requires:   systemd
 Requires:   oneshot
 Requires(pre): /usr/sbin/groupadd
@@ -43,7 +43,8 @@ Conflicts: bluez
 Summary:    Bluetooth (bluez5) default configuration
 Group:      Applications/System
 Requires:   %{name} = %{version}-%{release}
-Conflicts:  bluez-configs
+Provides:   bluez5-configs
+Conflicts:  bluez-configs-mer
 %description configs-mer
 %{summary}.
 
