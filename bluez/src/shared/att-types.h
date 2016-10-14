@@ -31,10 +31,15 @@
 #define BT_ATT_SECURITY_LOW	1
 #define BT_ATT_SECURITY_MEDIUM	2
 #define BT_ATT_SECURITY_HIGH	3
+#define BT_ATT_SECURITY_FIPS	4
 
 #define BT_ATT_DEFAULT_LE_MTU	23
 #define BT_ATT_MAX_LE_MTU	517
 #define BT_ATT_MAX_VALUE_LEN	512
+
+#define BT_ATT_LINK_BREDR	0x00
+#define BT_ATT_LINK_LE		0x01
+#define BT_ATT_LINK_LOCAL	0xff
 
 /* ATT protocol opcodes */
 #define BT_ATT_OP_ERROR_RSP			0x01
@@ -123,6 +128,10 @@ struct bt_att_pdu_error_rsp {
 					BT_ATT_PERM_WRITE_AUTHEN)
 #define BT_ATT_PERM_AUTHOR		0x40
 #define BT_ATT_PERM_NONE		0x80
+#define BT_ATT_PERM_READ_SECURE		0x0100
+#define BT_ATT_PERM_WRITE_SECURE	0x0200
+#define BT_ATT_PERM_SECURE		(BT_ATT_PERM_READ_SECURE | \
+					BT_ATT_PERM_WRITE_SECURE)
 
 /* GATT Characteristic Properties Bitfield values */
 #define BT_GATT_CHRC_PROP_BROADCAST			0x01

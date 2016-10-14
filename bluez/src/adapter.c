@@ -2187,9 +2187,7 @@ static bool parse_transport(DBusMessageIter *value, uint8_t *transport)
 		*transport = SCAN_TYPE_BREDR;
 	else if (!strcmp(transport_str, "le"))
 		*transport = SCAN_TYPE_LE;
-	else if (!strcmp(transport_str, "auto"))
-		*transport = SCAN_TYPE_DUAL;
-	else
+	else if (strcmp(transport_str, "auto"))
 		return false;
 
 	return true;
@@ -2220,8 +2218,9 @@ static bool parse_discovery_filter_entry(char *key, DBusMessageIter *value,
  * successful, sets *filter to proper value.
  * Returns false on any error, and true on success.
  */
-static bool parse_discovery_filter_dict(struct discovery_filter **filter,
-							DBusMessage *msg)
+static bool parse_discovery_filter_dict(struct btd_adapter *adapter,
+					struct discovery_filter **filter,
+					DBusMessage *msg)
 {
 	DBusMessageIter iter, subiter, dictiter, variantiter;
 	bool is_empty = true;
@@ -2233,7 +2232,7 @@ static bool parse_discovery_filter_dict(struct discovery_filter **filter,
 	(*filter)->uuids = NULL;
 	(*filter)->pathloss = DISTANCE_VAL_INVALID;
 	(*filter)->rssi = DISTANCE_VAL_INVALID;
-	(*filter)->type = SCAN_TYPE_DUAL;
+	(*filter)->type = get_scan_type(adapter);
 
 	dbus_message_iter_init(msg, &iter);
 	if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_ARRAY ||
@@ -2308,7 +2307,7 @@ static DBusMessage *set_discovery_filter(DBusConnection *conn,
 		return btd_error_not_supported(msg);
 
 	/* parse parameters */
-	if (!parse_discovery_filter_dict(&discovery_filter, msg))
+	if (!parse_discovery_filter_dict(adapter, &discovery_filter, msg))
 		return btd_error_invalid_args(msg);
 
 	is_discovering = get_discovery_client(adapter, sender, &client);
@@ -5451,7 +5450,7 @@ static void update_found_devices(struct btd_adapter *adapter,
 	memset(&eir_data, 0, sizeof(eir_data));
 	eir_parse(&eir_data, data, data_len);
 
-	if (bdaddr_type == BDADDR_BREDR)
+	if (bdaddr_type == BDADDR_BREDR || adapter->filtered_discovery)
 		discoverable = true;
 	else
 		discoverable = eir_data.flags & (EIR_LIM_DISC | EIR_GEN_DISC);
@@ -5489,8 +5488,11 @@ static void update_found_devices(struct btd_adapter *adapter,
 	 * supports this we can make the non-zero check conditional.
 	 */
 	if (bdaddr_type != BDADDR_BREDR && eir_data.flags &&
-					!(eir_data.flags & EIR_BREDR_UNSUP))
+					!(eir_data.flags & EIR_BREDR_UNSUP)) {
 		device_set_bredr_support(dev);
+		/* Update last seen for BR/EDR in case its flag is set */
+		device_update_last_seen(dev, BDADDR_BREDR);
+	}
 
 	if (eir_data.name != NULL && eir_data.name_complete)
 		device_store_cached_name(dev, eir_data.name);
@@ -8063,7 +8065,7 @@ static void index_added(uint16_t index, uint16_t length, const void *param,
 
 	adapter = btd_adapter_new(index);
 	if (!adapter) {
-		btd_error(adapter->dev_id,
+		btd_error(index,
 			"Unable to create new adapter for index %u", index);
 		return;
 	}

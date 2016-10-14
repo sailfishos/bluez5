@@ -49,6 +49,10 @@
 #define BTSNOOP_OPCODE_VENDOR_DIAG	11
 #define BTSNOOP_OPCODE_SYSTEM_NOTE	12
 #define BTSNOOP_OPCODE_USER_LOGGING	13
+#define BTSNOOP_OPCODE_CTRL_OPEN	14
+#define BTSNOOP_OPCODE_CTRL_CLOSE	15
+#define BTSNOOP_OPCODE_CTRL_COMMAND	16
+#define BTSNOOP_OPCODE_CTRL_EVENT	17
 
 #define BTSNOOP_MAX_PACKET_SIZE		(1486 + 4)
 
@@ -62,6 +66,9 @@
 #define BTSNOOP_BUS_RS232	4
 #define BTSNOOP_BUS_PCI		5
 #define BTSNOOP_BUS_SDIO	6
+#define BTSNOOP_BUS_SPI		7
+#define BTSNOOP_BUS_I2C		8
+#define BTSNOOP_BUS_SMD		9
 
 struct btsnoop_opcode_new_index {
 	uint8_t  type;
@@ -99,11 +106,11 @@ void btsnoop_unref(struct btsnoop *btsnoop);
 
 uint32_t btsnoop_get_format(struct btsnoop *btsnoop);
 
-bool btsnoop_write(struct btsnoop *btsnoop, struct timeval *tv,
-			uint32_t flags, const void *data, uint16_t size);
+bool btsnoop_write(struct btsnoop *btsnoop, struct timeval *tv, uint32_t flags,
+			uint32_t drops, const void *data, uint16_t size);
 bool btsnoop_write_hci(struct btsnoop *btsnoop, struct timeval *tv,
-					uint16_t index, uint16_t opcode,
-					const void *data, uint16_t size);
+			uint16_t index, uint16_t opcode, uint32_t drops,
+			const void *data, uint16_t size);
 bool btsnoop_write_phy(struct btsnoop *btsnoop, struct timeval *tv,
 			uint16_t frequency, const void *data, uint16_t size);
 

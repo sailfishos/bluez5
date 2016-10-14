@@ -360,7 +360,7 @@ const char *bt_compidtostr(int compid)
 	case 48:
 		return "ST Microelectronics";
 	case 49:
-		return "Synopsis";
+		return "Synopsys, Inc.";
 	case 50:
 		return "Red-M (Communications) Ltd";
 	case 51:
@@ -540,7 +540,7 @@ const char *bt_compidtostr(int compid)
 	case 138:
 		return "Jawbone";
 	case 139:
-		return "Topcorn Positioning Systems, LLC";
+		return "Topcon Positioning Systems, LLC";
 	case 140:
 		return "Gimbal Inc. (formerly Qualcomm Labs, Inc. and Qualcomm Retail Solutions, Inc.)";
 	case 141:
@@ -548,7 +548,7 @@ const char *bt_compidtostr(int compid)
 	case 142:
 		return "Quintic Corp.";
 	case 143:
-		return "Stollman E+V GmbH";
+		return "Telit Wireless Solutions GmbH (Formerly Stollman E+V GmbH)";
 	case 144:
 		return "Funai Electric Co., Ltd.";
 	case 145:
@@ -836,7 +836,7 @@ const char *bt_compidtostr(int compid)
 	case 286:
 		return "Skoda Auto a.s.";
 	case 287:
-		return "Volkswagon AG";
+		return "Volkswagen AG";
 	case 288:
 		return "Porsche AG";
 	case 289:
@@ -1078,7 +1078,7 @@ const char *bt_compidtostr(int compid)
 	case 407:
 		return "WiSilica Inc";
 	case 408:
-		return "Vengit Limited";
+		return "VENGIT Korlátolt Felelősségű Társaság";
 	case 409:
 		return "SALTO SYSTEMS S.L.";
 	case 410:
@@ -1953,6 +1953,346 @@ const char *bt_compidtostr(int compid)
 		return "HM Electronics, Inc.";
 	case 845:
 		return "TASER International, Inc.";
+	case 846:
+		return "Safe Trust Inc.";
+	case 847:
+		return "Heartland Payment Systems";
+	case 848:
+		return "Bitstrata Systems Inc.";
+	case 849:
+		return "Pieps GmbH";
+	case 850:
+		return "iRiding(Xiamen)Technology Co.,Ltd.";
+	case 851:
+		return "Alpha Audiotronics, Inc.";
+	case 852:
+		return "TOPPAN FORMS CO.,LTD.";
+	case 853:
+		return "Sigma Designs, Inc.";
+	case 854:
+		return "Spectrum Brands, Inc.";
+	case 855:
+		return "Polymap Wireless";
+	case 856:
+		return "MagniWare Ltd.";
+	case 857:
+		return "Novotec Medical GmbH";
+	case 858:
+		return "Medicom Innovation Partner a/s";
+	case 859:
+		return "Matrix Inc.";
+	case 860:
+		return "Eaton Corporation";
+	case 861:
+		return "KYS";
+	case 862:
+		return "Naya Health, Inc.";
+	case 863:
+		return "Acromag";
+	case 864:
+		return "Insulet Corporation";
+	case 865:
+		return "Wellinks Inc.";
+	case 866:
+		return "ON Semiconductor";
+	case 867:
+		return "FREELAP SA";
+	case 868:
+		return "Favero Electronics Srl";
+	case 869:
+		return "BioMech Sensor LLC";
+	case 870:
+		return "BOLTT Sports technologies Private limited";
+	case 871:
+		return "Saphe International";
+	case 872:
+		return "Metormote AB";
+	case 873:
+		return "littleBits";
+	case 874:
+		return "SetPoint Medical";
+	case 875:
+		return "BRControls Products BV";
+	case 876:
+		return "Zipcar";
+	case 877:
+		return "AirBolt Pty Ltd";
+	case 878:
+		return "KeepTruckin Inc";
+	case 879:
+		return "Motiv, Inc.";
+	case 880:
+		return "Wazombi Labs OÜ";
+	case 881:
+		return "ORBCOMM";
+	case 882:
+		return "Nixie Labs, Inc.";
+	case 883:
+		return "AppNearMe Ltd";
+	case 884:
+		return "Holman Industries";
+	case 885:
+		return "Expain AS";
+	case 886:
+		return "Electronic Temperature Instruments Ltd";
+	case 887:
+		return "Plejd AB";
+	case 888:
+		return "Propeller Health";
+	case 889:
+		return "Shenzhen iMCO Electronic Technology Co.,Ltd";
+	case 890:
+		return "Algoria";
+	case 891:
+		return "Apption Labs Inc.";
+	case 892:
+		return "Cronologics Corporation";
+	case 893:
+		return "MICRODIA Ltd.";
+	case 894:
+		return "lulabytes S.L.";
+	case 895:
+		return "Nestec S.A.";
+	case 896:
+		return "LLC \"MEGA-F service\"";
+	case 897:
+		return "Sharp Corporation";
+	case 898:
+		return "Precision Outcomes Ltd";
+	case 899:
+		return "Kronos Incorporated";
+	case 900:
+		return "OCOSMOS Co., Ltd.";
+	case 901:
+		return "Embedded Electronic Solutions Ltd. dba e2Solutions";
+	case 902:
+		return "Aterica Inc.";
+	case 903:
+		return "BluStor PMC, Inc.";
+	case 904:
+		return "Kapsch TrafficCom AB";
+	case 905:
+		return "ActiveBlu Corporation";
+	case 906:
+		return "Kohler Mira Limited";
+	case 907:
+		return "Noke";
+	case 908:
+		return "Appion Inc.";
+	case 909:
+		return "Resmed Ltd";
+	case 910:
+		return "Crownstone B.V.";
+	case 911:
+		return "Xiaomi Inc.";
+	case 912:
+		return "INFOTECH s.r.o.";
+	case 913:
+		return "Thingsquare AB";
+	case 914:
+		return "T&D";
+	case 915:
+		return "LAVAZZA S.p.A.";
+	case 916:
+		return "Netclearance Systems, Inc.";
+	case 917:
+		return "SDATAWAY";
+	case 918:
+		return "BLOKS GmbH";
+	case 919:
+		return "LEGO System A/S";
+	case 920:
+		return "Thetatronics Ltd";
+	case 921:
+		return "Nikon Corporation";
+	case 922:
+		return "NeST";
+	case 923:
+		return "South Silicon Valley Microelectronics";
+	case 924:
+		return "ALE International";
+	case 925:
+		return "CareView Communications, Inc.";
+	case 926:
+		return "SchoolBoard Limited";
+	case 927:
+		return "Molex Corporation";
+	case 928:
+		return "IVT Wireless Limited";
+	case 929:
+		return "Alpine Labs LLC";
+	case 930:
+		return "Candura Instruments";
+	case 931:
+		return "SmartMovt Technology Co., Ltd";
+	case 932:
+		return "Token Zero Ltd";
+	case 933:
+		return "ACE CAD Enterprise Co., Ltd. (ACECAD)";
+	case 934:
+		return "Medela, Inc";
+	case 935:
+		return "AeroScout";
+	case 936:
+		return "Esrille Inc.";
+	case 937:
+		return "THINKERLY SRL";
+	case 938:
+		return "Exon Sp. z o.o.";
+	case 939:
+		return "Meizu Technology Co., Ltd.";
+	case 940:
+		return "Smablo LTD";
+	case 941:
+		return "XiQ";
+	case 942:
+		return "Allswell Inc.";
+	case 943:
+		return "Comm-N-Sense Corp DBA Verigo";
+	case 944:
+		return "VIBRADORM GmbH";
+	case 945:
+		return "Otodata Wireless Network Inc.";
+	case 946:
+		return "Propagation Systems Limited";
+	case 947:
+		return "Midwest Instruments & Controls";
+	case 948:
+		return "Alpha Nodus, inc.";
+	case 949:
+		return "petPOMM, Inc";
+	case 950:
+		return "Mattel";
+	case 951:
+		return "Airbly Inc.";
+	case 952:
+		return "A-Safe Limited";
+	case 953:
+		return "FREDERIQUE CONSTANT SA";
+	case 954:
+		return "Maxscend Microelectronics Company Limited";
+	case 955:
+		return "Abbott Diabetes Care";
+	case 956:
+		return "ASB Bank Ltd";
+	case 957:
+		return "amadas";
+	case 958:
+		return "Applied Science, Inc.";
+	case 959:
+		return "iLumi Solutions Inc.";
+	case 960:
+		return "Arch Systems Inc.";
+	case 961:
+		return "Ember Technologies, Inc.";
+	case 962:
+		return "Snapchat Inc";
+	case 963:
+		return "Casambi Technologies Oy";
+	case 964:
+		return "Pico Technology Inc.";
+	case 965:
+		return "St. Jude Medical, Inc.";
+	case 966:
+		return "Intricon";
+	case 967:
+		return "Structural Health Systems, Inc.";
+	case 968:
+		return "Avvel International";
+	case 969:
+		return "Gallagher Group";
+	case 970:
+		return "In2things Automation Pvt. Ltd.";
+	case 971:
+		return "SYSDEV Srl";
+	case 972:
+		return "Vonkil Technologies Ltd";
+	case 973:
+		return "Wynd Technologies, Inc.";
+	case 974:
+		return "CONTRINEX S.A.";
+	case 975:
+		return "MIRA, Inc.";
+	case 976:
+		return "Watteam Ltd";
+	case 977:
+		return "Density Inc.";
+	case 978:
+		return "IOT Pot India Private Limited";
+	case 979:
+		return "Sigma Connectivity AB";
+	case 980:
+		return "PEG PEREGO SPA";
+	case 981:
+		return "Wyzelink Systems Inc.";
+	case 982:
+		return "Yota Devices LTD";
+	case 983:
+		return "FINSECUR";
+	case 984:
+		return "Zen-Me Labs Ltd";
+	case 985:
+		return "3IWare Co., Ltd.";
+	case 986:
+		return "EnOcean GmbH";
+	case 987:
+		return "Instabeat, Inc";
+	case 988:
+		return "Nima Labs";
+	case 989:
+		return "Andreas Stihl AG & Co. KG";
+	case 990:
+		return "Nathan Rhoades LLC";
+	case 991:
+		return "Grob Technologies, LLC";
+	case 992:
+		return "Actions (Zhuhai) Technology Co., Limited";
+	case 993:
+		return "SPD Development Company Ltd";
+	case 994:
+		return "Sensoan Oy";
+	case 995:
+		return "Qualcomm Life Inc";
+	case 996:
+		return "Chip-ing AG";
+	case 997:
+		return "ffly4u";
+	case 998:
+		return "IoT Instruments Oy";
+	case 999:
+		return "TRUE Fitness Technology";
+	case 1000:
+		return "Reiner Kartengeraete GmbH & Co. KG.";
+	case 1001:
+		return "SHENZHEN LEMONJOY TECHNOLOGY CO., LTD.";
+	case 1002:
+		return "Hello Inc.";
+	case 1003:
+		return "Evollve Inc.";
+	case 1004:
+		return "Jigowatts Inc.";
+	case 1005:
+		return "BASIC MICRO.COM,INC.";
+	case 1006:
+		return "CUBE TECHNOLOGIES";
+	case 1007:
+		return "foolography GmbH";
+	case 1008:
+		return "CLINK";
+	case 1009:
+		return "Hestan Smart Cooking Inc.";
+	case 1010:
+		return "WindowMaster A/S";
+	case 1011:
+		return "Flowscape AB";
+	case 1012:
+		return "PAL Technologies Ltd";
+	case 1013:
+		return "WHERE, Inc.";
+	case 1014:
+		return "Iton Technology Corp.";
+	case 1015:
+		return "Owl Labs Inc.";
 	case 65535:
 		return "internal use";
 	default:
