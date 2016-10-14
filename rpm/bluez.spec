@@ -5,7 +5,7 @@ Name:       bluez5
 # << macros
 
 Summary:    Bluetooth daemon
-Version:    5.39
+Version:    5.42
 Release:    1
 Group:      Applications/System
 License:    GPLv2+
