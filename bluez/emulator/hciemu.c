@@ -243,7 +243,8 @@ static bool create_vhci(struct hciemu *hciemu)
 	}
 
 	create_req[0] = HCI_VENDOR_PKT;
-	create_req[1] = HCI_BREDR;
+	create_req[1] = HCI_PRIMARY;
+
 	written = write(fd, create_req, sizeof(create_req));
 	if (written < 0) {
 		close(fd);
@@ -463,6 +464,16 @@ bool hciemu_add_master_post_command_hook(struct hciemu *hciemu,
 		return false;
 	}
 
+	return true;
+}
+
+bool hciemu_clear_master_post_command_hooks(struct hciemu *hciemu)
+{
+	if (!hciemu)
+		return false;
+
+	queue_remove_all(hciemu->post_command_hooks,
+					NULL, NULL, destroy_command_hook);
 	return true;
 }
 

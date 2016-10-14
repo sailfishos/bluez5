@@ -38,11 +38,13 @@
 #include <readline/history.h>
 #include <glib.h>
 
+#include "src/shared/util.h"
 #include "gdbus/gdbus.h"
 #include "monitor/uuid.h"
 #include "agent.h"
 #include "display.h"
 #include "gatt.h"
+#include "advertising.h"
 
 /* String display constants */
 #define COLORED_NEW	COLOR_GREEN "NEW" COLOR_OFF
@@ -50,7 +52,7 @@
 #define COLORED_DEL	COLOR_RED "DEL" COLOR_OFF
 
 #define PROMPT_ON	COLOR_BLUE "[bluetooth]" COLOR_OFF "# "
-#define PROMPT_OFF	"[bluetooth]# "
+#define PROMPT_OFF	"Waiting to connect to bluetoothd..."
 
 static GMainLoop *main_loop;
 static DBusConnection *dbus_conn;
@@ -58,11 +60,16 @@ static DBusConnection *dbus_conn;
 static GDBusProxy *agent_manager;
 static char *auto_register_agent = NULL;
 
-static GDBusProxy *default_ctrl;
+struct adapter {
+	GDBusProxy *proxy;
+	GList *devices;
+};
+
+static struct adapter *default_ctrl;
 static GDBusProxy *default_dev;
 static GDBusProxy *default_attr;
+static GDBusProxy *ad_manager;
 static GList *ctrl_list;
-static GList *dev_list;
 
 static guint input = 0;
 
@@ -77,9 +84,49 @@ static const char * const agent_arguments[] = {
 	NULL
 };
 
+static const char * const ad_arguments[] = {
+	"on",
+	"off",
+	"peripheral",
+	"broadcast",
+	NULL
+};
+
 static void proxy_leak(gpointer data)
 {
 	printf("Leaking proxy %p\n", data);
+}
+
+static gboolean input_handler(GIOChannel *channel, GIOCondition condition,
+							gpointer user_data)
+{
+	if (condition & G_IO_IN) {
+		rl_callback_read_char();
+		return TRUE;
+	}
+
+	if (condition & (G_IO_HUP | G_IO_ERR | G_IO_NVAL)) {
+		g_main_loop_quit(main_loop);
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+static guint setup_standard_input(void)
+{
+	GIOChannel *channel;
+	guint source;
+
+	channel = g_io_channel_unix_new(fileno(stdin));
+
+	source = g_io_add_watch(channel,
+				G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL,
+				input_handler, NULL);
+
+	g_io_channel_unref(channel);
+
+	return source;
 }
 
 static void connect_handler(DBusConnection *connection, void *user_data)
@@ -92,18 +139,20 @@ static void connect_handler(DBusConnection *connection, void *user_data)
 
 static void disconnect_handler(DBusConnection *connection, void *user_data)
 {
+	if (input > 0) {
+		g_source_remove(input);
+		input = 0;
+	}
+
 	rl_set_prompt(PROMPT_OFF);
 	printf("\r");
 	rl_on_new_line();
 	rl_redisplay();
 
-	g_list_free(ctrl_list);
+	g_list_free_full(ctrl_list, proxy_leak);
 	ctrl_list = NULL;
 
 	default_ctrl = NULL;
-
-	g_list_free(dev_list);
-	dev_list = NULL;
 }
 
 static void print_adapter(GDBusProxy *proxy, const char *description)
@@ -126,7 +175,9 @@ static void print_adapter(GDBusProxy *proxy, const char *description)
 				description ? : "",
 				description ? "] " : "",
 				address, name,
-				default_ctrl == proxy ? "[default]" : "");
+				default_ctrl &&
+				default_ctrl->proxy == proxy ?
+				"[default]" : "");
 
 }
 
@@ -309,8 +360,11 @@ static gboolean service_is_child(GDBusProxy *service)
 
 	dbus_message_iter_get_basic(&iter, &device);
 
-	for (l = dev_list; l; l = g_list_next(l)) {
-		GDBusProxy *proxy = l->data;
+	if (!default_ctrl)
+		return FALSE;
+
+	for (l = default_ctrl->devices; l; l = g_list_next(l)) {
+		struct GDBusProxy *proxy = l->data;
 
 		path = g_dbus_proxy_get_path(proxy);
 
@@ -319,6 +373,19 @@ static gboolean service_is_child(GDBusProxy *service)
 	}
 
 	return FALSE;
+}
+
+static struct adapter *find_parent(GDBusProxy *device)
+{
+	GList *list;
+
+	for (list = g_list_first(ctrl_list); list; list = g_list_next(list)) {
+		struct adapter *adapter = list->data;
+
+		if (device_is_child(device, adapter->proxy) == TRUE)
+			return adapter;
+	}
+	return NULL;
 }
 
 static void set_default_device(GDBusProxy *proxy, const char *attribute)
@@ -350,16 +417,20 @@ done:
 	rl_set_prompt(desc ? desc : PROMPT_ON);
 	printf("\r");
 	rl_on_new_line();
-	rl_redisplay();
 	g_free(desc);
 }
 
 static void device_added(GDBusProxy *proxy)
 {
 	DBusMessageIter iter;
+	struct adapter *adapter = find_parent(proxy);
 
-	dev_list = g_list_append(dev_list, proxy);
+	if (!adapter) {
+		/* TODO: Error */
+		return;
+	}
 
+	adapter->devices = g_list_append(adapter->devices, proxy);
 	print_device(proxy, COLORED_NEW);
 
 	if (default_dev)
@@ -375,6 +446,19 @@ static void device_added(GDBusProxy *proxy)
 	}
 }
 
+static void adapter_added(GDBusProxy *proxy)
+{
+	struct adapter *adapter = g_malloc0(sizeof(struct adapter));
+
+	adapter->proxy = proxy;
+	ctrl_list = g_list_append(ctrl_list, adapter);
+
+	if (!default_ctrl)
+		default_ctrl = adapter;
+
+	print_adapter(proxy, COLORED_NEW);
+}
+
 static void proxy_added(GDBusProxy *proxy, void *user_data)
 {
 	const char *interface;
@@ -382,16 +466,9 @@ static void proxy_added(GDBusProxy *proxy, void *user_data)
 	interface = g_dbus_proxy_get_interface(proxy);
 
 	if (!strcmp(interface, "org.bluez.Device1")) {
-		if (device_is_child(proxy, default_ctrl) == TRUE)
-			device_added(proxy);
-
+		device_added(proxy);
 	} else if (!strcmp(interface, "org.bluez.Adapter1")) {
-		ctrl_list = g_list_append(ctrl_list, proxy);
-
-		if (!default_ctrl)
-			default_ctrl = proxy;
-
-		print_adapter(proxy, COLORED_NEW);
+		adapter_added(proxy);
 	} else if (!strcmp(interface, "org.bluez.AgentManager1")) {
 		if (!agent_manager) {
 			agent_manager = proxy;
@@ -409,6 +486,8 @@ static void proxy_added(GDBusProxy *proxy, void *user_data)
 		gatt_add_descriptor(proxy);
 	} else if (!strcmp(interface, "org.bluez.GattManager1")) {
 		gatt_add_manager(proxy);
+	} else if (!strcmp(interface, "org.bluez.LEAdvertisingManager1")) {
+		ad_manager = proxy;
 	}
 }
 
@@ -423,6 +502,46 @@ static void set_default_attribute(GDBusProxy *proxy)
 	set_default_device(default_dev, path);
 }
 
+static void device_removed(GDBusProxy *proxy)
+{
+	struct adapter *adapter = find_parent(proxy);
+	if (!adapter) {
+		/* TODO: Error */
+		return;
+	}
+
+	adapter->devices = g_list_remove(adapter->devices, proxy);
+
+	print_device(proxy, COLORED_DEL);
+
+	if (default_dev == proxy)
+		set_default_device(NULL, NULL);
+}
+
+static void adapter_removed(GDBusProxy *proxy)
+{
+	GList *ll;
+
+	for (ll = g_list_first(ctrl_list); ll; ll = g_list_next(ll)) {
+		struct adapter *adapter = ll->data;
+
+		if (adapter->proxy == proxy) {
+			print_adapter(proxy, COLORED_DEL);
+
+			if (default_ctrl && default_ctrl->proxy == proxy) {
+				default_ctrl = NULL;
+				set_default_device(NULL, NULL);
+			}
+
+			ctrl_list = g_list_remove_link(ctrl_list, ll);
+			g_list_free(adapter->devices);
+			g_free(adapter);
+			g_list_free(ll);
+			return;
+		}
+	}
+}
+
 static void proxy_removed(GDBusProxy *proxy, void *user_data)
 {
 	const char *interface;
@@ -430,26 +549,9 @@ static void proxy_removed(GDBusProxy *proxy, void *user_data)
 	interface = g_dbus_proxy_get_interface(proxy);
 
 	if (!strcmp(interface, "org.bluez.Device1")) {
-		if (device_is_child(proxy, default_ctrl) == TRUE) {
-			dev_list = g_list_remove(dev_list, proxy);
-
-			print_device(proxy, COLORED_DEL);
-
-			if (default_dev == proxy)
-				set_default_device(NULL, NULL);
-		}
+		device_removed(proxy);
 	} else if (!strcmp(interface, "org.bluez.Adapter1")) {
-		ctrl_list = g_list_remove(ctrl_list, proxy);
-
-		print_adapter(proxy, COLORED_DEL);
-
-		if (default_ctrl == proxy) {
-			default_ctrl = NULL;
-			set_default_device(NULL, NULL);
-
-			g_list_free(dev_list);
-			dev_list = NULL;
-		}
+		adapter_removed(proxy);
 	} else if (!strcmp(interface, "org.bluez.AgentManager1")) {
 		if (agent_manager == proxy) {
 			agent_manager = NULL;
@@ -473,6 +575,11 @@ static void proxy_removed(GDBusProxy *proxy, void *user_data)
 			set_default_attribute(NULL);
 	} else if (!strcmp(interface, "org.bluez.GattManager1")) {
 		gatt_remove_manager(proxy);
+	} else if (!strcmp(interface, "org.bluez.LEAdvertisingManager1")) {
+		if (ad_manager == proxy) {
+			agent_manager = NULL;
+			ad_unregister(dbus_conn, NULL);
+		}
 	}
 }
 
@@ -484,7 +591,8 @@ static void property_changed(GDBusProxy *proxy, const char *name,
 	interface = g_dbus_proxy_get_interface(proxy);
 
 	if (!strcmp(interface, "org.bluez.Device1")) {
-		if (device_is_child(proxy, default_ctrl) == TRUE) {
+		if (default_ctrl && device_is_child(proxy,
+					default_ctrl->proxy) == TRUE) {
 			DBusMessageIter addr_iter;
 			char *str;
 
@@ -545,6 +653,28 @@ static void message_handler(DBusConnection *connection,
 {
 	rl_printf("[SIGNAL] %s.%s\n", dbus_message_get_interface(message),
 					dbus_message_get_member(message));
+}
+
+static struct adapter *find_ctrl_by_address(GList *source, const char *address)
+{
+	GList *list;
+
+	for (list = g_list_first(source); list; list = g_list_next(list)) {
+		struct adapter *adapter = list->data;
+		DBusMessageIter iter;
+		const char *str;
+
+		if (g_dbus_proxy_get_property(adapter->proxy,
+					"Address", &iter) == FALSE)
+			continue;
+
+		dbus_message_iter_get_basic(&iter, &str);
+
+		if (!strcmp(str, address))
+			return adapter;
+	}
+
+	return NULL;
 }
 
 static GDBusProxy *find_proxy_by_address(GList *source, const char *address)
@@ -637,13 +767,14 @@ static void cmd_list(const char *arg)
 	GList *list;
 
 	for (list = g_list_first(ctrl_list); list; list = g_list_next(list)) {
-		GDBusProxy *proxy = list->data;
-		print_adapter(proxy, NULL);
+		struct adapter *adapter = list->data;
+		print_adapter(adapter->proxy, NULL);
 	}
 }
 
 static void cmd_show(const char *arg)
 {
+	struct adapter *adapter;
 	GDBusProxy *proxy;
 	DBusMessageIter iter;
 	const char *address;
@@ -652,13 +783,14 @@ static void cmd_show(const char *arg)
 		if (check_default_ctrl() == FALSE)
 			return;
 
-		proxy = default_ctrl;
+		proxy = default_ctrl->proxy;
 	} else {
-		proxy = find_proxy_by_address(ctrl_list, arg);
-		if (!proxy) {
+		adapter = find_ctrl_by_address(ctrl_list, arg);
+		if (!adapter) {
 			rl_printf("Controller %s not available\n", arg);
 			return;
 		}
+		proxy = adapter->proxy;
 	}
 
 	if (g_dbus_proxy_get_property(proxy, "Address", &iter) == FALSE)
@@ -680,45 +812,50 @@ static void cmd_show(const char *arg)
 
 static void cmd_select(const char *arg)
 {
-	GDBusProxy *proxy;
+	struct adapter *adapter;
 
 	if (!arg || !strlen(arg)) {
 		rl_printf("Missing controller address argument\n");
 		return;
 	}
 
-	proxy = find_proxy_by_address(ctrl_list, arg);
-	if (!proxy) {
+	adapter = find_ctrl_by_address(ctrl_list, arg);
+	if (!adapter) {
 		rl_printf("Controller %s not available\n", arg);
 		return;
 	}
 
-	if (default_ctrl == proxy)
+	if (default_ctrl && default_ctrl->proxy == adapter->proxy)
 		return;
 
-	default_ctrl = proxy;
-	print_adapter(proxy, NULL);
-
-	g_list_free(dev_list);
-	dev_list = NULL;
+	default_ctrl = adapter;
+	print_adapter(adapter->proxy, NULL);
 }
 
 static void cmd_devices(const char *arg)
 {
-	GList *list;
+	GList *ll;
 
-	for (list = g_list_first(dev_list); list; list = g_list_next(list)) {
-		GDBusProxy *proxy = list->data;
+	if (check_default_ctrl() == FALSE)
+		return;
+
+	for (ll = g_list_first(default_ctrl->devices);
+			ll; ll = g_list_next(ll)) {
+		GDBusProxy *proxy = ll->data;
 		print_device(proxy, NULL);
 	}
 }
 
 static void cmd_paired_devices(const char *arg)
 {
-	GList *list;
+	GList *ll;
 
-	for (list = g_list_first(dev_list); list; list = g_list_next(list)) {
-		GDBusProxy *proxy = list->data;
+	if (check_default_ctrl() == FALSE)
+		return;
+
+	for (ll = g_list_first(default_ctrl->devices);
+			ll; ll = g_list_next(ll)) {
+		GDBusProxy *proxy = ll->data;
 		DBusMessageIter iter;
 		dbus_bool_t paired;
 
@@ -757,7 +894,7 @@ static void cmd_system_alias(const char *arg)
 
 	name = g_strdup(arg);
 
-	if (g_dbus_proxy_set_property_basic(default_ctrl, "Alias",
+	if (g_dbus_proxy_set_property_basic(default_ctrl->proxy, "Alias",
 					DBUS_TYPE_STRING, &name,
 					generic_callback, name, g_free) == TRUE)
 		return;
@@ -774,7 +911,7 @@ static void cmd_reset_alias(const char *arg)
 
 	name = g_strdup("");
 
-	if (g_dbus_proxy_set_property_basic(default_ctrl, "Alias",
+	if (g_dbus_proxy_set_property_basic(default_ctrl->proxy, "Alias",
 					DBUS_TYPE_STRING, &name,
 					generic_callback, name, g_free) == TRUE)
 		return;
@@ -795,7 +932,7 @@ static void cmd_power(const char *arg)
 
 	str = g_strdup_printf("power %s", powered == TRUE ? "on" : "off");
 
-	if (g_dbus_proxy_set_property_basic(default_ctrl, "Powered",
+	if (g_dbus_proxy_set_property_basic(default_ctrl->proxy, "Powered",
 					DBUS_TYPE_BOOLEAN, &powered,
 					generic_callback, str, g_free) == TRUE)
 		return;
@@ -816,7 +953,7 @@ static void cmd_pairable(const char *arg)
 
 	str = g_strdup_printf("pairable %s", pairable == TRUE ? "on" : "off");
 
-	if (g_dbus_proxy_set_property_basic(default_ctrl, "Pairable",
+	if (g_dbus_proxy_set_property_basic(default_ctrl->proxy, "Pairable",
 					DBUS_TYPE_BOOLEAN, &pairable,
 					generic_callback, str, g_free) == TRUE)
 		return;
@@ -838,7 +975,7 @@ static void cmd_discoverable(const char *arg)
 	str = g_strdup_printf("discoverable %s",
 				discoverable == TRUE ? "on" : "off");
 
-	if (g_dbus_proxy_set_property_basic(default_ctrl, "Discoverable",
+	if (g_dbus_proxy_set_property_basic(default_ctrl->proxy, "Discoverable",
 					DBUS_TYPE_BOOLEAN, &discoverable,
 					generic_callback, str, g_free) == TRUE)
 		return;
@@ -912,7 +1049,7 @@ static void cmd_scan(const char *arg)
 	else
 		method = "StopDiscovery";
 
-	if (g_dbus_proxy_method_call(default_ctrl, method,
+	if (g_dbus_proxy_method_call(default_ctrl->proxy, method,
 				NULL, start_discovery_reply,
 				GUINT_TO_POINTER(enable), NULL) == FALSE) {
 		rl_printf("Failed to %s discovery\n",
@@ -931,6 +1068,36 @@ static void append_variant(DBusMessageIter *iter, int type, void *val)
 	dbus_message_iter_append_basic(&value, type, val);
 
 	dbus_message_iter_close_container(iter, &value);
+}
+
+static void append_array_variant(DBusMessageIter *iter, int type, void *val,
+							int n_elements)
+{
+	DBusMessageIter variant, array;
+	char type_sig[2] = { type, '\0' };
+	char array_sig[3] = { DBUS_TYPE_ARRAY, type, '\0' };
+
+	dbus_message_iter_open_container(iter, DBUS_TYPE_VARIANT,
+						array_sig, &variant);
+
+	dbus_message_iter_open_container(&variant, DBUS_TYPE_ARRAY,
+						type_sig, &array);
+
+	if (dbus_type_is_fixed(type) == TRUE) {
+		dbus_message_iter_append_fixed_array(&array, type, val,
+							n_elements);
+	} else if (type == DBUS_TYPE_STRING || type == DBUS_TYPE_OBJECT_PATH) {
+		const char ***str_array = val;
+		int i;
+
+		for (i = 0; i < n_elements; i++)
+			dbus_message_iter_append_basic(&array, type,
+							&((*str_array)[i]));
+	}
+
+	dbus_message_iter_close_container(&variant, &array);
+
+	dbus_message_iter_close_container(iter, &variant);
 }
 
 static void dict_append_entry(DBusMessageIter *dict, const char *key,
@@ -955,13 +1122,37 @@ static void dict_append_entry(DBusMessageIter *dict, const char *key,
 	dbus_message_iter_close_container(dict, &entry);
 }
 
+static void dict_append_basic_array(DBusMessageIter *dict, int key_type,
+					const void *key, int type, void *val,
+					int n_elements)
+{
+	DBusMessageIter entry;
+
+	dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY,
+						NULL, &entry);
+
+	dbus_message_iter_append_basic(&entry, key_type, key);
+
+	append_array_variant(&entry, type, val, n_elements);
+
+	dbus_message_iter_close_container(dict, &entry);
+}
+
+static void dict_append_array(DBusMessageIter *dict, const char *key, int type,
+						void *val, int n_elements)
+{
+	dict_append_basic_array(dict, DBUS_TYPE_STRING, &key, type, val,
+								n_elements);
+}
+
 #define	DISTANCE_VAL_INVALID	0x7FFF
 
 struct set_discovery_filter_args {
 	char *transport;
 	dbus_uint16_t rssi;
 	dbus_int16_t pathloss;
-	GSList *uuids;
+	char **uuids;
+	size_t uuids_len;
 };
 
 static void set_discovery_filter_setup(DBusMessageIter *iter, void *user_data)
@@ -975,37 +1166,8 @@ static void set_discovery_filter_setup(DBusMessageIter *iter, void *user_data)
 				DBUS_TYPE_VARIANT_AS_STRING
 				DBUS_DICT_ENTRY_END_CHAR_AS_STRING, &dict);
 
-	if (args->uuids != NULL) {
-		DBusMessageIter entry, value, arrayIter;
-		char *uuids = "UUIDs";
-		GSList *l;
-
-		dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY,
-							NULL, &entry);
-		/* dict key */
-		dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING,
-							&uuids);
-
-		dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT,
-							"as", &value);
-
-		dbus_message_iter_open_container(&value, DBUS_TYPE_ARRAY, "s",
-							&arrayIter);
-
-		for (l = args->uuids; l != NULL; l = g_slist_next(l))
-			/* list->data contains string representation of uuid */
-			dbus_message_iter_append_basic(&arrayIter,
-							DBUS_TYPE_STRING,
-							&l->data);
-
-		dbus_message_iter_close_container(&value, &arrayIter);
-
-		/* close vararg*/
-		dbus_message_iter_close_container(&entry, &value);
-
-		/* close entry */
-		dbus_message_iter_close_container(&dict, &entry);
-	}
+	dict_append_array(&dict, "UUIDs", DBUS_TYPE_STRING, &args->uuids,
+							args->uuids_len);
 
 	if (args->pathloss != DISTANCE_VAL_INVALID)
 		dict_append_entry(&dict, "Pathloss", DBUS_TYPE_UINT16,
@@ -1038,7 +1200,8 @@ static void set_discovery_filter_reply(DBusMessage *message, void *user_data)
 
 static gint filtered_scan_rssi = DISTANCE_VAL_INVALID;
 static gint filtered_scan_pathloss = DISTANCE_VAL_INVALID;
-static GSList *filtered_scan_uuids;
+static char **filtered_scan_uuids;
+static size_t filtered_scan_uuids_len;
 static char *filtered_scan_transport;
 
 static void cmd_set_scan_filter_commit(void)
@@ -1050,11 +1213,12 @@ static void cmd_set_scan_filter_commit(void)
 	args.rssi = filtered_scan_rssi;
 	args.transport = filtered_scan_transport;
 	args.uuids = filtered_scan_uuids;
+	args.uuids_len = filtered_scan_uuids_len;
 
 	if (check_default_ctrl() == FALSE)
 		return;
 
-	if (g_dbus_proxy_method_call(default_ctrl, "SetDiscoveryFilter",
+	if (g_dbus_proxy_method_call(default_ctrl->proxy, "SetDiscoveryFilter",
 		set_discovery_filter_setup, set_discovery_filter_reply,
 		&args, NULL) == FALSE) {
 		rl_printf("Failed to set discovery filter\n");
@@ -1064,25 +1228,22 @@ static void cmd_set_scan_filter_commit(void)
 
 static void cmd_set_scan_filter_uuids(const char *arg)
 {
-	char *uuid_str, *saveptr, *uuids, *uuidstmp;
-
-	g_slist_free_full(filtered_scan_uuids, g_free);
+	g_strfreev(filtered_scan_uuids);
 	filtered_scan_uuids = NULL;
+	filtered_scan_uuids_len = 0;
 
 	if (!arg || !strlen(arg))
-		return;
+		goto commit;
 
-	uuids = g_strdup(arg);
-	for (uuidstmp = uuids; ; uuidstmp = NULL) {
-		uuid_str = strtok_r(uuidstmp, " \t", &saveptr);
-		if (uuid_str == NULL)
-			break;
-		filtered_scan_uuids = g_slist_append(filtered_scan_uuids,
-							strdup(uuid_str));
+	filtered_scan_uuids = g_strsplit(arg, " ", -1);
+	if (!filtered_scan_uuids) {
+		rl_printf("Failed to parse input\n");
+		return;
 	}
 
-	g_free(uuids);
+	filtered_scan_uuids_len = g_strv_length(filtered_scan_uuids);
 
+commit:
 	cmd_set_scan_filter_commit();
 }
 
@@ -1122,17 +1283,38 @@ static void cmd_set_scan_filter_transport(const char *arg)
 	cmd_set_scan_filter_commit();
 }
 
+static void clear_discovery_filter_setup(DBusMessageIter *iter, void *user_data)
+{
+	DBusMessageIter dict;
+
+	dbus_message_iter_open_container(iter, DBUS_TYPE_ARRAY,
+				DBUS_DICT_ENTRY_BEGIN_CHAR_AS_STRING
+				DBUS_TYPE_STRING_AS_STRING
+				DBUS_TYPE_VARIANT_AS_STRING
+				DBUS_DICT_ENTRY_END_CHAR_AS_STRING, &dict);
+
+	dbus_message_iter_close_container(iter, &dict);
+}
+
 static void cmd_set_scan_filter_clear(const char *arg)
 {
 	/* set default values for all options */
 	filtered_scan_rssi = DISTANCE_VAL_INVALID;
 	filtered_scan_pathloss = DISTANCE_VAL_INVALID;
-	g_slist_free_full(filtered_scan_uuids, g_free);
+	g_strfreev(filtered_scan_uuids);
 	filtered_scan_uuids = NULL;
+	filtered_scan_uuids_len = 0;
 	g_free(filtered_scan_transport);
 	filtered_scan_transport = NULL;
 
-	cmd_set_scan_filter_commit();
+	if (check_default_ctrl() == FALSE)
+		return;
+
+	if (g_dbus_proxy_method_call(default_ctrl->proxy, "SetDiscoveryFilter",
+		clear_discovery_filter_setup, set_discovery_filter_reply,
+		NULL, NULL) == FALSE) {
+		rl_printf("Failed to clear discovery filter\n");
+	}
 }
 
 static struct GDBusProxy *find_device(const char *arg)
@@ -1146,7 +1328,10 @@ static struct GDBusProxy *find_device(const char *arg)
 		return NULL;
 	}
 
-	proxy = find_proxy_by_address(dev_list, arg);
+	if (check_default_ctrl() == FALSE)
+		return NULL;
+
+	proxy = find_proxy_by_address(default_ctrl->devices, arg);
 	if (!proxy) {
 		rl_printf("Device %s not available\n", arg);
 		return NULL;
@@ -1337,7 +1522,10 @@ static void remove_device(GDBusProxy *proxy)
 
 	path = g_strdup(g_dbus_proxy_get_path(proxy));
 
-	if (g_dbus_proxy_method_call(default_ctrl, "RemoveDevice",
+	if (!default_ctrl)
+		return;
+
+	if (g_dbus_proxy_method_call(default_ctrl->proxy, "RemoveDevice",
 						remove_device_setup,
 						remove_device_reply,
 						path, g_free) == FALSE) {
@@ -1361,16 +1549,16 @@ static void cmd_remove(const char *arg)
 	if (strcmp(arg, "*") == 0) {
 		GList *list;
 
-		for (list = g_list_first(dev_list); list; list = g_list_next(list)) {
+		for (list = default_ctrl->devices; list;
+						list = g_list_next(list)) {
 			GDBusProxy *proxy = list->data;
 
 			remove_device(proxy);
 		}
-
 		return;
 	}
 
-	proxy = find_proxy_by_address(dev_list, arg);
+	proxy = find_proxy_by_address(default_ctrl->devices, arg);
 	if (!proxy) {
 		rl_printf("Device %s not available\n", arg);
 		return;
@@ -1406,7 +1594,10 @@ static void cmd_connect(const char *arg)
 		return;
 	}
 
-	proxy = find_proxy_by_address(dev_list, arg);
+	if (check_default_ctrl() == FALSE)
+		return;
+
+	proxy = find_proxy_by_address(default_ctrl->devices, arg);
 	if (!proxy) {
 		rl_printf("Device %s not available\n", arg);
 		return;
@@ -1473,6 +1664,30 @@ static void cmd_list_attributes(const char *arg)
 		return;
 
 	gatt_list_attributes(g_dbus_proxy_get_path(proxy));
+}
+
+static void cmd_set_alias(const char *arg)
+{
+	char *name;
+
+	if (!arg || !strlen(arg)) {
+		rl_printf("Missing name argument\n");
+		return;
+	}
+
+	if (!default_dev) {
+		rl_printf("No device connected\n");
+		return;
+	}
+
+	name = g_strdup(arg);
+
+	if (g_dbus_proxy_set_property_basic(default_dev, "Alias",
+					DBUS_TYPE_STRING, &name,
+					generic_callback, name, g_free) == TRUE)
+		return;
+
+	g_free(name);
 }
 
 static void cmd_select_attribute(const char *arg)
@@ -1616,7 +1831,7 @@ static void cmd_register_profile(const char *arg)
 		return;
 	}
 
-	gatt_register_profile(dbus_conn, default_ctrl, &w);
+	gatt_register_profile(dbus_conn, default_ctrl->proxy, &w);
 
 	wordfree(&w);
 }
@@ -1626,7 +1841,7 @@ static void cmd_unregister_profile(const char *arg)
 	if (check_default_ctrl() == FALSE)
 		return;
 
-	gatt_unregister_profile(dbus_conn, default_ctrl);
+	gatt_unregister_profile(dbus_conn, default_ctrl->proxy);
 }
 
 static void cmd_version(const char *arg)
@@ -1672,12 +1887,40 @@ static char *generic_generator(const char *text, int state,
 
 static char *ctrl_generator(const char *text, int state)
 {
-	return generic_generator(text, state, ctrl_list, "Address");
+	static int index = 0;
+	static int len = 0;
+	GList *list;
+
+	if (!state) {
+		index = 0;
+		len = strlen(text);
+	}
+
+	for (list = g_list_nth(ctrl_list, index); list;
+						list = g_list_next(list)) {
+		struct adapter *adapter = list->data;
+		DBusMessageIter iter;
+		const char *str;
+
+		index++;
+
+		if (g_dbus_proxy_get_property(adapter->proxy,
+					"Address", &iter) == FALSE)
+			continue;
+
+		dbus_message_iter_get_basic(&iter, &str);
+
+		if (!strncmp(str, text, len))
+			return strdup(str);
+	}
+
+	return NULL;
 }
 
 static char *dev_generator(const char *text, int state)
 {
-	return generic_generator(text, state, dev_list, "Address");
+	return generic_generator(text, state,
+			default_ctrl ? default_ctrl->devices : NULL, "Address");
 }
 
 static char *attribute_generator(const char *text, int state)
@@ -1703,6 +1946,113 @@ static char *capability_generator(const char *text, int state)
 	}
 
 	return NULL;
+}
+
+static gboolean parse_argument_advertise(const char *arg, dbus_bool_t *value,
+							const char **type)
+{
+	const char * const *opt;
+
+	if (arg == NULL || strlen(arg) == 0) {
+		rl_printf("Missing on/off/type argument\n");
+		return FALSE;
+	}
+
+	if (strcmp(arg, "on") == 0 || strcmp(arg, "yes") == 0) {
+		*value = TRUE;
+		*type = "";
+		return TRUE;
+	}
+
+	if (strcmp(arg, "off") == 0 || strcmp(arg, "no") == 0) {
+		*value = FALSE;
+		return TRUE;
+	}
+
+	for (opt = ad_arguments; *opt; opt++) {
+		if (strcmp(arg, *opt) == 0) {
+			*value = TRUE;
+			*type = *opt;
+			return TRUE;
+		}
+	}
+
+	rl_printf("Invalid argument %s\n", arg);
+	return FALSE;
+}
+
+static void cmd_advertise(const char *arg)
+{
+	dbus_bool_t enable;
+	const char *type;
+
+	if (parse_argument_advertise(arg, &enable, &type) == FALSE)
+		return;
+
+	if (!ad_manager) {
+		rl_printf("LEAdvertisingManager not found\n");
+		return;
+	}
+
+	if (enable == TRUE)
+		ad_register(dbus_conn, ad_manager, type);
+	else
+		ad_unregister(dbus_conn, ad_manager);
+}
+
+static char *ad_generator(const char *text, int state)
+{
+	static int index, len;
+	const char *arg;
+
+	if (!state) {
+		index = 0;
+		len = strlen(text);
+	}
+
+	while ((arg = ad_arguments[index])) {
+		index++;
+
+		if (!strncmp(arg, text, len))
+			return strdup(arg);
+	}
+
+	return NULL;
+}
+
+static void cmd_set_advertise_uuids(const char *arg)
+{
+	ad_advertise_uuids(arg);
+}
+
+static void cmd_set_advertise_service(const char *arg)
+{
+	ad_advertise_service(arg);
+}
+
+static void cmd_set_advertise_manufacturer(const char *arg)
+{
+	ad_advertise_manufacturer(arg);
+}
+
+static void cmd_set_advertise_tx_power(const char *arg)
+{
+	if (arg == NULL || strlen(arg) == 0) {
+		rl_printf("Missing on/off argument\n");
+		return;
+	}
+
+	if (strcmp(arg, "on") == 0 || strcmp(arg, "yes") == 0) {
+		ad_advertise_tx_power(TRUE);
+		return;
+	}
+
+	if (strcmp(arg, "off") == 0 || strcmp(arg, "no") == 0) {
+		ad_advertise_tx_power(FALSE);
+		return;
+	}
+
+	rl_printf("Invalid argument\n");
 }
 
 static const struct {
@@ -1733,6 +2083,20 @@ static const struct {
 							capability_generator},
 	{ "default-agent",NULL,       cmd_default_agent,
 				"Set agent as the default one" },
+	{ "advertise",    "<on/off/type>", cmd_advertise,
+				"Enable/disable advertising with given type",
+							ad_generator},
+	{ "set-advertise-uuids", "[uuid1 uuid2 ...]",
+			cmd_set_advertise_uuids, "Set advertise uuids" },
+	{ "set-advertise-service", "[uuid][data=[xx xx ...]",
+			cmd_set_advertise_service,
+			"Set advertise service data" },
+	{ "set-advertise-manufacturer", "[id][data=[xx xx ...]",
+			cmd_set_advertise_manufacturer,
+			"Set advertise manufacturer data" },
+	{ "set-advertise-tx-power", "<on/off>",
+			cmd_set_advertise_tx_power,
+			"Enable/disable TX power to be advertised" },
 	{ "set-scan-filter-uuids", "[uuid1 uuid2 ...]",
 			cmd_set_scan_filter_uuids, "Set scan filter uuids" },
 	{ "set-scan-filter-rssi", "[rssi]", cmd_set_scan_filter_rssi,
@@ -1765,6 +2129,7 @@ static const struct {
 							dev_generator },
 	{ "list-attributes", "[dev]", cmd_list_attributes, "List attributes",
 							dev_generator },
+	{ "set-alias",    "<alias>",  cmd_set_alias, "Set device alias" },
 	{ "select-attribute", "<attribute>",  cmd_select_attribute,
 				"Select attribute", attribute_generator },
 	{ "attribute-info", "[attribute]",  cmd_attribute_info,
@@ -1899,38 +2264,6 @@ done:
 	free(input);
 }
 
-static gboolean input_handler(GIOChannel *channel, GIOCondition condition,
-							gpointer user_data)
-{
-	if (condition & G_IO_IN) {
-		rl_callback_read_char();
-		return TRUE;
-	}
-
-	if (condition & (G_IO_HUP | G_IO_ERR | G_IO_NVAL)) {
-		g_main_loop_quit(main_loop);
-		return FALSE;
-	}
-
-	return TRUE;
-}
-
-static guint setup_standard_input(void)
-{
-	GIOChannel *channel;
-	guint source;
-
-	channel = g_io_channel_unix_new(fileno(stdin));
-
-	source = g_io_add_watch(channel,
-				G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL,
-				input_handler, NULL);
-
-	g_io_channel_unref(channel);
-
-	return source;
-}
-
 static gboolean signal_handler(GIOChannel *channel, GIOCondition condition,
 							gpointer user_data)
 {
@@ -2041,9 +2374,8 @@ static GOptionEntry options[] = {
 
 static void client_ready(GDBusClient *client, void *user_data)
 {
-	guint *input = user_data;
-
-	*input = setup_standard_input();
+	if (!input)
+		input = setup_standard_input();
 }
 
 int main(int argc, char *argv[])
@@ -2094,8 +2426,7 @@ int main(int argc, char *argv[])
 	g_dbus_client_set_proxy_handlers(client, proxy_added, proxy_removed,
 							property_changed, NULL);
 
-	input = 0;
-	g_dbus_client_set_ready_watch(client, client_ready, &input);
+	g_dbus_client_set_ready_watch(client, client_ready, NULL);
 
 	g_main_loop_run(main_loop);
 
@@ -2111,7 +2442,6 @@ int main(int argc, char *argv[])
 	g_main_loop_unref(main_loop);
 
 	g_list_free_full(ctrl_list, proxy_leak);
-	g_list_free_full(dev_list, proxy_leak);
 
 	g_free(auto_register_agent);
 

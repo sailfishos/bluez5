@@ -46,6 +46,7 @@
 #include "src/shared/mainloop.h"
 #include "src/shared/timeout.h"
 #include "src/shared/util.h"
+#include "src/shared/tty.h"
 #include "src/shared/hci.h"
 
 static int open_serial(const char *path, unsigned int speed)
@@ -186,7 +187,7 @@ static void usage(void)
 		"Usage:\n");
 	printf("\tbtattach [options]\n");
 	printf("options:\n"
-		"\t-B, --bredr <device>   Attach BR/EDR controller\n"
+		"\t-B, --bredr <device>   Attach Primary controller\n"
 		"\t-A, --amp <device>     Attach AMP controller\n"
 		"\t-P, --protocol <proto> Specify protocol type\n"
 		"\t-S, --speed <baudrate> Specify which baudrate to use\n"
@@ -216,58 +217,11 @@ static const struct {
 	{ "intel", HCI_UART_INTEL },
 	{ "bcm",   HCI_UART_BCM   },
 	{ "qca",   HCI_UART_QCA   },
+	{ "ag6xx", HCI_UART_AG6XX },
+	{ "nokia", HCI_UART_NOKIA },
+	{ "mrvl",  HCI_UART_MRVL  },
 	{ }
 };
-
-static unsigned int get_speed(const char *str)
-{
-	switch (atoi(str)) {
-	case 57600:
-		return B57600;
-	case 115200:
-		return B115200;
-	case 230400:
-		return B230400;
-	case 460800:
-		return B460800;
-	case 500000:
-		return B500000;
-	case 576000:
-		return B576000;
-	case 921600:
-		return B921600;
-	case 1000000:
-		return B1000000;
-	case 1152000:
-		return B1152000;
-	case 1500000:
-		return B1500000;
-	case 2000000:
-		return B2000000;
-#ifdef B2500000
-	case 2500000:
-		return B2500000;
-#endif
-#ifdef B3000000
-	case 3000000:
-		return B3000000;
-#endif
-#ifdef B3500000
-	case 3500000:
-		return B3500000;
-#endif
-#ifdef B3710000
-	case 3710000:
-		return B3710000;
-#endif
-#ifdef B4000000
-	case 4000000:
-		return B4000000;
-#endif
-	}
-
-	return 0;
-}
 
 int main(int argc, char *argv[])
 {
@@ -296,7 +250,7 @@ int main(int argc, char *argv[])
 			proto = optarg;
 			break;
 		case 'S':
-			speed = get_speed(optarg);
+			speed = tty_get_speed(atoi(optarg));
 			if (!speed) {
 				fprintf(stderr, "Invalid speed: %s\n", optarg);
 				return EXIT_FAILURE;
@@ -349,7 +303,7 @@ int main(int argc, char *argv[])
 		unsigned long flags;
 		int fd;
 
-		printf("Attaching BR/EDR controller to %s\n", bredr_path);
+		printf("Attaching Primary controller to %s\n", bredr_path);
 
 		flags = (1 << HCI_UART_RESET_ON_INIT);
 

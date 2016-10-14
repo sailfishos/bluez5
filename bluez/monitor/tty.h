@@ -2,8 +2,7 @@
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
- *  Copyright (C) 2011-2014  Intel Corporation
- *  Copyright (C) 2002-2010  Marcel Holtmann <marcel@holtmann.org>
+ *  Copyright (C) 2016  Intel Corporation
  *
  *
  *  This library is free software; you can redistribute it and/or
@@ -24,8 +23,19 @@
 
 #include <stdint.h>
 
-#define MAX_LEN_UUID_STR 37
+struct tty_hdr {
+	uint16_t data_len;
+	uint16_t opcode;
+	uint8_t  flags;
+	uint8_t  hdr_len;
+	uint8_t  ext_hdr[0];
+} __attribute__ ((packed));
 
-const char *uuid16_to_str(uint16_t uuid);
-const char *uuid32_to_str(uint32_t uuid);
-const char *uuidstr_to_str(const char *uuid);
+#define TTY_EXTHDR_COMMAND_DROPS  1
+#define TTY_EXTHDR_EVENT_DROPS    2
+#define TTY_EXTHDR_ACL_TX_DROPS   3
+#define TTY_EXTHDR_ACL_RX_DROPS   4
+#define TTY_EXTHDR_SCO_TX_DROPS   5
+#define TTY_EXTHDR_SCO_RX_DROPS   6
+#define TTY_EXTHDR_OTHER_DROPS    7
+#define TTY_EXTHDR_TS32           8

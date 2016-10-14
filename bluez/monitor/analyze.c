@@ -29,6 +29,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "lib/bluetooth.h"
+
 #include "src/shared/util.h"
 #include "src/shared/queue.h"
 #include "src/shared/btsnoop.h"
@@ -45,6 +47,11 @@ struct hci_dev {
 	unsigned long num_evt;
 	unsigned long num_acl;
 	unsigned long num_sco;
+	unsigned long vendor_diag;
+	unsigned long system_note;
+	unsigned long user_log;
+	unsigned long unknown;
+	uint16_t manufacturer;
 };
 
 static struct queue *dev_list;
@@ -67,13 +74,22 @@ static void dev_destroy(void *data)
 	}
 
 	printf("Found %s controller with index %u\n", str, dev->index);
-	printf("  BD_ADDR %2.2X:%2.2X:%2.2X:%2.2X:%2.2X:%2.2X\n",
+	printf("  BD_ADDR %2.2X:%2.2X:%2.2X:%2.2X:%2.2X:%2.2X",
 			dev->bdaddr[5], dev->bdaddr[4], dev->bdaddr[3],
 			dev->bdaddr[2], dev->bdaddr[1], dev->bdaddr[0]);
+	if (dev->manufacturer != 0xffff)
+		printf(" (%s)", bt_compidtostr(dev->manufacturer));
+	printf("\n");
+
+
 	printf("  %lu commands\n", dev->num_cmd);
 	printf("  %lu events\n", dev->num_evt);
 	printf("  %lu ACL packets\n", dev->num_acl);
 	printf("  %lu SCO packets\n", dev->num_sco);
+	printf("  %lu vendor diagnostics\n", dev->vendor_diag);
+	printf("  %lu system notes\n", dev->system_note);
+	printf("  %lu user logs\n", dev->user_log);
+	printf("  %lu unknown opcodes\n", dev->unknown);
 	printf("\n");
 
 	free(dev);
@@ -84,12 +100,9 @@ static struct hci_dev *dev_alloc(uint16_t index)
 	struct hci_dev *dev;
 
 	dev = new0(struct hci_dev, 1);
-	if (!dev) {
-		fprintf(stderr, "Failed to allocate new device entry\n");
-		return NULL;
-	}
 
 	dev->index = index;
+	dev->manufacturer = 0xffff;
 
 	return dev;
 }
@@ -111,8 +124,6 @@ static struct hci_dev *dev_lookup(uint16_t index)
 		fprintf(stderr, "Creating new device for unknown index\n");
 
 		dev = dev_alloc(index);
-		if (!dev)
-			return NULL;
 
 		queue_push_tail(dev_list, dev);
 	}
@@ -127,8 +138,6 @@ static void new_index(struct timeval *tv, uint16_t index,
 	struct hci_dev *dev;
 
 	dev = dev_alloc(index);
-	if (!dev)
-		return;
 
 	dev->type = ni->type;
 	memcpy(dev->bdaddr, ni->bdaddr, 6);
@@ -251,6 +260,70 @@ static void sco_pkt(struct timeval *tv, uint16_t index,
 	dev->num_sco++;
 }
 
+static void info_index(struct timeval *tv, uint16_t index,
+					const void *data, uint16_t size)
+{
+	const struct btsnoop_opcode_index_info *hdr = data;
+	struct hci_dev *dev;
+
+	data += sizeof(*hdr);
+	size -= sizeof(*hdr);
+
+	dev = dev_lookup(index);
+	if (!dev)
+		return;
+
+	dev->manufacturer = hdr->manufacturer;
+}
+
+static void vendor_diag(struct timeval *tv, uint16_t index,
+					const void *data, uint16_t size)
+{
+	struct hci_dev *dev;
+
+	dev = dev_lookup(index);
+	if (!dev)
+		return;
+
+	dev->vendor_diag++;
+}
+
+static void system_note(struct timeval *tv, uint16_t index,
+					const void *data, uint16_t size)
+{
+	struct hci_dev *dev;
+
+	dev = dev_lookup(index);
+	if (!dev)
+		return;
+
+	dev->system_note++;
+}
+
+static void user_log(struct timeval *tv, uint16_t index,
+					const void *data, uint16_t size)
+{
+	struct hci_dev *dev;
+
+	dev = dev_lookup(index);
+	if (!dev)
+		return;
+
+	dev->user_log++;
+}
+
+static void unknown_opcode(struct timeval *tv, uint16_t index,
+					const void *data, uint16_t size)
+{
+	struct hci_dev *dev;
+
+	dev = dev_lookup(index);
+	if (!dev)
+		return;
+
+	dev->unknown++;
+}
+
 void analyze_trace(const char *path)
 {
 	struct btsnoop *btsnoop_file;
@@ -274,10 +347,6 @@ void analyze_trace(const char *path)
 	}
 
 	dev_list = queue_new();
-	if (!dev_list) {
-		fprintf(stderr, "Failed to allocate device list\n");
-		goto done;
-	}
 
 	while (1) {
 		unsigned char buf[BTSNOOP_MAX_PACKET_SIZE];
@@ -312,9 +381,22 @@ void analyze_trace(const char *path)
 		case BTSNOOP_OPCODE_OPEN_INDEX:
 		case BTSNOOP_OPCODE_CLOSE_INDEX:
 			break;
+		case BTSNOOP_OPCODE_INDEX_INFO:
+			info_index(&tv, index, buf, pktlen);
+			break;
+		case BTSNOOP_OPCODE_VENDOR_DIAG:
+			vendor_diag(&tv, index, buf, pktlen);
+			break;
+		case BTSNOOP_OPCODE_SYSTEM_NOTE:
+			system_note(&tv, index, buf, pktlen);
+			break;
+		case BTSNOOP_OPCODE_USER_LOGGING:
+			user_log(&tv, index, buf, pktlen);
+			break;
 		default:
-			fprintf(stderr, "Wrong opcode %u\n", opcode);
-			goto done;
+			fprintf(stderr, "Unknown opcode %u\n", opcode);
+			unknown_opcode(&tv, index, buf, pktlen);
+			break;
 		}
 
 		num_packets++;
