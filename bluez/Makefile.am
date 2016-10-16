@@ -441,7 +441,7 @@ endif
 pkgconfigdir = $(libdir)/pkgconfig
 
 if LIBRARY
-pkgconfig_DATA = lib/bluez.pc
+pkgconfig_DATA = lib/bluez5.pc
 endif
 
 manual_pages = doc/btmon.1

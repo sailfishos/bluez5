@@ -277,7 +277,7 @@ systemctl-user daemon-reload ||:
 %{_libdir}/libbluetooth.so
 %dir %{_includedir}/bluetooth
 %{_includedir}/bluetooth/*
-%{_libdir}/pkgconfig/bluez.pc
+%{_libdir}/pkgconfig/bluez5.pc
 # << files libs-devel
 
 %files test
