@@ -305,4 +305,40 @@ fi
 AC_DEFINE_UNQUOTED(ANDROID_STORAGEDIR, "${storagedir}/android",
 			[Directory for the Android daemon storage files])
 
+AC_ARG_ENABLE(jolla_dbus_access, AC_HELP_STRING([--enable-jolla-dbus-access],
+				[compile with Jolla D-Bus access control plugin]),
+				[enable_jolla_dbus_access=${enableval}])
+AM_CONDITIONAL(JOLLADBUSACCESSPLUGIN, test "${enable_jolla_dbus_access}" = "yes")
+
+AC_ARG_ENABLE(jolla_did, AC_HELP_STRING([--enable-jolla-did],
+			 [compile with Jolla device ID plugin]),
+			 [enable_jolla_did=${enableval}])
+AM_CONDITIONAL(JOLLADIDPLUGIN, test "${enable_jolla_did}" = "yes")
+
+AC_ARG_ENABLE(jolla_logcontrol, AC_HELP_STRING([--enable-jolla-logcontrol],
+				[compile with Jolla logcontrol plugin]),
+				[enable_jolla_logcontrol=${enableval}])
+AM_CONDITIONAL(JOLLALOGCONTROLPLUGIN, test "${enable_jolla_logcontrol}" = "yes")
+
+AC_ARG_WITH([phonebook], AC_HELP_STRING([--with-phonebook=PLUGIN],
+				[obexd phonebook plugin (default=dummy)]),
+					[plugin_phonebook=${withval}])
+if (test -z "${plugin_phonebook}"); then
+	plugin_phonebook=dummy
+fi
+AC_SUBST(PLUGIN_PHONEBOOK, [${plugin_phonebook}])
+
+AC_ARG_WITH([contentfilter], AC_HELP_STRING([--with-contentfilter=PLUGIN],
+				[obexd contentfilter plugin (default=dummy)]),
+					[plugin_contentfilter=${withval}])
+if (test -z "${plugin_contentfilter}"); then
+	plugin_contentfilter=dummy
+fi
+AC_SUBST(PLUGIN_CONTENTFILTER, [${plugin_contentfilter}])
+
+AC_ARG_ENABLE(jolla_blacklist, AC_HELP_STRING([--enable-jolla-blacklist],
+		[enable obexd jolla-blacklist plugin]),
+		[enable_jolla_blacklist=${enableval}])
+AM_CONDITIONAL(JOLLABLACKLIST, test "${enable_jolla_blacklist}" = "yes")
+
 AC_OUTPUT(Makefile src/bluetoothd.8 lib/bluez5.pc)

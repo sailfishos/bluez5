@@ -68,6 +68,7 @@
 struct cache {
 	gboolean valid;
 	uint32_t index;
+	char *path;
 	GSList *entries;
 };
 
@@ -165,8 +166,13 @@ static const char *cache_find(struct cache *cache, uint32_t handle)
 	return NULL;
 }
 
-static void cache_clear(struct cache *cache)
+static void invalidate_cache(struct cache *cache)
 {
+	DBG("Invalidating cache.");
+	cache->valid = FALSE;
+	cache->index = 0;
+	g_free(cache->path);
+	cache->path = NULL;
 	g_slist_free_full(cache->entries, cache_entry_free);
 	cache->entries = NULL;
 }
@@ -190,6 +196,7 @@ static void phonebook_size_result(const char *buffer, size_t bufsize,
 
 	phonebooksize = vcards;
 
+	pbap->obj->firstpacket = TRUE;
 	pbap->obj->apparam = g_obex_apparam_set_uint16(NULL, PHONEBOOKSIZE_TAG,
 								phonebooksize);
 
@@ -198,7 +205,7 @@ static void phonebook_size_result(const char *buffer, size_t bufsize,
 	if (missed > 0)	{
 		DBG("missed %d", missed);
 
-		pbap->obj->apparam = g_obex_apparam_set_uint16(
+		pbap->obj->apparam = g_obex_apparam_set_uint8(
 							pbap->obj->apparam,
 							NEWMISSEDCALLS_TAG,
 							missed);
@@ -212,7 +219,8 @@ static void query_result(const char *buffer, size_t bufsize, int vcards,
 {
 	struct pbap_session *pbap = user_data;
 
-	DBG("");
+	DBG("size=%d, vcards=%d, lastpart=%s",
+		bufsize, vcards, lastpart ? "yes" : "no");
 
 	if (pbap->obj->request && lastpart) {
 		phonebook_req_finalize(pbap->obj->request);
@@ -237,7 +245,7 @@ static void query_result(const char *buffer, size_t bufsize, int vcards,
 
 		pbap->obj->firstpacket = TRUE;
 
-		pbap->obj->apparam = g_obex_apparam_set_uint16(
+		pbap->obj->apparam = g_obex_apparam_set_uint8(
 							pbap->obj->apparam,
 							NEWMISSEDCALLS_TAG,
 							missed);
@@ -369,6 +377,7 @@ static int generate_response(void *user_data)
 		/* Ignore all other parameter and return PhoneBookSize */
 		uint16_t size = g_slist_length(pbap->cache.entries);
 
+		pbap->obj->firstpacket = TRUE;
 		pbap->obj->apparam = g_obex_apparam_set_uint16(
 							pbap->obj->apparam,
 							PHONEBOOKSIZE_TAG,
@@ -406,7 +415,7 @@ static int generate_response(void *user_data)
 	return 0;
 }
 
-static void cache_ready_notify(void *user_data)
+static void cache_ready_notify(void *user_data, int missed)
 {
 	struct pbap_session *pbap = user_data;
 
@@ -417,15 +426,28 @@ static void cache_ready_notify(void *user_data)
 
 	pbap->cache.valid = TRUE;
 
+	if (missed > 0)	{
+		DBG("missed %d", missed);
+
+		pbap->obj->firstpacket = TRUE;
+
+		pbap->obj->apparam = g_obex_apparam_set_uint8(
+							pbap->obj->apparam,
+							NEWMISSEDCALLS_TAG,
+							missed);
+	}
+
 	generate_response(pbap);
 	obex_object_set_io_flags(pbap->obj, G_IO_IN, 0);
 }
 
-static void cache_entry_done(void *user_data)
+static void cache_entry_done(void *user_data, int missed)
 {
 	struct pbap_session *pbap = user_data;
 	const char *id;
 	int ret;
+
+	(void) missed;
 
 	DBG("");
 
@@ -516,6 +538,7 @@ static int pbap_get(struct obex_session *os, void *user_data)
 		return -EBADR;
 
 	rsize = obex_get_apparam(os, &buffer);
+	DBG("apparam size %d", rsize);
 	if (rsize < 0) {
 		if (g_ascii_strcasecmp(type, VCARDENTRY_TYPE) != 0)
 			return -EBADR;
@@ -523,7 +546,23 @@ static int pbap_get(struct obex_session *os, void *user_data)
 		rsize = 0;
 	}
 
+	/* Workaround for PTS client not sending mandatory apparams */
+	if (!rsize && g_ascii_strcasecmp(type, VCARDLISTING_TYPE) == 0) {
+		static const uint8_t default_apparams[] = {
+			0x04, 0x02, 0xff, 0xff
+		};
+		buffer = default_apparams;
+		rsize = sizeof(default_apparams);
+	} else if (!rsize && g_ascii_strcasecmp(type, VCARDENTRY_TYPE) == 0) {
+		static const uint8_t default_apparams[] = {
+			0x07, 0x01, 0x00
+		};
+		buffer = default_apparams;
+		rsize = sizeof(default_apparams);
+	}
+
 	params = parse_aparam(buffer, rsize);
+	DBG("params %p", params);
 	if (params == NULL)
 		return -EBADR;
 
@@ -534,12 +573,27 @@ static int pbap_get(struct obex_session *os, void *user_data)
 
 	pbap->params = params;
 
+	DBG("cache check NAME='%s', FOLDER='%s', CACHEPATH='%s', VALID=%s",
+		name,
+		pbap->folder ? pbap->folder : "<null>",
+		pbap->cache.path ? pbap->cache.path : "<null>",
+		pbap->cache.valid ? "yes" : "no");
+
 	if (g_ascii_strcasecmp(type, PHONEBOOK_TYPE) == 0) {
 		/* Always contains the absolute path */
 		if (g_path_is_absolute(name))
 			path = g_strdup(name);
 		else
 			path = g_build_filename("/", name, NULL);
+
+		if (!pbap->cache.valid) {
+			g_free(pbap->cache.path);
+			pbap->cache.path = g_strdup(path);
+		} else if (strcmp(path, pbap->cache.path)) {
+			DBG("'%s' != '%s'", path, pbap->cache.path);
+			invalidate_cache(&pbap->cache);
+			pbap->cache.path = g_strdup(path);
+		}
 
 	} else if (g_ascii_strcasecmp(type, VCARDLISTING_TYPE) == 0) {
 		/* Always relative */
@@ -549,18 +603,34 @@ static int pbap_get(struct obex_session *os, void *user_data)
 		} else {
 			/* Current folder + relative path */
 			path = g_build_filename(pbap->folder, name, NULL);
-
-			/* clear cache */
-			pbap->cache.valid = FALSE;
-			pbap->cache.index = 0;
-			cache_clear(&pbap->cache);
 		}
+
+		if (!pbap->cache.valid) {
+			g_free(pbap->cache.path);
+			pbap->cache.path = g_strdup(path);
+		} else if (strcmp(path, pbap->cache.path)) {
+			DBG("'%s' != '%s'", path, pbap->cache.path);
+			invalidate_cache(&pbap->cache);
+			pbap->cache.path = g_strdup(path);
+		}
+
 	} else if (g_ascii_strcasecmp(type, VCARDENTRY_TYPE) == 0) {
 		/* File name only */
 		path = g_strdup(name);
+
+		if (!pbap->cache.valid) {
+			g_free(pbap->cache.path);
+			pbap->cache.path = g_strdup(pbap->folder);
+		} else if (strcmp(pbap->folder, pbap->cache.path)) {
+			DBG("'%s' != '%s'", pbap->folder, pbap->cache.path);
+			invalidate_cache(&pbap->cache);
+			pbap->cache.path = g_strdup(pbap->folder);
+		}
+
 	} else
 		return -EBADR;
 
+	DBG("path %s", path ? path : "<null>");
 	if (path == NULL)
 		return -EBADR;
 
@@ -599,9 +669,7 @@ static int pbap_setpath(struct obex_session *os, void *user_data)
 	/*
 	 * FIXME: Define a criteria to mark the cache as invalid
 	 */
-	pbap->cache.valid = FALSE;
-	pbap->cache.index = 0;
-	cache_clear(&pbap->cache);
+	invalidate_cache(&pbap->cache);
 
 	return 0;
 }
@@ -612,15 +680,20 @@ static void pbap_disconnect(struct obex_session *os, void *user_data)
 
 	manager_unregister_session(os);
 
-	if (pbap->obj)
+	if (pbap->obj) {
+		if (pbap->obj->request) {
+			phonebook_req_finalize(pbap->obj->request);
+			pbap->obj->request = NULL;
+		}
 		pbap->obj->session = NULL;
+	}
 
 	if (pbap->params) {
 		g_free(pbap->params->searchval);
 		g_free(pbap->params);
 	}
 
-	cache_clear(&pbap->cache);
+	invalidate_cache(&pbap->cache);
 	g_free(pbap->folder);
 	g_free(pbap);
 }
@@ -713,14 +786,20 @@ static int vobject_close(void *object)
 	if (obj->session)
 		obj->session->obj = NULL;
 
-	if (obj->buffer)
+	if (obj->buffer) {
 		g_string_free(obj->buffer, TRUE);
+		obj->buffer = NULL;
+	}
 
-	if (obj->apparam)
+	if (obj->apparam) {
 		g_obex_apparam_free(obj->apparam);
+		obj->apparam = NULL;
+	}
 
-	if (obj->request)
+	if (obj->request) {
 		phonebook_req_finalize(obj->request);
+		obj->request = NULL;
+	}
 
 	g_free(obj);
 
@@ -892,8 +971,11 @@ static ssize_t vobject_list_get_next_header(void *object, void *buf, size_t mtu,
 
 	*hi = G_OBEX_HDR_APPARAM;
 
-	if (pbap->params->maxlistcount == 0)
+	if (obj->firstpacket) {
+		obj->firstpacket = FALSE;
+
 		return g_obex_apparam_encode(obj->apparam, buf, mtu);
+	}
 
 	return 0;
 }
@@ -956,7 +1038,28 @@ static struct obex_mime_type_driver mime_vcard = {
 static int pbap_init(void)
 {
 	int err;
+	GKeyFile *config = NULL;
 
+	config = g_key_file_new();
+	if (config == NULL)
+		goto init;
+
+	if (g_key_file_load_from_file(config, "/etc/obexd/pbap.conf",
+					G_KEY_FILE_NONE, NULL) == TRUE) {
+		gint channel;
+
+		/* returns 0 on error; 0 is also a reserved channel */
+		channel = g_key_file_get_integer(config, "PBAP", "Channel",
+						NULL);
+		if (channel >= 1 && channel <= 30) {
+			DBG("PBAP channel set to %d", channel);
+			pbap.channel = channel;
+		}
+	}
+
+	g_key_file_free(config);
+
+init:
 	err = phonebook_init();
 	if (err < 0)
 		return err;

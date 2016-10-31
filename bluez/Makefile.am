@@ -150,6 +150,21 @@ builtin_nodist =
 
 include Makefile.plugins
 
+if JOLLADBUSACCESSPLUGIN
+builtin_modules += jolla_dbus_access
+builtin_sources += plugins/jolla-dbus-access.c
+endif
+
+if JOLLADIDPLUGIN
+builtin_modules += jolla_did
+builtin_sources += plugins/jolla-did.c
+endif
+
+if JOLLALOGCONTROLPLUGIN
+builtin_modules += jolla_logcontrol
+builtin_sources += plugins/jolla-logcontrol.c
+endif
+
 if MAINTAINER_MODE
 plugin_LTLIBRARIES += plugins/external-dummy.la
 plugins_external_dummy_la_SOURCES = plugins/external-dummy.c
@@ -420,6 +435,12 @@ unit_test_gattrib_SOURCES = unit/test-gattrib.c attrib/gattrib.c $(btio_sources)
 unit_test_gattrib_LDADD = lib/libbluetooth-internal.la \
 			src/libshared-glib.la \
 			@GLIB_LIBS@ @DBUS_LIBS@ -ldl -lrt
+
+unit_tests += unit/test-jolla-blacklist
+
+unit_test_jolla_blacklist_SOURCES = src/access.c src/access.h src/log.c \
+					src/log.h unit/test-jolla-blacklist.c
+unit_test_jolla_blacklist_LDADD = @GLIB_LIBS@
 
 if MAINTAINER_MODE
 noinst_PROGRAMS += $(unit_tests)

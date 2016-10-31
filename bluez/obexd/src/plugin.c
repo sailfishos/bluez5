@@ -29,6 +29,7 @@
 #include <dlfcn.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <stdint.h>
 
 #include <glib.h>
 

@@ -135,6 +135,7 @@ static char *option_root_setup = NULL;
 static char *option_capability = NULL;
 static char *option_plugin = NULL;
 static char *option_noplugin = NULL;
+static char *option_exclude = NULL;
 
 static gboolean option_autoaccept = FALSE;
 static gboolean option_symlinks = FALSE;
@@ -176,6 +177,9 @@ static GOptionEntry options[] = {
 				"scripts", "FILE" },
 	{ "auto-accept", 'a', 0, G_OPTION_ARG_NONE, &option_autoaccept,
 				"Automatically accept push requests" },
+	{ "exclude", 'e', 0, G_OPTION_ARG_STRING, &option_exclude,
+				"Specify plugins to expclude for specific "
+				"transports", "TRANSPORT:NAME,..." },
 	{ NULL },
 };
 
@@ -197,6 +201,43 @@ gboolean obex_option_symlinks(void)
 const char *obex_option_capability(void)
 {
 	return option_capability;
+}
+
+uint16_t obex_option_exclude(const char *transport)
+{
+	uint16_t mask = 0;
+	gchar **excludes = NULL;
+	gsize i, transport_len = strlen(transport);
+
+	if (!option_exclude)
+		return 0;
+
+	excludes = g_strsplit(option_exclude, ",", 0);
+	for (i = 0; excludes[i]; i++) {
+		if (g_str_has_prefix(excludes[i], transport) &&
+			excludes[i][transport_len] == ':') {
+			gchar *plugin = &excludes[i][transport_len + 1];
+			if (!strcasecmp(plugin, "opp"))
+				mask |= OBEX_OPP;
+			else if (!strcasecmp(plugin, "ftp"))
+				mask |= OBEX_FTP;
+			else if (!strcasecmp(plugin, "bip"))
+				mask |= OBEX_BIP;
+			else if (!strcasecmp(plugin, "pbap"))
+				mask |= OBEX_PBAP;
+			else if (!strcasecmp(plugin, "irmc"))
+				mask |= OBEX_IRMC;
+			else if (!strcasecmp(plugin, "pcsuite"))
+				mask |= OBEX_PCSUITE;
+			else if (!strcasecmp(plugin, "syncevolution"))
+				mask |= OBEX_SYNCEVOLUTION;
+			else if (!strcasecmp(plugin, "mas"))
+				mask |= OBEX_MAS;
+		}
+	}
+
+	g_strfreev(excludes);
+	return mask;
 }
 
 static gboolean is_dir(const char *dir)

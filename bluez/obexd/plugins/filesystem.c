@@ -47,6 +47,7 @@
 #include "obexd/src/log.h"
 #include "obexd/src/mimetype.h"
 #include "filesystem.h"
+#include "access.h"
 
 #define EOL_CHARS "\n"
 
@@ -119,6 +120,33 @@ int verify_path(const char *path)
 	return ret;
 }
 
+static int verify_path_many(const char *path, const char *roots[])
+{
+	int i;
+	char *t;
+	int ret = 0;
+
+	if (obex_option_symlinks())
+		return 0;
+
+	t = realpath(path, NULL);
+	if (t == NULL)
+		return -errno;
+
+	ret = -EPERM;
+	for (i = 0; roots[i]; i++) {
+		if (g_str_has_prefix(t, roots[i])) {
+			ret = 0;
+			break;
+		}
+	}
+
+	free(t);
+
+	return ret;
+}
+
+
 static char *file_stat_line(char *filename, struct stat *fstat,
 					struct stat *dstat, gboolean root,
 					gboolean pcsuite)
@@ -162,13 +190,31 @@ static char *file_stat_line(char *filename, struct stat *fstat,
 	return ret;
 }
 
-static void *filesystem_open(const char *name, int oflag, mode_t mode,
-					void *context, size_t *size, int *err)
+static void *common_filesystem_open(const char *name, int oflag, mode_t mode,
+					void *context, size_t *size, int *err,
+					const uint8_t *target,
+					gsize target_size,
+					const char *roots[])
 {
 	struct stat stats;
 	struct statvfs buf;
 	int fd, ret;
 	uint64_t avail;
+	enum access_op op;
+
+	if (oflag & O_CREAT)
+		op = ACCESS_OP_CREATE;
+	else if ((oflag & O_WRONLY) || (oflag & O_RDWR))
+		op = ACCESS_OP_WRITE;
+	else
+		op = ACCESS_OP_READ;
+
+	ret = access_check(target, target_size, op, name);
+	if (ret < 0) {
+		if (err)
+			*err = ret;
+		return NULL;
+	}
 
 	fd = open(name, oflag, mode);
 	if (fd < 0) {
@@ -183,7 +229,7 @@ static void *filesystem_open(const char *name, int oflag, mode_t mode,
 		goto failed;
 	}
 
-	ret = verify_path(name);
+	ret = verify_path_many(name, roots);
 	if (ret < 0) {
 		if (err)
 			*err = ret;
@@ -223,6 +269,30 @@ failed:
 	return NULL;
 }
 
+static void *filesystem_open(const char *name, int oflag, mode_t mode,
+				void *context, size_t *size, int *err)
+{
+	const char *roots[] = {
+		obex_option_root_folder(), NULL
+	};
+
+	DBG("name '%s'", name);
+	return common_filesystem_open(name, oflag, mode, context, size, err,
+					FTP_TARGET, FTP_TARGET_SIZE, roots);
+}
+
+static void *opp_filesystem_open(const char *name, int oflag, mode_t mode,
+				void *context, size_t *size, int *err)
+{
+	const char *roots[] = {
+		obex_option_root_folder(), g_get_tmp_dir(), NULL
+	};
+
+	DBG("name '%s'", name);
+	return common_filesystem_open(name, oflag, mode, context, size, err,
+					NULL, 0, roots);
+}
+
 static int filesystem_close(void *object)
 {
 	if (close(GPOINTER_TO_INT(object)) < 0)
@@ -253,9 +323,41 @@ static ssize_t filesystem_write(void *object, const void *buf, size_t count)
 	return ret;
 }
 
+static int filesystem_remove(const char *name)
+{
+	int ret;
+
+	ret = access_check(FTP_TARGET, FTP_TARGET_SIZE, ACCESS_OP_DELETE, name);
+	if (ret < 0) {
+		error("remove(%s, %s): %s (%d)", name, name,
+						strerror(-ret), -ret);
+		return ret;
+	}
+
+	if (remove(name) < 0)
+		return -errno;
+
+	return 0;
+}
+
 static int filesystem_rename(const char *name, const char *destname)
 {
 	int ret;
+
+	ret = access_check(FTP_TARGET, FTP_TARGET_SIZE, ACCESS_OP_DELETE, name);
+	if (ret < 0) {
+		error("rename(%s, %s): %s (%d)", name, destname,
+						strerror(-ret), -ret);
+		return ret;
+	}
+
+	ret = access_check(FTP_TARGET, FTP_TARGET_SIZE, ACCESS_OP_CREATE,
+			destname);
+	if (ret < 0) {
+		error("rename(%s, %s): %s (%d)", name, destname,
+						strerror(-ret), -ret);
+		return ret;
+	}
 
 	ret = rename(name, destname);
 	if (ret < 0) {
@@ -354,6 +456,26 @@ struct capability_object {
 	GString *buffer;
 };
 
+/*This function should be called after get capability object are done.
+  Close output & err pipe fds and free struct capability_object        */
+static void capability_deallocation(struct capability_object *object )
+{
+	DBG("");
+	if (object->output > 0) {
+		close(object->output);
+		object->output = -1;
+	}
+	if (object->err > 0) {
+		close(object->err);
+		object->err = -1;
+	}
+	
+	if (object->buffer != NULL)
+		g_string_free(object->buffer, TRUE);
+
+	g_free(object);
+}
+
 static void script_exited(GPid pid, int status, void *data)
 {
 	struct capability_object *object = data;
@@ -367,10 +489,8 @@ static void script_exited(GPid pid, int status, void *data)
 
 	/* free the object if aborted */
 	if (object->aborted) {
-		if (object->buffer != NULL)
-			g_string_free(object->buffer, TRUE);
+		capability_deallocation(object);
 
-		g_free(object);
 		return;
 	}
 
@@ -409,6 +529,9 @@ static void *capability_open(const char *name, int oflag, mode_t mode,
 	const char *argv[2];
 
 	if (oflag != O_RDONLY)
+		goto fail;
+
+	if (access_check(FTP_TARGET, FTP_TARGET_SIZE, ACCESS_OP_READ, name) < 0)
 		goto fail;
 
 	object = g_new0(struct capability_object, 1);
@@ -474,11 +597,18 @@ static GString *append_listing(GString *object, const char *name,
 {
 	struct stat fstat, dstat;
 	struct dirent *ep;
-	DIR *dp;
+	DIR *dp = NULL;
 	gboolean root;
 	int ret;
 
 	root = g_str_equal(name, obex_option_root_folder());
+
+	ret = access_check(FTP_TARGET, FTP_TARGET_SIZE, ACCESS_OP_READ, name);
+	if (ret < 0) {
+		if (err)
+			*err = ret;
+		goto failed;
+	}
 
 	dp = opendir(name);
 	if (dp == NULL) {
@@ -509,6 +639,10 @@ static GString *append_listing(GString *object, const char *name,
 		char *line;
 
 		if (ep->d_name[0] == '.')
+			continue;
+
+		if (access_check_at(FTP_TARGET, FTP_TARGET_SIZE, ACCESS_OP_LIST,
+					name, ep->d_name) < 0)
 			continue;
 
 		filename = g_filename_to_utf8(ep->d_name, -1, NULL, NULL, NULL);
@@ -646,20 +780,26 @@ static int capability_close(void *object)
 	return 0;
 
 done:
-	if (obj->buffer != NULL)
-		g_string_free(obj->buffer, TRUE);
-
-	g_free(obj);
+	capability_deallocation(obj);
 
 	return err;
 }
 
+static struct obex_mime_type_driver opp_file = {
+	.open = opp_filesystem_open,
+	.close = filesystem_close,
+	.read = filesystem_read,
+	.write = filesystem_write,
+};
+
 static struct obex_mime_type_driver file = {
+	.target = FTP_TARGET,
+	.target_size = FTP_TARGET_SIZE,
 	.open = filesystem_open,
 	.close = filesystem_close,
 	.read = filesystem_read,
 	.write = filesystem_write,
-	.remove = remove,
+	.remove = filesystem_remove,
 	.move = filesystem_rename,
 	.copy = filesystem_copy,
 };
@@ -709,6 +849,10 @@ static int filesystem_init(void)
 	if (err < 0)
 		return err;
 
+	err = obex_mime_type_driver_register(&opp_file);
+	if (err < 0)
+		return err;
+
 	return obex_mime_type_driver_register(&file);
 }
 
@@ -716,6 +860,7 @@ static void filesystem_exit(void)
 {
 	obex_mime_type_driver_unregister(&folder);
 	obex_mime_type_driver_unregister(&capability);
+	obex_mime_type_driver_unregister(&opp_file);
 	obex_mime_type_driver_unregister(&file);
 }
 

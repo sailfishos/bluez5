@@ -1108,7 +1108,10 @@ static void abort_cfm(struct avdtp *session, struct avdtp_local_sep *sep,
 	if (!setup)
 		return;
 
-	setup_unref(setup);
+	finalize_setup_errno(setup, -ECONNRESET, finalize_suspend,
+							finalize_resume,
+							finalize_config,
+							NULL);
 }
 
 static gboolean reconf_ind(struct avdtp *session, struct avdtp_local_sep *sep,
