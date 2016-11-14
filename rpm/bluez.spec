@@ -14,6 +14,7 @@ Source0:    http://www.kernel.org/pub/linux/bluetooth/%{name}-%{version}.tar.gz
 Source1:    obexd-wrapper
 Source2:    obexd.conf
 Source3:    bluez.tracing
+Source4:    obexd.tracing
 Requires:   bluez5-libs = %{version}
 Requires:   dbus >= 0.60
 Requires:   hwdata >= 0.215
@@ -133,7 +134,13 @@ Group:      Development/Tools
 Requires:   %{name} = %{version}-%{release}
 Conflicts:  bluez-tracing
 %description tracing
-Will enable tracing for BlueZ
+Will enable tracing for BlueZ 5
+
+%package obexd-tracing
+Summary:    Configuration for bluez5-obexd to enable tracing
+Group:      Development/Tools
+%description obexd-tracing
+Will enable tracing for BlueZ 5 OBEX daemon
 
 %prep
 %setup -q -n %{name}-%{version}/bluez
@@ -209,6 +216,8 @@ cp -a ../bluez/tools/obex-client-tool %{buildroot}%{_bindir}/
 cp -a ../bluez/tools/obex-server-tool %{buildroot}%{_bindir}/
 cp -a ../bluez/tools/obexctl %{buildroot}%{_bindir}/
 
+mkdir -p %{buildroot}%{_sysconfdir}/tracing/obexd/
+cp -a %{SOURCE4} %{buildroot}%{_sysconfdir}/tracing/obexd/
 # << install post
 
 %pre
@@ -352,3 +361,8 @@ systemctl-user daemon-reload ||:
 %defattr(-,root,root,-)
 %dir %{_sysconfdir}/tracing/bluez
 %config %{_sysconfdir}/tracing/bluez/bluez.tracing
+
+%files obexd-tracing
+%defattr(-,root,root,-)
+%dir %{_sysconfdir}/tracing/obexd
+%config %{_sysconfdir}/tracing/obexd/obexd.tracing
