@@ -211,10 +211,18 @@ mkdir -p ${RPM_BUILD_ROOT}/%{_sysconfdir}/obexd/{plugins,noplugins}
 
 # HACK!! copy manually missing tools
 cp -a ../bluez/tools/bluetooth-player %{buildroot}%{_bindir}/
+cp -a ../bluez/tools/btmgmt %{buildroot}%{_bindir}/
 cp -a ../bluez/attrib/gatttool %{buildroot}%{_bindir}/
 cp -a ../bluez/tools/obex-client-tool %{buildroot}%{_bindir}/
 cp -a ../bluez/tools/obex-server-tool %{buildroot}%{_bindir}/
 cp -a ../bluez/tools/obexctl %{buildroot}%{_bindir}/
+
+# HACK!! copy manually missing test scripts
+cp -a ../bluez/test/exchange-business-cards %{buildroot}%{_libdir}/bluez/test/
+cp -a ../bluez/test/get-managed-objects %{buildroot}%{_libdir}/bluez/test/
+cp -a ../bluez/test/get-obex-capabilities %{buildroot}%{_libdir}/bluez/test/
+cp -a ../bluez/test/list-folders %{buildroot}%{_libdir}/bluez/test/
+cp -a ../bluez/test/simple-obex-agent %{buildroot}%{_libdir}/bluez/test/
 
 mkdir -p %{buildroot}%{_sysconfdir}/tracing/obexd/
 cp -a %{SOURCE4} %{buildroot}%{_sysconfdir}/tracing/obexd/
@@ -318,6 +326,7 @@ systemctl-user daemon-reload ||:
 %{_bindir}/bluetooth-player
 %{_bindir}/bluemoon
 %{_bindir}/bluetoothctl
+%{_bindir}/btmgmt
 %{_bindir}/btmon
 %{_bindir}/ciptool
 %{_bindir}/gatttool
