@@ -6914,6 +6914,8 @@ static void adapter_stop(struct btd_adapter *adapter)
 	adapter->current_discovery_filter = NULL;
 
 	adapter->discovering = false;
+	adapter->discovery_type = 0x00;
+	adapter->discovery_enable = 0x00;
 
 	while (adapter->connections) {
 		struct btd_device *device = adapter->connections->data;
