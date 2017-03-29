@@ -38,6 +38,9 @@ BuildRequires:  readline-devel
 BuildRequires:  automake
 BuildRequires:  autoconf
 Conflicts: bluez
+# Removing support for SyncML sync over Bluetooth - see JB#38055
+Conflicts: jolla-settings-sync
+Conflicts: buteo-sync-plugins-qt5
 
 %description
 %{summary}.
