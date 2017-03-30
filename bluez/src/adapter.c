@@ -5866,6 +5866,11 @@ static void adapter_stop(struct btd_adapter *adapter)
 			adapter_remove_connection(adapter, device, addr_type);
 	}
 
+	if (adapter->discovery_enable == 0x01) {
+		adapter->discovery_type = 0x00;
+		adapter->discovery_enable = 0x00;
+	}
+
 	g_dbus_emit_property_changed(dbus_conn, adapter->path,
 					ADAPTER_INTERFACE, "Discovering");
 
