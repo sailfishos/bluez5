@@ -496,5 +496,9 @@ AC_ARG_ENABLE(jolla_blacklist, AC_HELP_STRING([--enable-jolla-blacklist],
 		[enable_jolla_blacklist=${enableval}])
 AM_CONDITIONAL(JOLLABLACKLIST, test "${enable_jolla_blacklist}" = "yes")
 
+AC_ARG_ENABLE(hostname, AC_HELP_STRING([--disable-hostname],
+		[disable hostname plugin]), [enable_hostname=${enableval}])
+AM_CONDITIONAL(HOSTNAME, test "${enable_hostname}" != "no")
+
 AC_CONFIG_FILES(Makefile src/bluetoothd.rst lib/bluez.pc mesh/bluetooth-meshd.rst)
 AC_OUTPUT
