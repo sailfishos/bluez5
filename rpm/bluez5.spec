@@ -162,7 +162,8 @@ autoreconf --force --install
     --enable-jolla-logcontrol \
     --with-phonebook=sailfish \
     --with-contentfilter=helperapp \
-    --enable-jolla-blacklist
+    --enable-jolla-blacklist \
+    --disable-hostname
 
 make %{?jobs:-j%jobs}
 
