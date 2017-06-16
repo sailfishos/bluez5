@@ -101,6 +101,8 @@ struct avrcp_player_cb {
 	bool (*pause) (void *user_data);
 	bool (*next) (void *user_data);
 	bool (*previous) (void *user_data);
+	bool (*fastforward) (void *user_data);
+	bool (*rewind) (void *user_data);
 };
 
 int avrcp_set_volume(struct btd_device *dev, uint8_t volume, bool notify);
