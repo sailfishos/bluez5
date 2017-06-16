@@ -54,6 +54,8 @@
 
 #define REQUEST_TIMEOUT (3 * 1000)		/* 3 seconds */
 
+#define MPRIS_SEEK (1000000) /* 1 second */
+
 struct media_app {
 	struct media_adapter	*adapter;
 	GDBusClient		*client;
@@ -123,6 +125,7 @@ struct media_player {
 	bool			next;
 	bool			previous;
 	bool			control;
+	bool			seek;
 	char			*name;
 };
 
@@ -1798,6 +1801,29 @@ static bool media_player_send(struct media_player *mp, const char *name)
 	return true;
 }
 
+static bool media_player_seek(struct media_player *mp, bool forward)
+{
+	DBusMessage *msg;
+	DBusMessageIter iter;
+	int64_t value;
+
+	value = forward ? MPRIS_SEEK : -MPRIS_SEEK;
+
+	msg = dbus_message_new_method_call(mp->sender, mp->path,
+					MEDIA_PLAYER_INTERFACE, "Seek");
+	if (msg == NULL) {
+		error("Couldn't allocate D-Bus message");
+		return false;
+	}
+
+	dbus_message_iter_init_append(msg, &iter);
+	dbus_message_iter_append_basic(&iter, DBUS_TYPE_INT64, &value);
+
+	g_dbus_send_message(btd_get_dbus_connection(), msg);
+
+	return true;
+}
+
 static bool media_player_play(void *user_data)
 {
 	struct media_player *mp = user_data;
@@ -1858,6 +1884,30 @@ static bool media_player_previous(void *user_data)
 	return media_player_send(mp, "Previous");
 }
 
+static bool seek_forward(void *user_data)
+{
+	struct media_player *mp = user_data;
+
+	DBG("");
+
+	if (!mp->seek || !mp->control)
+		return false;
+
+	return media_player_seek(mp, true);
+}
+
+static bool seek_rewind(void *user_data)
+{
+	struct media_player *mp = user_data;
+
+	DBG("");
+
+	if (!mp->seek || !mp->control)
+		return false;
+
+	return media_player_seek(mp, false);
+}
+
 static struct avrcp_player_cb player_cb = {
 	.list_settings = media_player_list_settings,
 	.get_setting = media_player_get_setting,
@@ -1875,6 +1925,8 @@ static struct avrcp_player_cb player_cb = {
 	.pause = media_player_pause,
 	.next = media_player_next,
 	.previous = media_player_previous,
+	.fastforward = seek_forward,
+	.rewind = seek_rewind,
 };
 
 static void media_player_exit(DBusConnection *connection, void *user_data)
@@ -2262,6 +2314,9 @@ static gboolean set_player_property(struct media_player *mp, const char *key,
 
 	if (strcasecmp(key, "CanControl") == 0)
 		return set_flag(mp, &var, &mp->control);
+
+	if (strcasecmp(key, "CanSeek") == 0)
+		return set_flag(mp, &var, &mp->seek);
 
 	if (strcasecmp(key, "Identity") == 0)
 		return set_name(mp, &var);
