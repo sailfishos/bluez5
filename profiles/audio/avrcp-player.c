@@ -21,6 +21,8 @@
 #include "avrcp.h"
 #include "media.h"
 
+#define MPRIS_SEEK (1000000) /* 1 second */
+
 struct player_link {
 	struct local_player *lp;
 	struct avrcp_player *avrcp;
@@ -138,6 +140,21 @@ static bool lp_previous(void *user_data)
 	return local_player_previous(p->lp);
 }
 
+static bool lp_seek_forward(void *user_data)
+{
+	struct player_link *p = user_data;
+
+	return local_player_seek(p->lp, MPRIS_SEEK);
+}
+
+static bool lp_seek_rewind(void *user_data)
+{
+	struct player_link *p = user_data;
+
+	return local_player_seek(p->lp, -MPRIS_SEEK);
+}
+
+
 static struct avrcp_player_cb avrcp_cb = {
 	.list_settings = lp_list_settings,
 	.get_setting = lp_get_setting,
@@ -154,6 +171,8 @@ static struct avrcp_player_cb avrcp_cb = {
 	.pause = lp_pause,
 	.next = lp_next,
 	.previous = lp_previous,
+	.fastforward = lp_seek_forward,
+	.rewind = lp_seek_rewind,
 };
 
 static void status_changed(void *user_data)
