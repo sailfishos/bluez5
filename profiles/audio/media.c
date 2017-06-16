@@ -77,6 +77,8 @@
 /* Timeout should be less than ATT timeout (30 seconds) */
 #define BAP_REQUEST_TIMEOUT_MSEC	(3 * 1000)
 
+#define MPRIS_SEEK (1000000) /* 1 second */
+
 struct media_app {
 	struct media_adapter	*adapter;
 	GDBusClient		*client;
@@ -158,6 +160,7 @@ struct local_player {
 	bool			next;
 	bool			previous;
 	bool			control;
+	bool			seek;
 	char			*name;
 	struct queue		*cbs;
 };
@@ -2254,6 +2257,32 @@ static bool local_player_send(struct local_player *mp, const char *name)
 	return true;
 }
 
+bool local_player_seek(struct local_player *mp, bool forward)
+{
+	DBusMessage *msg;
+	DBusMessageIter iter;
+	int64_t value;
+
+	if (!mp->seek || !mp->control)
+		return false;
+
+	value = forward ? MPRIS_SEEK : -MPRIS_SEEK;
+
+	msg = dbus_message_new_method_call(mp->sender, mp->path,
+					MEDIA_PLAYER_INTERFACE, "Seek");
+	if (msg == NULL) {
+		error("Couldn't allocate D-Bus message");
+		return false;
+	}
+
+	dbus_message_iter_init_append(msg, &iter);
+	dbus_message_iter_append_basic(&iter, DBUS_TYPE_INT64, &value);
+
+	g_dbus_send_message(btd_get_dbus_connection(), msg);
+
+	return true;
+}
+
 bool local_player_play(struct local_player *mp)
 {
 	DBG("");
@@ -2669,6 +2698,9 @@ static gboolean set_player_property(struct local_player *mp, const char *key,
 
 	if (strcasecmp(key, "CanControl") == 0)
 		return set_flag(mp, &var, &mp->control);
+
+	if (strcasecmp(key, "CanSeek") == 0)
+		return set_flag(mp, &var, &mp->seek);
 
 	if (strcasecmp(key, "Identity") == 0)
 		return set_name(mp, &var);
