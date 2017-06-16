@@ -1572,12 +1572,34 @@ static bool avrcp_handle_previous(struct avrcp *session)
 	return player->cb->previous(player->user_data);
 }
 
+static bool avrcp_handle_fastforward(struct avrcp *session)
+{
+	struct avrcp_player *player = target_get_player(session);
+
+	if (player == NULL)
+		return false;
+
+	return player->cb->fastforward(player->user_data);
+}
+
+static bool avrcp_handle_rewind(struct avrcp *session)
+{
+	struct avrcp_player *player = target_get_player(session);
+
+	if (player == NULL)
+		return false;
+
+	return player->cb->rewind(player->user_data);
+}
+
 static const struct passthrough_handler passthrough_handlers[] = {
 		{ AVC_PLAY, avrcp_handle_play },
 		{ AVC_STOP, avrcp_handle_stop },
 		{ AVC_PAUSE, avrcp_handle_pause },
 		{ AVC_FORWARD, avrcp_handle_next },
 		{ AVC_BACKWARD, avrcp_handle_previous },
+		{ AVC_FAST_FORWARD, avrcp_handle_fastforward },
+		{ AVC_REWIND, avrcp_handle_rewind },
 		{ },
 };
 
