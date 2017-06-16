@@ -138,6 +138,21 @@ static bool lp_previous(void *user_data)
 	return local_player_previous(p->lp);
 }
 
+static bool lp_seek_forward(void *user_data)
+{
+	struct player_link *p = user_data;
+
+	return local_player_seek(p->lp, true);
+}
+
+static bool lp_seek_rewind(void *user_data)
+{
+	struct player_link *p = user_data;
+
+	return local_player_seek(p->lp, false);
+}
+
+
 static struct avrcp_player_cb avrcp_cb = {
 	.list_settings = lp_list_settings,
 	.get_setting = lp_get_setting,
@@ -154,6 +169,8 @@ static struct avrcp_player_cb avrcp_cb = {
 	.pause = lp_pause,
 	.next = lp_next,
 	.previous = lp_previous,
+	.fastforward = lp_seek_forward,
+	.rewind = lp_seek_rewind,
 };
 
 static void status_changed(void *user_data)
