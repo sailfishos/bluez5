@@ -74,6 +74,7 @@ struct obex_transfer {
 	uint8_t status;
 	char *path;
 	struct obex_session *session;
+	guint emit_timeout;
 };
 
 static struct agent *agent = NULL;
@@ -549,18 +550,28 @@ static void emit_transfer_completed(struct obex_transfer *transfer,
 					TRANSFER_INTERFACE, "Status");
 }
 
-static void emit_transfer_progress(struct obex_transfer *transfer,
-					uint32_t total, uint32_t transferred)
+static gboolean emit_transfer_progress(gpointer user_data)
 {
+	struct obex_transfer *transfer = user_data;
+
+	transfer->emit_timeout = 0;
+
 	if (transfer->path == NULL)
-		return;
+		return FALSE;
 
 	g_dbus_emit_property_changed(connection, transfer->path,
 					TRANSFER_INTERFACE, "Transferred");
+
+	return FALSE;
 }
 
 static void transfer_free(struct obex_transfer *transfer)
 {
+	if (transfer->emit_timeout > 0) {
+		g_source_remove(transfer->emit_timeout);
+		transfer->emit_timeout = 0;
+	}
+
 	g_free(transfer->path);
 	g_free(transfer);
 }
@@ -778,8 +789,10 @@ void manager_unregister_session(struct obex_session *os)
 
 void manager_emit_transfer_progress(struct obex_transfer *transfer)
 {
-	emit_transfer_progress(transfer, transfer->session->size,
-						transfer->session->offset);
+	if (transfer->emit_timeout == 0)
+		transfer->emit_timeout =
+				g_timeout_add_seconds(1, emit_transfer_progress,
+							transfer);
 }
 
 void manager_emit_transfer_completed(struct obex_transfer *transfer)
