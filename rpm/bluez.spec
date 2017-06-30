@@ -163,7 +163,8 @@ autoreconf --force --install
     --with-phonebook=sailfish \
     --with-contentfilter=helperapp \
     --enable-jolla-blacklist \
-    --disable-hostname
+    --disable-hostname \
+    --enable-deprecated
 
 make %{?jobs:-j%jobs}
 
@@ -327,6 +328,7 @@ systemctl-user daemon-reload ||:
 %{_bindir}/bluetooth-player
 %{_bindir}/bluemoon
 %{_bindir}/bluetoothctl
+%{_bindir}/btattach
 %{_bindir}/btmgmt
 %{_bindir}/btmon
 %{_bindir}/ciptool
