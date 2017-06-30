@@ -1,11 +1,9 @@
 Name:       bluez5
 
-# >> macros
 %define _system_groupadd() getent group %{1} >/dev/null || groupadd -g 1002 %{1}
-# << macros
 
 Summary:    Bluetooth daemon
-Version:    5.39
+Version:    5.47
 Release:    1
 Group:      Applications/System
 License:    GPLv2+
@@ -163,7 +161,8 @@ autoreconf --force --install
     --with-phonebook=sailfish \
     --with-contentfilter=helperapp \
     --enable-jolla-blacklist \
-    --disable-hostname
+    --disable-hostname \
+    --enable-deprecated
 
 make %{?jobs:-j%jobs}
 
@@ -173,11 +172,8 @@ make %{?jobs:-j%jobs}
 
 %install
 rm -rf %{buildroot}
-# >> install pre
-# << install pre
 %make_install
 
-# >> install post
 
 # bluez systemd integration
 mkdir -p $RPM_BUILD_ROOT/%{_lib}/systemd/system/network.target.wants
@@ -227,7 +223,6 @@ cp -a test/simple-obex-agent %{buildroot}%{_libdir}/bluez/test/
 
 mkdir -p %{buildroot}%{_sysconfdir}/tracing/obexd/
 cp -a %{SOURCE4} %{buildroot}%{_sysconfdir}/tracing/obexd/
-# << install post
 
 %pre
 %_system_groupadd bluetooth
@@ -264,7 +259,6 @@ systemctl-user daemon-reload ||:
 
 %files
 %defattr(-,root,root,-)
-# >> files
 %{_libexecdir}/bluetooth/bluetoothd
 %{_libdir}/bluetooth/plugins/sixaxis.so
 %{_datadir}/dbus-1/system-services/org.bluez.service
@@ -272,61 +266,47 @@ systemctl-user daemon-reload ||:
 /%{_lib}/systemd/system/network.target.wants/bluetooth.service
 /%{_lib}/systemd/system/dbus-org.bluez.service
 %config %{_sysconfdir}/dbus-1/system.d/bluetooth.conf
-# << files
+%dir %{_localstatedir}/lib/bluetooth
 
 %files configs-mer
 %defattr(-,root,root,-)
-# >> files configs-mer
 %config %{_sysconfdir}/bluetooth/*
-# << files configs-mer
 
 %files cups
 %defattr(-,root,root,-)
-# >> files cups
 %{_libdir}/cups/backend/bluetooth
-# << files cups
 
 %files doc
 %defattr(-,root,root,-)
-# >> files doc
 %doc %{_mandir}/man1/*.1.gz
 %doc %{_mandir}/man8/*.8.gz
-# << files doc
 
 %files hcidump
 %defattr(-,root,root,-)
-# >> files hcidump
 %{_bindir}/hcidump
-# << files hcidump
 
 %files libs
 %defattr(-,root,root,-)
-# >> files libs
 %{_libdir}/libbluetooth.so.*
-# << files libs
 
 %files libs-devel
 %defattr(-,root,root,-)
-# >> files libs-devel
 %{_libdir}/libbluetooth.so
 %dir %{_includedir}/bluetooth
 %{_includedir}/bluetooth/*
 %{_libdir}/pkgconfig/bluez5.pc
-# << files libs-devel
 
 %files test
 %defattr(-,root,root,-)
-# >> files test
 %{_libdir}/bluez/test/*
-# << files test
 
 %files tools
 %defattr(-,root,root,-)
-# >> files tools
 %{_bindir}/bccmd
 %{_bindir}/bluetooth-player
 %{_bindir}/bluemoon
 %{_bindir}/bluetoothctl
+%{_bindir}/btattach
 %{_bindir}/btmgmt
 %{_bindir}/btmon
 %{_bindir}/ciptool
@@ -343,11 +323,9 @@ systemctl-user daemon-reload ||:
 %{_bindir}/sdptool
 /%{_lib}/udev/hid2hci
 /%{_lib}/udev/rules.d/97-hid2hci.rules
-# << files tools
 
 %files obexd
 %defattr(-,root,root,-)
-# >> files obexd
 %config %{_sysconfdir}/obexd.conf
 %dir %{_sysconfdir}/obexd/
 %dir %{_sysconfdir}/obexd/plugins/
@@ -357,15 +335,12 @@ systemctl-user daemon-reload ||:
 %{_datadir}/dbus-1/services/org.bluez.obex.service
 %{_libdir}/systemd/user/obex.service
 %{_libdir}/systemd/user/dbus-org.bluez.obex.service
-# << files obexd
 
 %files obexd-tools
 %defattr(-,root,root,-)
-# >> files obexd-tools
 %{_bindir}/obex-client-tool
 %{_bindir}/obex-server-tool
 %{_bindir}/obexctl
-# << files obexd-tools
 
 %files tracing
 %defattr(-,root,root,-)
