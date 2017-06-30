@@ -31,7 +31,7 @@ void gatt_add_descriptor(GDBusProxy *proxy);
 void gatt_remove_descriptor(GDBusProxy *proxy);
 
 void gatt_list_attributes(const char *device);
-GDBusProxy *gatt_select_attribute(const char *path);
+GDBusProxy *gatt_select_attribute(GDBusProxy *parent, const char *path);
 char *gatt_attribute_generator(const char *text, int state);
 
 void gatt_read_attribute(GDBusProxy *proxy);
@@ -41,6 +41,5 @@ void gatt_notify_attribute(GDBusProxy *proxy, bool enable);
 void gatt_add_manager(GDBusProxy *proxy);
 void gatt_remove_manager(GDBusProxy *proxy);
 
-void gatt_register_profile(DBusConnection *conn, GDBusProxy *proxy,
-								wordexp_t *w);
-void gatt_unregister_profile(DBusConnection *conn, GDBusProxy *proxy);
+void gatt_register_app(DBusConnection *conn, GDBusProxy *proxy, wordexp_t *w);
+void gatt_unregister_app(DBusConnection *conn, GDBusProxy *proxy);

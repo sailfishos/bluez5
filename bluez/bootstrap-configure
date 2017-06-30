@@ -11,9 +11,16 @@ fi
 		--mandir=/usr/share/man \
 		--sysconfdir=/etc \
 		--localstatedir=/var \
+		--enable-tools \
 		--enable-manpages \
 		--enable-backtrace \
+		--enable-testing \
 		--enable-experimental \
+		--enable-deprecated \
+		--enable-nfc \
+		--enable-sap \
+		--enable-health \
 		--enable-android \
 		--enable-sixaxis \
+		--enable-midi \
 		--disable-datafiles $*

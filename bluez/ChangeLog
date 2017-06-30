@@ -1,3 +1,25 @@
+ver 5.45:
+	Fix issue with agent support in Bluetooth client tool.
+	Fix issue with handling re-connection policy.
+	Fix issue with handling unknown ATT commands.
+	Fix issue with handling GATT Service Includes property.
+	Fix issue with handling PullAll for OBEX transfers.
+	Fix issue with handling delay in AVDTP Suspend responses.
+	Fix issue with handling decoding of management frames.
+	Add support for frame counters in Bluetooth monitor tool.
+
+ver 5.44:
+	Fix issue with GAP and GATT service registration.
+	Fix issue with wrong address type for ATT sockets.
+	Fix issue with dictionary entries for advertising.
+	Fix issue with device information and HID over GATT.
+	Fix issue with handling secondary service discovery.
+	Fix issue with handling Attribute Read Long procedure.
+	Fix issue with handling Attribute Write Long procedure.
+	Fix issue with handling abort of AVDTP SetConfiguration.
+	Add support for single-mode static address configuration.
+	Add support for MIDI over Bluetooth Low Energy.
+
 ver 5.43:
 	Fix issue with HID over GATT support.
 	Fix issue with ATT Find By Type response handling.
