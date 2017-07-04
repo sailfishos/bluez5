@@ -238,7 +238,7 @@ struct btd_adapter {
 	sdp_list_t *services;		/* Services associated to adapter */
 
 	struct btd_gatt_database *database;
-	struct btd_advertising *adv_manager;
+	struct btd_adv_manager *adv_manager;
 
 	gboolean initialized;
 
@@ -436,6 +436,11 @@ static const char *adapter_dir(struct btd_adapter *adapter)
 	}
 
 	return dir;
+}
+
+uint8_t btd_adapter_get_address_type(struct btd_adapter *adapter)
+{
+	return adapter->bdaddr_type;
 }
 
 static void store_adapter_info(struct btd_adapter *adapter)
@@ -5376,7 +5381,7 @@ static void adapter_remove(struct btd_adapter *adapter)
 	btd_gatt_database_destroy(adapter->database);
 	adapter->database = NULL;
 
-	btd_advertising_manager_destroy(adapter->adv_manager);
+	btd_adv_manager_destroy(adapter->adv_manager);
 	adapter->adv_manager = NULL;
 
 	g_slist_free(adapter->pin_callbacks);
@@ -5627,10 +5632,11 @@ static void update_found_devices(struct btd_adapter *adapter,
 		device_store_cached_name(dev, eir_data.name);
 
 	/*
-	 * If no client has requested discovery, then only update
-	 * already paired devices (skip temporary ones).
+	 * Only skip devices that are not connected, are temporary and there
+	 * is no active discovery session ongoing.
 	 */
-	if (device_is_temporary(dev) && !adapter->discovery_list) {
+	if (!btd_device_is_connected(dev) && (device_is_temporary(dev) &&
+						 !adapter->discovery_list)) {
 		eir_data_free(&eir_data);
 		return;
 	}
@@ -7107,7 +7113,7 @@ static void store_csrk(struct btd_adapter *adapter, const bdaddr_t *peer,
 
 	ba2str(peer, device_addr);
 
-	snprintf(filename, sizeof(filename), STORAGEDIR "/%s/%s/info",
+	snprintf(filename, PATH_MAX, STORAGEDIR "/%s/%s/info",
 					adapter_dir(adapter), device_addr);
 
 	key_file = g_key_file_new();
@@ -7582,8 +7588,7 @@ static int adapter_register(struct btd_adapter *adapter)
 	if (g_dbus_get_flags() & G_DBUS_FLAG_ENABLE_EXPERIMENTAL) {
 		/* Don't start advertising managers on non-LE controllers. */
 		if (adapter->supported_settings & MGMT_SETTING_LE) {
-			adapter->adv_manager =
-					btd_advertising_manager_new(adapter);
+			adapter->adv_manager = btd_adv_manager_new(adapter);
 		} else {
 			btd_info(adapter->dev_id,
 				"LEAdvertisingManager skipped, LE unavailable");
@@ -8087,7 +8092,7 @@ static void read_info_complete(uint8_t status, uint16_t length,
 		}
 	} else {
 		bacpy(&adapter->bdaddr, &rp->bdaddr);
-		if (adapter->supported_settings & MGMT_SETTING_BREDR)
+		if (!(adapter->supported_settings & MGMT_SETTING_LE))
 			adapter->bdaddr_type = BDADDR_BREDR;
 		else
 			adapter->bdaddr_type = BDADDR_LE_PUBLIC;

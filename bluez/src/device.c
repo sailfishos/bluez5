@@ -175,6 +175,8 @@ struct csrk_info {
 struct btd_device {
 	int ref_count;
 
+	bdaddr_t	conn_bdaddr;
+	uint8_t		conn_bdaddr_type;
 	bdaddr_t	bdaddr;
 	uint8_t		bdaddr_type;
 	char		*path;
@@ -520,11 +522,33 @@ static void browse_request_free(struct browse_req *req)
 	g_free(req);
 }
 
+static bool gatt_cache_is_enabled(struct btd_device *device)
+{
+	switch (main_opts.gatt_cache) {
+	case BT_GATT_CACHE_YES:
+		return device_is_paired(device, device->bdaddr_type);
+	case BT_GATT_CACHE_NO:
+		return false;
+	case BT_GATT_CACHE_ALWAYS:
+	default:
+		return true;
+	}
+}
+
+static void gatt_cache_cleanup(struct btd_device *device)
+{
+	if (gatt_cache_is_enabled(device))
+		return;
+
+	gatt_db_clear(device->db);
+}
+
 static void gatt_client_cleanup(struct btd_device *device)
 {
 	if (!device->client)
 		return;
 
+	gatt_cache_cleanup(device);
 	bt_gatt_client_set_service_changed(device->client, NULL, NULL, NULL);
 	bt_gatt_client_set_ready_handler(device->client, NULL, NULL, NULL);
 	bt_gatt_client_unref(device->client);
@@ -2122,6 +2146,9 @@ static void store_gatt_db(struct btd_device *device)
 		return;
 	}
 
+	if (!gatt_cache_is_enabled(device))
+		return;
+
 	ba2str(btd_adapter_get_address(adapter), src_addr);
 	ba2str(&device->bdaddr, dst_addr);
 
@@ -2593,6 +2620,9 @@ void device_add_connection(struct btd_device *dev, uint8_t bdaddr_type)
 		error("Device %s is already connected", addr);
 		return;
 	}
+
+	bacpy(&dev->conn_bdaddr, &dev->bdaddr);
+	dev->conn_bdaddr_type = dev->bdaddr_type;
 
 	/* If this is the first connection over this bearer */
 	if (bdaddr_type == BDADDR_BREDR)
@@ -3287,6 +3317,9 @@ static void load_gatt_db(struct btd_device *device, const char *local,
 {
 	char **keys, filename[PATH_MAX];
 	GKeyFile *key_file;
+
+	if (!gatt_cache_is_enabled(device))
+		return;
 
 	DBG("Restoring %s gatt database from file", peer);
 
@@ -4049,8 +4082,11 @@ int device_addr_type_cmp(gconstpointer a, gconstpointer b)
 	if (!dev->le)
 		return -1;
 
-	if (addr->bdaddr_type != dev->bdaddr_type)
+	if (addr->bdaddr_type != dev->bdaddr_type) {
+		if (addr->bdaddr_type == dev->conn_bdaddr_type)
+			return bacmp(&dev->conn_bdaddr, &addr->bdaddr);
 		return -1;
+	}
 
 	return cmp;
 }
@@ -4928,7 +4964,8 @@ int device_connect_le(struct btd_device *dev)
 	io = bt_io_connect(att_connect_cb, dev, NULL, &gerr,
 			BT_IO_OPT_SOURCE_BDADDR,
 			btd_adapter_get_address(adapter),
-			BT_IO_OPT_SOURCE_TYPE, BDADDR_LE_PUBLIC,
+			BT_IO_OPT_SOURCE_TYPE,
+			btd_adapter_get_address_type(adapter),
 			BT_IO_OPT_DEST_BDADDR, &dev->bdaddr,
 			BT_IO_OPT_DEST_TYPE, dev->bdaddr_type,
 			BT_IO_OPT_CID, ATT_CID,
@@ -5015,7 +5052,8 @@ static int device_browse_gatt(struct btd_device *device, DBusMessage *msg)
 				device, NULL, NULL,
 				BT_IO_OPT_SOURCE_BDADDR,
 				btd_adapter_get_address(adapter),
-				BT_IO_OPT_SOURCE_TYPE, BDADDR_LE_PUBLIC,
+				BT_IO_OPT_SOURCE_TYPE,
+				btd_adapter_get_address_type(adapter),
 				BT_IO_OPT_DEST_BDADDR, &device->bdaddr,
 				BT_IO_OPT_DEST_TYPE, device->bdaddr_type,
 				BT_IO_OPT_CID, ATT_CID,

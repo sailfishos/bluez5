@@ -325,17 +325,14 @@ static void test_condition_complete(struct test_data *data)
 #define test_bredrle_full(name, data, setup, func, timeout) \
 	do { \
 		struct test_data *user; \
-		user = malloc(sizeof(struct test_data)); \
-		if (!user) \
-			break; \
+		user = new0(struct test_data, 1); \
 		user->hciemu_type = HCIEMU_TYPE_BREDRLE; \
 		user->test_setup = setup; \
 		user->test_data = data; \
-		user->expected_version = 0x08; \
+		user->expected_version = 0x09; \
 		user->expected_manufacturer = 0x003f; \
 		user->expected_supported_settings = 0x0000bfff; \
 		user->initial_settings = 0x00000080; \
-		user->unmet_conditions = 0; \
 		tester_add_full(name, data, \
 				test_pre_setup, test_setup, func, NULL, \
 				test_post_teardown, timeout, user, free); \
@@ -347,9 +344,7 @@ static void test_condition_complete(struct test_data *data)
 #define test_bredr20(name, data, setup, func) \
 	do { \
 		struct test_data *user; \
-		user = malloc(sizeof(struct test_data)); \
-		if (!user) \
-			break; \
+		user = new0(struct test_data, 1); \
 		user->hciemu_type = HCIEMU_TYPE_LEGACY; \
 		user->test_setup = setup; \
 		user->test_data = data; \
@@ -357,7 +352,6 @@ static void test_condition_complete(struct test_data *data)
 		user->expected_manufacturer = 0x003f; \
 		user->expected_supported_settings = 0x000010bf; \
 		user->initial_settings = 0x00000080; \
-		user->unmet_conditions = 0; \
 		tester_add_full(name, data, \
 				test_pre_setup, test_setup, func, NULL, \
 				test_post_teardown, 2, user, free); \
@@ -366,9 +360,7 @@ static void test_condition_complete(struct test_data *data)
 #define test_bredr(name, data, setup, func) \
 	do { \
 		struct test_data *user; \
-		user = malloc(sizeof(struct test_data)); \
-		if (!user) \
-			break; \
+		user = new0(struct test_data, 1); \
 		user->hciemu_type = HCIEMU_TYPE_BREDR; \
 		user->test_setup = setup; \
 		user->test_data = data; \
@@ -376,7 +368,6 @@ static void test_condition_complete(struct test_data *data)
 		user->expected_manufacturer = 0x003f; \
 		user->expected_supported_settings = 0x000011ff; \
 		user->initial_settings = 0x00000080; \
-		user->unmet_conditions = 0; \
 		tester_add_full(name, data, \
 				test_pre_setup, test_setup, func, NULL, \
 				test_post_teardown, 2, user, free); \
@@ -385,17 +376,14 @@ static void test_condition_complete(struct test_data *data)
 #define test_le(name, data, setup, func) \
 	do { \
 		struct test_data *user; \
-		user = malloc(sizeof(struct test_data)); \
-		if (!user) \
-			break; \
+		user = new0(struct test_data, 1); \
 		user->hciemu_type = HCIEMU_TYPE_LE; \
 		user->test_setup = setup; \
 		user->test_data = data; \
-		user->expected_version = 0x08; \
+		user->expected_version = 0x09; \
 		user->expected_manufacturer = 0x003f; \
 		user->expected_supported_settings = 0x0000be1b; \
 		user->initial_settings = 0x00000200; \
-		user->unmet_conditions = 0; \
 		tester_add_full(name, data, \
 				test_pre_setup, test_setup, func, NULL, \
 				test_post_teardown, 2, user, free); \
@@ -5013,7 +5001,7 @@ static const struct generic_data read_local_oob_success_sc_test = {
 
 static const char ext_ctrl_info1[] = {
 	0x00, 0x00, 0x00, 0x01, 0xaa, 0x00, /* btaddr */
-	0x08, /* version */
+	0x09, /* version */
 	0x3f, 0x00, /* manufacturer */
 	0xff, 0xbf, 0x00, 0x00, /* supported settings */
 	0x80, 0x00, 0x00, 0x00, /* current settings */
@@ -5058,7 +5046,7 @@ static const struct setup_mgmt_cmd set_dev_class_cmd_arr1[] = {
 
 static const char ext_ctrl_info2[] = {
 	0x00, 0x00, 0x00, 0x01, 0xaa, 0x00, /* btaddr */
-	0x08, /* version */
+	0x09, /* version */
 	0x3f, 0x00, /* manufacturer */
 	0xff, 0xbf, 0x00, 0x00, /* supported settings */
 	0x81, 0x02, 0x00, 0x00, /* current settings */
@@ -5089,7 +5077,7 @@ static const struct generic_data read_ext_ctrl_info2 = {
 
 static const char ext_ctrl_info3[] = {
 	0x00, 0x00, 0x00, 0x01, 0xaa, 0x00, /* btaddr */
-	0x08, /* version */
+	0x09, /* version */
 	0x3f, 0x00, /* manufacturer */
 	0xff, 0xbf, 0x00, 0x00, /* supported settings */
 	0x80, 0x02, 0x00, 0x00, /* current settings */
@@ -5124,7 +5112,7 @@ static const struct generic_data read_ext_ctrl_info3 = {
 
 static const char ext_ctrl_info4[] = {
 	0x00, 0x00, 0x00, 0x01, 0xaa, 0x00, /* btaddr */
-	0x08, /* version */
+	0x09, /* version */
 	0x3f, 0x00, /* manufacturer */
 	0xff, 0xbf, 0x00, 0x00, /* supported settings */
 	0x80, 0x02, 0x00, 0x00, /* current settings */
@@ -5183,7 +5171,7 @@ static const struct setup_mgmt_cmd set_dev_class_cmd_arr2[] = {
 
 static const char ext_ctrl_info5[] = {
 	0x00, 0x00, 0x00, 0x01, 0xaa, 0x00, /* btaddr */
-	0x08, /* version */
+	0x09, /* version */
 	0x3f, 0x00, /* manufacturer */
 	0xff, 0xbf, 0x00, 0x00, /* supported settings */
 	0x81, 0x02, 0x00, 0x00, /* current settings */
@@ -6846,7 +6834,7 @@ static void test_remove_device(const void *test_data)
 	test_add_condition(data);
 }
 
-static void test_device_found(const void *test_data)
+static void trigger_device_found(void *user_data)
 {
 	struct test_data *data = tester_get_data();
 	const struct generic_data *test = data->test_data;
@@ -6866,7 +6854,18 @@ static void test_device_found(const void *test_data)
 	if (data->hciemu_type != HCIEMU_TYPE_LE)
 		bthost_write_scan_enable(bthost, 0x03);
 
+	test_condition_complete(data);
+}
+
+static void test_device_found(const void *test_data)
+{
+	struct test_data *data = tester_get_data();
+
 	test_command_generic(test_data);
+
+	/* Make sure discovery is enabled before enabling advertising. */
+	tester_wait(1, trigger_device_found, NULL);
+	test_add_condition(data);
 }
 
 static void pairing_new_conn(uint16_t handle, void *user_data)

@@ -973,7 +973,6 @@ static ssize_t vobject_list_get_next_header(void *object, void *buf, size_t mtu,
 
 	if (obj->firstpacket) {
 		obj->firstpacket = FALSE;
-
 		return g_obex_apparam_encode(obj->apparam, buf, mtu);
 	}
 

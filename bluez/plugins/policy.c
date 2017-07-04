@@ -212,7 +212,7 @@ static gboolean policy_connect_sink(gpointer user_data)
 	struct policy_data *data = user_data;
 	struct btd_service *service;
 
-	data->source_timer = 0;
+	data->sink_timer = 0;
 	data->sink_retries++;
 
 	service = btd_device_get_service(data->dev, A2DP_SINK_UUID);
@@ -649,7 +649,7 @@ static void service_cb(struct btd_service *service,
 	 */
 	reconnect = reconnect_add(service);
 
-	reconnect_reset(reconnect);
+	reconnect->active = false;
 
 	/*
 	 * Should this device be reconnected? A matching UUID might not

@@ -670,7 +670,7 @@ static struct adapter *find_ctrl_by_address(GList *source, const char *address)
 
 		dbus_message_iter_get_basic(&iter, &str);
 
-		if (!strcmp(str, address))
+		if (!strcasecmp(str, address))
 			return adapter;
 	}
 
@@ -691,7 +691,7 @@ static GDBusProxy *find_proxy_by_address(GList *source, const char *address)
 
 		dbus_message_iter_get_basic(&iter, &str);
 
-		if (!strcmp(str, address))
+		if (!strcasecmp(str, address))
 			return proxy;
 	}
 
@@ -1704,7 +1704,7 @@ static void cmd_select_attribute(const char *arg)
 		return;
 	}
 
-	proxy = gatt_select_attribute(arg);
+	proxy = gatt_select_attribute(default_attr, arg);
 	if (proxy)
 		set_default_attribute(proxy);
 }
@@ -1720,7 +1720,7 @@ static struct GDBusProxy *find_attribute(const char *arg)
 		return NULL;
 	}
 
-	proxy = gatt_select_attribute(arg);
+	proxy = gatt_select_attribute(default_attr, arg);
 	if (!proxy) {
 		rl_printf("Attribute %s not available\n", arg);
 		return NULL;
@@ -1814,7 +1814,7 @@ static void cmd_notify(const char *arg)
 	gatt_notify_attribute(default_attr, enable ? true : false);
 }
 
-static void cmd_register_profile(const char *arg)
+static void cmd_register_app(const char *arg)
 {
 	wordexp_t w;
 
@@ -1831,17 +1831,17 @@ static void cmd_register_profile(const char *arg)
 		return;
 	}
 
-	gatt_register_profile(dbus_conn, default_ctrl->proxy, &w);
+	gatt_register_app(dbus_conn, default_ctrl->proxy, &w);
 
 	wordfree(&w);
 }
 
-static void cmd_unregister_profile(const char *arg)
+static void cmd_unregister_app(const char *arg)
 {
 	if (check_default_ctrl() == FALSE)
 		return;
 
-	gatt_unregister_profile(dbus_conn, default_ctrl->proxy);
+	gatt_unregister_app(dbus_conn, default_ctrl->proxy);
 }
 
 static void cmd_version(const char *arg)
@@ -1853,6 +1853,8 @@ static void cmd_quit(const char *arg)
 {
 	g_main_loop_quit(main_loop);
 }
+
+static void cmd_help(const char *arg);
 
 static char *generic_generator(const char *text, int state,
 					GList *source, const char *property)
@@ -1878,7 +1880,7 @@ static char *generic_generator(const char *text, int state,
 
 		dbus_message_iter_get_basic(&iter, &str);
 
-		if (!strncmp(str, text, len))
+		if (!strncasecmp(str, text, len))
 			return strdup(str);
         }
 
@@ -1910,7 +1912,7 @@ static char *ctrl_generator(const char *text, int state)
 
 		dbus_message_iter_get_basic(&iter, &str);
 
-		if (!strncmp(str, text, len))
+		if (!strncasecmp(str, text, len))
 			return strdup(str);
 	}
 
@@ -2071,8 +2073,10 @@ static const struct {
 	{ "devices",      NULL,       cmd_devices, "List available devices" },
 	{ "paired-devices", NULL,     cmd_paired_devices,
 					"List paired devices"},
-	{ "system-alias", "<name>",   cmd_system_alias },
-	{ "reset-alias",  NULL,       cmd_reset_alias },
+	{ "system-alias", "<name>",   cmd_system_alias,
+					"Set controller alias" },
+	{ "reset-alias",  NULL,       cmd_reset_alias,
+					"Reset controller alias" },
 	{ "power",        "<on/off>", cmd_power, "Set controller power" },
 	{ "pairable",     "<on/off>", cmd_pairable,
 					"Set controller pairable mode" },
@@ -2130,22 +2134,23 @@ static const struct {
 	{ "list-attributes", "[dev]", cmd_list_attributes, "List attributes",
 							dev_generator },
 	{ "set-alias",    "<alias>",  cmd_set_alias, "Set device alias" },
-	{ "select-attribute", "<attribute>",  cmd_select_attribute,
+	{ "select-attribute", "<attribute/UUID>",  cmd_select_attribute,
 				"Select attribute", attribute_generator },
-	{ "attribute-info", "[attribute]",  cmd_attribute_info,
+	{ "attribute-info", "[attribute/UUID]",  cmd_attribute_info,
 				"Select attribute", attribute_generator },
 	{ "read",         NULL,       cmd_read, "Read attribute value" },
 	{ "write",        "<data=[xx xx ...]>", cmd_write,
 						"Write attribute value" },
 	{ "notify",       "<on/off>", cmd_notify, "Notify attribute value" },
-	{ "register-profile", "<UUID ...>", cmd_register_profile,
+	{ "register-application", "<UUID ...>", cmd_register_app,
 						"Register profile to connect" },
-	{ "unregister-profile", NULL, cmd_unregister_profile,
+	{ "unregister-application", NULL, cmd_unregister_app,
 						"Unregister profile" },
 	{ "version",      NULL,       cmd_version, "Display version" },
 	{ "quit",         NULL,       cmd_quit, "Quit program" },
-	{ "exit",         NULL,       cmd_quit },
-	{ "help" },
+	{ "exit",         NULL,       cmd_quit, "Quit program" },
+	{ "help",         NULL,       cmd_help,
+					"Display help about this program" },
 	{ }
 };
 
@@ -2245,23 +2250,31 @@ static void rl_handler(char *input)
 		}
 	}
 
-	if (strcmp(cmd, "help")) {
-		printf("Invalid command\n");
-		goto done;
-	}
+	printf("Invalid command\n");
+done:
+	free(input);
+}
+
+static void cmd_help(const char *arg)
+{
+	int i;
 
 	printf("Available commands:\n");
 
 	for (i = 0; cmd_table[i].cmd; i++) {
-		if (cmd_table[i].desc)
+		if ((int)strlen(cmd_table[i].arg? : "") <=
+					(int)(25 - strlen(cmd_table[i].cmd)))
 			printf("  %s %-*s %s\n", cmd_table[i].cmd,
 					(int)(25 - strlen(cmd_table[i].cmd)),
 					cmd_table[i].arg ? : "",
 					cmd_table[i].desc ? : "");
+		else
+			printf("  %s %-s\n" "  %s %-25s %s\n",
+					cmd_table[i].cmd,
+					cmd_table[i].arg ? : "",
+					"", "",
+					cmd_table[i].desc ? : "");
 	}
-
-done:
-	free(input);
 }
 
 static gboolean signal_handler(GIOChannel *channel, GIOCondition condition,
@@ -2355,10 +2368,10 @@ static gboolean option_version = FALSE;
 static gboolean parse_agent(const char *key, const char *value,
 					gpointer user_data, GError **error)
 {
-	if (value)
-		auto_register_agent = g_strdup(value);
-	else
-		auto_register_agent = g_strdup("");
+	if (!value)
+		return FALSE;
+
+	auto_register_agent = g_strdup(value);
 
 	return TRUE;
 }
@@ -2366,8 +2379,7 @@ static gboolean parse_agent(const char *key, const char *value,
 static GOptionEntry options[] = {
 	{ "version", 'v', 0, G_OPTION_ARG_NONE, &option_version,
 				"Show version information and exit" },
-	{ "agent", 'a', G_OPTION_FLAG_OPTIONAL_ARG,
-				G_OPTION_ARG_CALLBACK, parse_agent,
+	{ "agent", 'a', 0, G_OPTION_ARG_CALLBACK, parse_agent,
 				"Register agent handler", "CAPABILITY" },
 	{ NULL },
 };
@@ -2384,6 +2396,8 @@ int main(int argc, char *argv[])
 	GError *error = NULL;
 	GDBusClient *client;
 	guint signal;
+
+	auto_register_agent = g_strdup("");
 
 	context = g_option_context_new(NULL);
 	g_option_context_add_main_entries(context, options, NULL);
@@ -2406,6 +2420,7 @@ int main(int argc, char *argv[])
 
 	main_loop = g_main_loop_new(NULL, FALSE);
 	dbus_conn = g_dbus_setup_bus(DBUS_BUS_SYSTEM, NULL, NULL);
+	g_dbus_attach_object_manager(dbus_conn);
 
 	setlinebuf(stdout);
 	rl_attempted_completion_function = cmd_completion;
