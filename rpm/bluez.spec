@@ -266,6 +266,7 @@ systemctl-user daemon-reload ||:
 /%{_lib}/systemd/system/network.target.wants/bluetooth.service
 /%{_lib}/systemd/system/dbus-org.bluez.service
 %config %{_sysconfdir}/dbus-1/system.d/bluetooth.conf
+%dir %{_localstatedir}/lib/bluetooth
 
 %files configs-mer
 %defattr(-,root,root,-)
