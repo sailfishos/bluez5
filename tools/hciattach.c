@@ -62,6 +62,7 @@ struct uart_t {
 	char *bdaddr;
 	int  (*init) (int fd, struct uart_t *u, struct termios *ti);
 	int  (*post) (int fd, struct uart_t *u, struct termios *ti);
+	int do_flush;
 };
 
 #define FLOW_CTL	0x0001
@@ -275,7 +276,7 @@ static int intel(int fd, struct uart_t *u, struct termios *ti)
 
 static int bcm43xx(int fd, struct uart_t *u, struct termios *ti)
 {
-	return bcm43xx_init(fd, u->init_speed, u->speed, ti, u->bdaddr);
+	return bcm43xx_init(fd, u->init_speed, u->speed, ti, u->bdaddr, u->do_flush);
 }
 
 static int read_check(int fd, void *buf, int count)
@@ -1226,7 +1227,7 @@ static void usage(void)
 {
 	printf("hciattach - HCI UART driver initialization utility\n");
 	printf("Usage:\n");
-	printf("\thciattach [-n] [-p] [-b] [-r] [-t timeout] [-s initial_speed]"
+	printf("\thciattach [-n] [-p] [-b] [-r] [-t timeout] [-s initial_speed] [-d]"
 			" <tty> <type | id> [speed] [flow|noflow]"
 			" [sleep|nosleep] [bdaddr]\n");
 	printf("\thciattach -l\n");
@@ -1239,6 +1240,7 @@ int main(int argc, char *argv[])
 	int to = 10;
 	int init_speed = 0;
 	int send_break = 0;
+	int do_flush = 1;
 	pid_t pid;
 	struct sigaction sa;
 	struct pollfd p;
@@ -1249,7 +1251,7 @@ int main(int argc, char *argv[])
 	printpid = 0;
 	raw = 0;
 
-	while ((opt=getopt(argc, argv, "bnpt:s:lr")) != EOF) {
+	while ((opt=getopt(argc, argv, "bnpt:s:lrd")) != EOF) {
 		switch(opt) {
 		case 'b':
 			send_break = 1;
@@ -1280,6 +1282,10 @@ int main(int argc, char *argv[])
 
 		case 'r':
 			raw = 1;
+			break;
+
+		case 'd':
+			do_flush = 0;
 			break;
 
 		default:
@@ -1362,6 +1368,8 @@ int main(int argc, char *argv[])
 	   the hardware's default */
 	if (init_speed)
 		u->init_speed = init_speed;
+
+	u->do_flush = do_flush;
 
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_flags   = SA_NOCLDSTOP;
