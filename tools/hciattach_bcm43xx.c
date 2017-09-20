@@ -213,7 +213,7 @@ static int bcm43xx_set_speed(int fd, struct termios *ti, uint32_t speed)
 	return 0;
 }
 
-static int bcm43xx_load_firmware(int fd, const char *fw)
+static int bcm43xx_load_firmware(int fd, const char *fw, int do_flush)
 {
 	unsigned char cmd[] = { HCI_COMMAND_PKT, 0x2e, 0xfc, 0x00 };
 	struct timespec tm_mode = { 0, 50000000 };
@@ -250,7 +250,9 @@ static int bcm43xx_load_firmware(int fd, const char *fw)
 	/* Wait 50ms to let the firmware placed in download mode */
 	nanosleep(&tm_mode, NULL);
 
-	tcflush(fd, TCIOFLUSH);
+	if(do_flush) {
+		tcflush(fd, TCIOFLUSH);
+	}
 
 	while ((n = read(fd_fw, &tx_buf[1], 3))) {
 		if (n < 0) {
@@ -273,7 +275,10 @@ static int bcm43xx_load_firmware(int fd, const char *fw)
 		}
 
 		read_hci_event(fd, resp, sizeof(resp));
-		tcflush(fd, TCIOFLUSH);
+
+		if(do_flush) {
+			tcflush(fd, TCIOFLUSH);
+		}
 	}
 
 	/* Wait for firmware ready */
@@ -340,7 +345,7 @@ static int bcm43xx_locate_patch(const char *dir_name,
 }
 
 int bcm43xx_init(int fd, int def_speed, int speed, struct termios *ti,
-		const char *bdaddr)
+		const char *bdaddr, int do_flush)
 {
 	char chip_name[20];
 	char fw_path[PATH_MAX];
@@ -359,7 +364,7 @@ int bcm43xx_init(int fd, int def_speed, int speed, struct termios *ti,
 		if (bcm43xx_set_speed(fd, ti, speed))
 			return -1;
 
-		if (bcm43xx_load_firmware(fd, fw_path))
+		if (bcm43xx_load_firmware(fd, fw_path, do_flush))
 			return -1;
 
 		/* Controller speed has been reset to def speed */
