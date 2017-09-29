@@ -185,7 +185,7 @@ install -d -m 0755 $RPM_BUILD_ROOT/%{_localstatedir}/lib/bluetooth
 
 # bluez configuration
 mkdir -p ${RPM_BUILD_ROOT}%{_sysconfdir}/bluetooth
-for CONFFILE in profiles/input/input.conf profiles/network/network.conf profiles/proximity/proximity.conf src/main.conf ; do
+for CONFFILE in profiles/input/input.conf profiles/network/network.conf src/main.conf ; do
 install -v -m644 ${CONFFILE} ${RPM_BUILD_ROOT}%{_sysconfdir}/bluetooth/`basename ${CONFFILE}`
 done
 
