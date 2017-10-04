@@ -40,7 +40,7 @@ obexd_builtin_modules += pbap
 obexd_builtin_sources += obexd/plugins/pbap.c \
 				obexd/plugins/vcard.h obexd/plugins/vcard.c \
 				obexd/plugins/phonebook.h \
-				obexd/plugins/phonebook-dummy.c
+				obexd/plugins/phonebook-@PLUGIN_PHONEBOOK@.c
 endif
 
 obexd_builtin_modules += mas
@@ -51,6 +51,16 @@ obexd_builtin_sources += obexd/plugins/mas.c obexd/src/map_ap.h \
 obexd_builtin_modules += mns
 obexd_builtin_sources += obexd/client/mns.c obexd/src/map_ap.h \
 				obexd/client/map-event.h
+
+obexd_builtin_sources += obexd/plugins/contentfilter.h \
+			obexd/plugins/contentfilter-@PLUGIN_CONTENTFILTER@.c
+
+obexd_builtin_sources += obexd/src/access.c
+
+#if JOLLABLACKLIST
+obexd_builtin_modules += jolla_blacklist
+obexd_builtin_sources += obexd/plugins/jolla-blacklist.c
+#endif
 
 libexec_PROGRAMS += obexd/src/obexd
 

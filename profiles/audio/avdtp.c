@@ -47,6 +47,7 @@
 #include "src/shared/queue.h"
 #include "src/adapter.h"
 #include "src/device.h"
+#include "src/hcid.h"
 
 #include "avdtp.h"
 #include "sink.h"
@@ -1016,6 +1017,15 @@ static void avdtp_sep_set_state(struct avdtp *session,
 
 	if (state == AVDTP_STATE_IDLE &&
 				g_slist_find(session->streams, stream)) {
+		DBG("Removing stream %p. ", stream);
+
+		/* Quick hack to deal with abort requests made by stream callbacks */
+		if (session->req && session->req->stream == stream) {
+			DBG("Resetting stream to NULL for request %p (session %p)",
+				session->req, session);
+			session->req->stream = NULL;
+		}
+
 		session->streams = g_slist_remove(session->streams, stream);
 		stream_free(stream);
 	}
@@ -1294,7 +1304,10 @@ static GSList *caps_to_list(uint8_t *data, int size,
 static gboolean avdtp_unknown_cmd(struct avdtp *session, uint8_t transaction,
 							uint8_t signal_id)
 {
-	return avdtp_send(session, transaction, AVDTP_MSG_TYPE_GEN_REJECT,
+	uint8_t message_type = session->version < 0x0103
+		? 0x00
+		: AVDTP_MSG_TYPE_GEN_REJECT;
+	return avdtp_send(session, transaction, message_type,
 							signal_id, NULL, 0);
 }
 
@@ -2367,6 +2380,13 @@ struct avdtp *avdtp_new(GIOChannel *chan, struct btd_device *device,
 	avdtp_set_state(session, AVDTP_SESSION_STATE_CONNECTING);
 
 	btd_device_add_uuid(device, ADVANCED_AUDIO_UUID);
+	if (!main_opts.reverse_sdp) {
+		uint32_t class = btd_device_get_class(device);
+		if ((class & (1 << 21)) && (class & (1 << 18)))
+			btd_device_add_uuid(device, A2DP_SINK_UUID);
+		if ((class & (1 << 21)) && (class & (1 << 19)))
+			btd_device_add_uuid(device, A2DP_SOURCE_UUID);
+	}
 
 	session->io = g_io_channel_ref(chan);
 	session->io_id = g_io_add_watch(chan, G_IO_ERR | G_IO_HUP | G_IO_NVAL,

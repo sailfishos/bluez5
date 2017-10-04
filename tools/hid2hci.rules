@@ -6,9 +6,7 @@ SUBSYSTEM!="usb*", GOTO="hid2hci_end"
 # Variety of Dell Bluetooth devices - match on a mouse device that is
 # self powered and where a HID report needs to be sent to switch modes
 # Known supported devices: 413c:8154, 413c:8158, 413c:8162
-ATTR{bInterfaceClass}=="03", ATTR{bInterfaceSubClass}=="01", ATTR{bInterfaceProtocol}=="02", \
-  ATTRS{bDeviceClass}=="00", ATTRS{idVendor}=="413c", ATTRS{bmAttributes}=="e0", \
-  RUN+="hid2hci --method=dell --devpath=%p", ENV{HID2HCI_SWITCH}="1"
+# udev 144 or later has covered these Dell mice, so unnecessary to have a duplicate but wrong rule.
 
 # Logitech devices
 KERNEL=="hiddev*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c70[345abce]|c71[34bc]", \

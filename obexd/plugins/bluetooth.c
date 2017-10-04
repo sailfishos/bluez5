@@ -462,6 +462,7 @@ static int bluetooth_getsockname(GIOChannel *io, char **name)
 
 static struct obex_transport_driver driver = {
 	.name = "bluetooth",
+	.service = OBEX_ALL_SERVICES,
 	.start = bluetooth_start,
 	.getpeername = bluetooth_getpeername,
 	.getsockname = bluetooth_getsockname,
@@ -472,12 +473,18 @@ static unsigned int listener_id = 0;
 
 static int bluetooth_init(void)
 {
+	uint16_t exclude_mask;
+
 	connection = g_dbus_setup_private(DBUS_BUS_SYSTEM, NULL, NULL);
 	if (connection == NULL)
 		return -EPERM;
 
 	listener_id = g_dbus_add_service_watch(connection, "org.bluez",
 				name_acquired, name_released, NULL, NULL);
+
+	exclude_mask = obex_option_exclude(driver.name);
+	if (exclude_mask)
+		driver.service &= ~exclude_mask;
 
 	return obex_transport_driver_register(&driver);
 }

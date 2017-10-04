@@ -462,6 +462,27 @@ void register_device_id(uint16_t source, uint16_t vendor,
 	update_db_timestamp();
 }
 
+void update_device_id(uint16_t source, uint16_t vendor,
+					uint16_t product, uint16_t version)
+{
+	sdp_list_t *list;
+	uuid_t uuid;
+
+	sdp_uuid16_create(&uuid, PNP_INFO_SVCLASS_ID);
+
+	for (list = sdp_get_record_list(); list; list = list->next) {
+		sdp_record_t *rec = list->data;
+		if (!sdp_uuid_cmp(&uuid, &rec->svclass)) {
+			DBG("Removing old DI record (handle %d)", rec->handle);
+			remove_record_from_server(rec->handle);
+			break;
+		}
+
+	}
+
+	register_device_id(source, vendor, product, version);
+}
+
 static bool class_supported(uint16_t class)
 {
 	sdp_list_t *list;

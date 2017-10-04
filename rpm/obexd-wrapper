@@ -1,0 +1,11 @@
+#!/bin/sh
+
+if [ -f /etc/tracing/obexd/obexd.tracing ]; then
+    . /etc/tracing/obexd/obexd.tracing
+fi
+
+if [ -f /etc/obexd.conf ]; then
+    . /etc/obexd.conf
+fi
+
+exec /usr/libexec/bluetooth/obexd -n $TRACING $OBEXD_ARGUMENTS

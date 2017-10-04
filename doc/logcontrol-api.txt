@@ -1,0 +1,22 @@
+Debug log control
+=================
+
+Service		org.bluez
+Interface	org.bluez.DebugLog
+Object path	/
+
+Methods		void Enable(string pattern)
+
+			Enables all logs that match the pattern.
+
+		void Disable(string pattern)
+
+			Disables all logs that match the pattern.
+
+		array{string} List()
+
+			Returns all available log names and aliases.
+
+			In order for Enable or Disable call to have any
+			effect, the pattern must match one or more of
+			these strings.

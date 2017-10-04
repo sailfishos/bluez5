@@ -327,7 +327,7 @@ static gboolean intr_watch_cb(GIOChannel *chan, GIOCondition cond, gpointer data
 	}
 
 	/* Close control channel */
-	if (idev->ctrl_io && !(cond & G_IO_NVAL))
+	if (idev->ctrl_io)
 		g_io_channel_shutdown(idev->ctrl_io, TRUE, NULL);
 
 	btd_service_disconnecting_complete(idev->service, 0);
@@ -520,7 +520,7 @@ static gboolean ctrl_watch_cb(GIOChannel *chan, GIOCondition cond, gpointer data
 	}
 
 	/* Close interrupt channel */
-	if (idev->intr_io && !(cond & G_IO_NVAL))
+	if (idev->intr_io)
 		g_io_channel_shutdown(idev->intr_io, TRUE, NULL);
 
 	return FALSE;
@@ -1013,10 +1013,14 @@ static int connection_disconnect(struct input_device *idev, uint32_t flags)
 	if (!is_connected(idev))
 		return -ENOTCONN;
 
-	/* Standard HID disconnect */
+	/* Don't auto-reconnect if disconnecting locally */
+	idev->reconnect_mode = RECONNECT_NONE;
+
+	/* Standard HID disconnect; disconnect control after intr has
+	   disconnected, if intr channel exists */
 	if (idev->intr_io)
 		g_io_channel_shutdown(idev->intr_io, TRUE, NULL);
-	if (idev->ctrl_io)
+	else if (idev->ctrl_io)
 		g_io_channel_shutdown(idev->ctrl_io, TRUE, NULL);
 
 	if (idev->uhid)

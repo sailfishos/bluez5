@@ -225,7 +225,7 @@ static int bcm43xx_set_speed(int fd, struct termios *ti, uint32_t speed)
 	return 0;
 }
 
-static int bcm43xx_load_firmware(int fd, const char *fw)
+static int bcm43xx_load_firmware(int fd, const char *fw, int do_flush)
 {
 	unsigned char cmd[] = { HCI_COMMAND_PKT, 0x2e, 0xfc, 0x00 };
 	struct timespec tm_mode = { 0, 50000000 };
@@ -262,7 +262,9 @@ static int bcm43xx_load_firmware(int fd, const char *fw)
 	/* Wait 50ms to let the firmware placed in download mode */
 	nanosleep(&tm_mode, NULL);
 
-	tcflush(fd, TCIOFLUSH);
+	if(do_flush) {
+		tcflush(fd, TCIOFLUSH);
+	}
 
 	while ((n = read(fd_fw, &tx_buf[1], 3))) {
 		if (n < 0) {
@@ -285,7 +287,10 @@ static int bcm43xx_load_firmware(int fd, const char *fw)
 		}
 
 		read_hci_event(fd, resp, sizeof(resp));
-		tcflush(fd, TCIOFLUSH);
+
+		if(do_flush) {
+			tcflush(fd, TCIOFLUSH);
+		}
 	}
 
 	/* Wait for firmware ready */
@@ -351,8 +356,45 @@ static int bcm43xx_locate_patch(const char *dir_name,
 	return ret;
 }
 
+static int bcm43xx_set_lpm(int fd)
+{
+	unsigned char lpm_param[16];
+	unsigned char resp[CC_MIN_SIZE];
+
+	memset(lpm_param, 0, sizeof(lpm_param));
+
+	lpm_param[0] = HCI_COMMAND_PKT;
+	lpm_param[1] = 0x27;
+	lpm_param[2] = 0xfc;
+	lpm_param[3] = 0x0c;
+	lpm_param[4] = 1; // LPM_SLEEP_MODE
+	lpm_param[5] = 1; // LPM_IDLE_THRESHOLD
+	lpm_param[6] = 1; // LPM_HC_IDLE_THRESHOLD
+	lpm_param[7] = 1; // LPM_BT_WAKE_POLARITY
+	lpm_param[8] = 1; // LPM_HOST_WAKE_POLARITY
+	lpm_param[9] = 1; // LPM_ALLOW_HOST_SLEEP_DURING_SCO
+	lpm_param[10] = 1; // LPM_COMBINE_SLEEP_MODE_AND_LPM
+	lpm_param[11] = 0; // LPM_ENABLE_UART_TXD_TRI_STATE
+	lpm_param[12] = 0; // not applicable
+	lpm_param[13] = 0; // not applicable
+	lpm_param[14] = 0; // not applicable
+	lpm_param[15] = 0; // LPM_PULSED_HOST_WAKE
+
+	if (write(fd, lpm_param, sizeof(lpm_param)) != sizeof(lpm_param)) {
+		fprintf(stderr, "Failed to write lpm\n");
+		return -1;
+	}
+
+	if (read_hci_event(fd, resp, sizeof(resp)) < CC_MIN_SIZE) {
+		fprintf(stderr, "Failed to set lpm\n");
+		return -1;
+	}
+
+	return 0;
+}
+
 int bcm43xx_init(int fd, int def_speed, int speed, struct termios *ti,
-		const char *bdaddr)
+		const char *bdaddr, int do_flush, int low_power)
 {
 	char chip_name[20];
 	char fw_path[PATH_MAX];
@@ -371,7 +413,7 @@ int bcm43xx_init(int fd, int def_speed, int speed, struct termios *ti,
 		if (bcm43xx_set_speed(fd, ti, speed))
 			return -1;
 
-		if (bcm43xx_load_firmware(fd, fw_path))
+		if (bcm43xx_load_firmware(fd, fw_path, do_flush))
 			return -1;
 
 		/* Controller speed has been reset to def speed */
@@ -386,6 +428,11 @@ int bcm43xx_init(int fd, int def_speed, int speed, struct termios *ti,
 
 	if (bdaddr)
 		bcm43xx_set_bdaddr(fd, bdaddr);
+
+	if (low_power) {
+		if (bcm43xx_set_lpm(fd))
+			return -1;
+	}
 
 	if (bcm43xx_set_speed(fd, ti, speed))
 		return -1;

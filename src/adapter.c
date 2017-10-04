@@ -2990,7 +2990,8 @@ static const GDBusMethodTable adapter_methods[] = {
 				set_discovery_filter) },
 	{ GDBUS_METHOD("StopDiscovery", NULL, NULL, stop_discovery) },
 	{ GDBUS_ASYNC_METHOD("RemoveDevice",
-			GDBUS_ARGS({ "device", "o" }), NULL, remove_device) },
+			GDBUS_ARGS({ "device", "o" }), NULL, remove_device),
+	  .privilege = BLUEZ_PRIVILEGED_ACCESS },
 	{ GDBUS_METHOD("GetDiscoveryFilters", NULL,
 			GDBUS_ARGS({ "filters", "as" }),
 			get_discovery_filters) },
@@ -5937,6 +5938,11 @@ static void adapter_stop(struct btd_adapter *adapter)
 			adapter_remove_connection(adapter, device, addr_type);
 	}
 
+	if (adapter->discovery_enable == 0x01) {
+		adapter->discovery_type = 0x00;
+		adapter->discovery_enable = 0x00;
+	}
+
 	g_dbus_emit_property_changed(dbus_conn, adapter->path,
 					ADAPTER_INTERFACE, "Discovering");
 
@@ -7570,7 +7576,7 @@ void adapter_foreach(adapter_cb func, gpointer user_data)
 	g_slist_foreach(adapters, (GFunc) func, user_data);
 }
 
-static int set_did(struct btd_adapter *adapter, uint16_t vendor,
+int btd_adapter_set_did(struct btd_adapter *adapter, uint16_t vendor,
 			uint16_t product, uint16_t version, uint16_t source)
 {
 	struct mgmt_cp_set_device_id cp;
@@ -7611,10 +7617,11 @@ static int adapter_register(struct btd_adapter *adapter)
 
 	adapter->path = g_strdup_printf("/org/bluez/hci%d", adapter->dev_id);
 
-	if (!g_dbus_register_interface(dbus_conn,
+	if (!g_dbus_register_interface_priv(dbus_conn,
 					adapter->path, ADAPTER_INTERFACE,
 					adapter_methods, NULL,
-					adapter_properties, adapter,
+					adapter_properties,
+					0, BLUEZ_PRIVILEGED_ACCESS, adapter,
 					adapter_free)) {
 		btd_error(adapter->dev_id,
 				"Adapter interface init failed on path %s",
@@ -7677,7 +7684,7 @@ static int adapter_register(struct btd_adapter *adapter)
 		/* DeviceID record is added by sdpd-server before any other
 		 * record is registered. */
 		adapter_service_insert(adapter, sdp_record_find(0x10000));
-		set_did(adapter, main_opts.did_vendor, main_opts.did_product,
+		btd_adapter_set_did(adapter, main_opts.did_vendor, main_opts.did_product,
 				main_opts.did_version, main_opts.did_source);
 	}
 
