@@ -141,7 +141,7 @@ Group:      Development/Tools
 Will enable tracing for BlueZ 5 OBEX daemon
 
 %prep
-%setup -q -n %{name}-%{version}/bluez
+%setup -q -n %{name}-%{version}
 
 ./bootstrap
 
