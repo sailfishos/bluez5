@@ -443,4 +443,8 @@ AC_ARG_ENABLE(hostname, AC_HELP_STRING([--disable-hostname],
 		[disable hostname plugin]), [enable_hostname=${enableval}])
 AM_CONDITIONAL(HOSTNAME, test "${enable_hostname}" != "no")
 
+AC_ARG_ENABLE(autopair, AC_HELP_STRING([--disable-autopair],
+		[disable autopair plugin]), [enable_autopair=${enableval}])
+AM_CONDITIONAL(AUTOPAIR, test "${enable_autopair}" != "no")
+
 AC_OUTPUT(Makefile src/bluetoothd.8 lib/bluez.pc)
