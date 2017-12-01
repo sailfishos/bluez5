@@ -4,8 +4,10 @@ builtin_modules += hostname
 builtin_sources += plugins/hostname.c
 endif
 
+if AUTOPAIR
 builtin_modules += autopair
 builtin_sources += plugins/autopair.c
+endif
 
 builtin_modules += policy
 builtin_sources += plugins/policy.c
