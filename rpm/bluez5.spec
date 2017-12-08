@@ -162,7 +162,8 @@ autoreconf --force --install
     --with-contentfilter=helperapp \
     --enable-jolla-blacklist \
     --disable-hostname \
-    --enable-deprecated
+    --enable-deprecated \
+    --disable-autopair
 
 make %{?jobs:-j%jobs}
 
