@@ -7942,6 +7942,7 @@ static void auth_failed_callback(uint16_t index, uint16_t length,
 {
 	const struct mgmt_ev_auth_failed *ev = param;
 	struct btd_adapter *adapter = user_data;
+	struct btd_device *device;
 
 	if (length < sizeof(*ev)) {
 		btd_error(adapter->dev_id, "Too small auth failed mgmt event");
@@ -7950,6 +7951,17 @@ static void auth_failed_callback(uint16_t index, uint16_t length,
 
 	bonding_attempt_complete(adapter, &ev->addr.bdaddr, ev->addr.type,
 								ev->status);
+
+	/* 
+	 * If authentication fails because device no longer paired,
+	 * let's remove the connection, notify of it and remove the device as well.
+	 */
+	device = btd_adapter_find_device(adapter, &ev->addr.bdaddr, ev->addr.type);
+	if (device && !device_is_retrying(device) && ev->status == MGMT_STATUS_NOT_PAIRED) {
+		adapter_remove_connection(adapter, device, ev->addr.type);
+		disconnect_notify(device, ev->status);
+		btd_adapter_remove_device(adapter, device);
+	}
 }
 
 static void store_link_key(struct btd_adapter *adapter,
