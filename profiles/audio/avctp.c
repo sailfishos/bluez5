@@ -184,6 +184,7 @@ struct key_pressed {
 };
 
 struct avctp {
+	int ref;
 	struct avctp_server *server;
 	struct btd_device *device;
 
@@ -298,6 +299,31 @@ static gboolean avctp_passthrough_rsp(struct avctp *session, uint8_t code,
 					uint8_t subunit, uint8_t transaction,
 					uint8_t *operands, size_t operand_count,
 					void *user_data);
+
+static struct avctp *avctp_ref(struct avctp *session)
+{
+	session->ref++;
+	return session;
+}
+
+static void avctp_unref(struct avctp *session)
+{
+	if (!session)
+		return;
+
+	session->ref--;
+
+	if (session->ref == 0) {
+		DBG("AVCTP: destroy session %p", session);
+		g_free(session);
+	}
+}
+
+static void io_destroy_cb(gpointer data)
+{
+	struct avctp *session = data;
+	avctp_unref(session);
+}
 
 static int send_event(int fd, uint16_t type, uint16_t code, int32_t value)
 {
@@ -535,6 +561,7 @@ static void avctp_channel_destroy(struct avctp_channel *chan)
 	g_slist_foreach(chan->processed, pending_destroy, NULL);
 	g_slist_free(chan->processed);
 	g_slist_free_full(chan->handlers, g_free);
+	avctp_unref(chan->session);
 	g_free(chan);
 }
 
@@ -545,19 +572,25 @@ static void avctp_disconnected(struct avctp *session)
 	if (!session)
 		return;
 
-	if (session->browsing)
+	if (session->browsing) {
 		avctp_channel_destroy(session->browsing);
+		session->browsing = NULL;
+	}
 
-	if (session->control)
+	if (session->control) {
 		avctp_channel_destroy(session->control);
+		session->control = NULL;
+	}
 
 	if (session->auth_id != 0) {
 		btd_cancel_authorization(session->auth_id);
 		session->auth_id = 0;
 	}
 
-	if (session->key.timer > 0)
+	if (session->key.timer > 0) {
 		g_source_remove(session->key.timer);
+		session->key.timer = 0;
+	}
 
 	if (session->uinput >= 0) {
 		char address[18];
@@ -572,8 +605,9 @@ static void avctp_disconnected(struct avctp *session)
 
 	server = session->server;
 	server->sessions = g_slist_remove(server->sessions, session);
+
 	btd_device_unref(session->device);
-	g_free(session);
+	avctp_unref(session);
 }
 
 static void avctp_set_state(struct avctp *session, avctp_state_t new_state,
@@ -981,6 +1015,8 @@ static gboolean session_cb(GIOChannel *chan, GIOCondition cond, gpointer data)
 	int ret, packet_size, operand_count, sock;
 	struct avctp_pdu_handler *handler;
 
+	avctp_ref(session);
+
 	if (cond & (G_IO_ERR | G_IO_HUP | G_IO_NVAL))
 		goto failed;
 
@@ -1012,7 +1048,7 @@ static gboolean session_cb(GIOChannel *chan, GIOCondition cond, gpointer data)
 
 	if (avctp->cr == AVCTP_RESPONSE) {
 		control_response(control, avctp, avc, operands, operand_count);
-		return TRUE;
+		goto leave;
 	}
 
 	packet_size = AVCTP_HEADER_LENGTH + AVC_HEADER_LENGTH;
@@ -1052,11 +1088,14 @@ done:
 	if (ret != packet_size)
 		goto failed;
 
+leave:
+	avctp_unref(session);
 	return TRUE;
 
 failed:
 	DBG("AVCTP session %p got disconnected", session);
 	avctp_set_state(session, AVCTP_STATE_DISCONNECTED, -EIO);
+	avctp_unref(session);
 	return FALSE;
 }
 
@@ -1144,7 +1183,7 @@ static struct avctp_channel *avctp_channel_create(struct avctp *session,
 	struct avctp_channel *chan;
 
 	chan = g_new0(struct avctp_channel, 1);
-	chan->session = session;
+	chan->session = avctp_ref(session);
 	chan->io = g_io_channel_ref(io);
 	chan->queue = g_queue_new();
 	chan->destroy = destroy;
@@ -1237,10 +1276,17 @@ static void avctp_connect_cb(GIOChannel *chan, GError *err, gpointer data)
 	uint16_t imtu, omtu;
 	GError *gerr = NULL;
 
+	avctp_ref(session);
+
 	if (err) {
 		avctp_set_state(session, AVCTP_STATE_DISCONNECTED, -EIO);
 		error("%s", err->message);
-		return;
+		goto done;
+	}
+
+	if (session->state != AVCTP_STATE_CONNECTING) {
+		DBG("AVCTP: connect callback while session is not in CONNECTING.");
+		goto done;
 	}
 
 	bt_io_get(chan, &gerr,
@@ -1252,7 +1298,7 @@ static void avctp_connect_cb(GIOChannel *chan, GError *err, gpointer data)
 		avctp_set_state(session, AVCTP_STATE_DISCONNECTED, -EIO);
 		error("%s", gerr->message);
 		g_error_free(gerr);
-		return;
+		goto done;
 	}
 
 	DBG("AVCTP: connected to %s", address);
@@ -1283,12 +1329,17 @@ static void avctp_connect_cb(GIOChannel *chan, GError *err, gpointer data)
 	init_uinput(session);
 
 	avctp_set_state(session, AVCTP_STATE_CONNECTED, 0);
+done:
+	avctp_unref(session);
 }
 
 static void auth_cb(DBusError *derr, void *user_data)
 {
 	struct avctp *session = user_data;
 	GError *err = NULL;
+
+	/* io_destroy_cb will unref if bt_io_accept() succeeds */
+	avctp_ref(session);
 
 	session->auth_id = 0;
 
@@ -1300,15 +1351,21 @@ static void auth_cb(DBusError *derr, void *user_data)
 	if (derr && dbus_error_is_set(derr)) {
 		error("Access denied: %s", derr->message);
 		avctp_set_state(session, AVCTP_STATE_DISCONNECTED, -EIO);
-		return;
+		goto fail;
 	}
 
 	if (!bt_io_accept(session->control->io, avctp_connect_cb, session,
-								NULL, &err)) {
+								io_destroy_cb, &err)) {
 		error("bt_io_accept: %s", err->message);
 		g_error_free(err);
 		avctp_set_state(session, AVCTP_STATE_DISCONNECTED, -EIO);
+		goto fail;
 	}
+
+	return;
+
+fail:
+	avctp_unref(session);
 }
 
 static struct avctp_server *find_server(GSList *list, struct btd_adapter *a)
@@ -1350,12 +1407,14 @@ static struct avctp *avctp_get_internal(struct btd_device *device)
 
 	session = g_new0(struct avctp, 1);
 
+	session->ref = 1;
 	session->server = server;
 	session->device = btd_device_ref(device);
 	session->state = AVCTP_STATE_DISCONNECTED;
 	session->uinput = -1;
 
 	server->sessions = g_slist_append(server->sessions, session);
+	DBG("AVCTP: new session %p", session);
 
 	return session;
 }
@@ -1365,6 +1424,8 @@ static void avctp_control_confirm(struct avctp *session, GIOChannel *chan,
 {
 	const bdaddr_t *src;
 	const bdaddr_t *dst;
+
+	avctp_ref(session);
 
 	if (session->control != NULL) {
 		error("Control: Refusing unexpected connect");
@@ -1376,7 +1437,7 @@ static void avctp_control_confirm(struct avctp *session, GIOChannel *chan,
 		 * AVRCP SPEC V1.5 4.1.1 Connection Establishment
 		 */
 		avctp_set_state(session, AVCTP_STATE_DISCONNECTED, -EAGAIN);
-		return;
+		goto done;
 	}
 
 	avctp_set_state(session, AVCTP_STATE_CONNECTING, 0);
@@ -1393,10 +1454,13 @@ static void avctp_control_confirm(struct avctp *session, GIOChannel *chan,
 
 	session->control->watch = g_io_add_watch(chan, G_IO_ERR | G_IO_HUP |
 						G_IO_NVAL, session_cb, session);
-	return;
+	goto done;
 
 drop:
 	avctp_set_state(session, AVCTP_STATE_DISCONNECTED, -EIO);
+
+done:
+	avctp_unref(session);
 }
 
 static void avctp_browsing_confirm(struct avctp *session, GIOChannel *chan,
@@ -1404,13 +1468,16 @@ static void avctp_browsing_confirm(struct avctp *session, GIOChannel *chan,
 {
 	GError *err = NULL;
 
+	/* io_destroy_cb will unref if bt_io_accept() succeeds */
+	avctp_ref(session);
+
 	if (session->control == NULL || session->browsing != NULL) {
 		error("Browsing: Refusing unexpected connect");
 		g_io_channel_shutdown(chan, TRUE, NULL);
-		return;
+		goto done;
 	}
 
-	if (bt_io_accept(chan, avctp_connect_browsing_cb, session, NULL,
+	if (bt_io_accept(chan, avctp_connect_browsing_cb, session, io_destroy_cb,
 								&err)) {
 		avctp_set_state(session, AVCTP_STATE_BROWSING_CONNECTING, 0);
 		return;
@@ -1419,7 +1486,8 @@ static void avctp_browsing_confirm(struct avctp *session, GIOChannel *chan,
 	error("Browsing: %s", err->message);
 	g_error_free(err);
 
-	return;
+done:
+	avctp_unref(session);
 }
 
 static void avctp_confirm_cb(GIOChannel *chan, gpointer data)
@@ -1455,6 +1523,8 @@ static void avctp_confirm_cb(GIOChannel *chan, gpointer data)
 	if (session == NULL)
 		return;
 
+	avctp_ref(session);
+
 	if (btd_device_get_service(device, AVRCP_REMOTE_UUID) == NULL)
 		btd_device_add_uuid(device, AVRCP_REMOTE_UUID);
 
@@ -1470,7 +1540,7 @@ static void avctp_confirm_cb(GIOChannel *chan, gpointer data)
 		break;
 	}
 
-	return;
+	avctp_unref(session);
 }
 
 static GIOChannel *avctp_server_socket(const bdaddr_t *src, gboolean master,
@@ -2007,7 +2077,7 @@ struct avctp *avctp_connect(struct btd_device *device)
 
 	src = btd_adapter_get_address(session->server->adapter);
 
-	io = bt_io_connect(avctp_connect_cb, session, NULL, &err,
+	io = bt_io_connect(avctp_connect_cb, session, io_destroy_cb, &err,
 				BT_IO_OPT_SOURCE_BDADDR, src,
 				BT_IO_OPT_DEST_BDADDR,
 				device_get_address(session->device),
@@ -2021,6 +2091,8 @@ struct avctp *avctp_connect(struct btd_device *device)
 		return NULL;
 	}
 
+	avctp_ref(session);
+
 	session->control = avctp_channel_create(session, io, NULL);
 	session->initiator = true;
 	g_io_channel_unref(io);
@@ -2033,18 +2105,23 @@ int avctp_connect_browsing(struct avctp *session)
 	const bdaddr_t *src;
 	GError *err = NULL;
 	GIOChannel *io;
+	int ret = 0;
 
-	if (session->state != AVCTP_STATE_CONNECTED)
-		return -ENOTCONN;
+	avctp_ref(session);
+
+	if (session->state != AVCTP_STATE_CONNECTED) {
+		ret = -ENOTCONN;
+		goto done;
+	}
 
 	if (session->browsing != NULL)
-		return 0;
+		goto done;
 
 	avctp_set_state(session, AVCTP_STATE_BROWSING_CONNECTING, 0);
 
 	src = btd_adapter_get_address(session->server->adapter);
 
-	io = bt_io_connect(avctp_connect_browsing_cb, session, NULL, &err,
+	io = bt_io_connect(avctp_connect_browsing_cb, session, io_destroy_cb, &err,
 				BT_IO_OPT_SOURCE_BDADDR, src,
 				BT_IO_OPT_DEST_BDADDR,
 				device_get_address(session->device),
@@ -2055,14 +2132,20 @@ int avctp_connect_browsing(struct avctp *session)
 	if (err) {
 		error("%s", err->message);
 		g_error_free(err);
-		return -EIO;
+		ret = -EIO;
+		goto done;
 	}
+
+	/* io_destroy_cb will unref */
+	avctp_ref(session);
 
 	session->browsing = avctp_channel_create(session, io,
 						avctp_destroy_browsing);
 	g_io_channel_unref(io);
 
-	return 0;
+done:
+	avctp_unref(session);
+	return ret;
 }
 
 void avctp_disconnect(struct avctp *session)
