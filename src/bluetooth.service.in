@@ -9,7 +9,6 @@ ConditionPathExists=!/run/systemd/boot-status/ACT_DEAD
 Type=dbus
 BusName=org.bluez
 EnvironmentFile=-/etc/tracing/bluez/bluez.tracing
-Environment=$MGMT_DEBUG
 ExecStart=@libexecdir@/bluetoothd -n $TRACING
 NotifyAccess=main
 #WatchdogSec=10
