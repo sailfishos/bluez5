@@ -19,6 +19,8 @@ Requires:   hwdata >= 0.215
 Requires:   bluez5-configs
 Requires:   systemd
 Requires:   oneshot
+# /etc/obexd.conf requires find
+Requires:   findutils
 Requires(pre): /usr/sbin/groupadd
 Requires(preun): systemd
 Requires(post): systemd
