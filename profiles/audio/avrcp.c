@@ -1903,7 +1903,7 @@ static void avrcp_handle_media_player_list(struct avrcp *session,
 				struct avrcp_browsing_header *pdu,
 				uint32_t start_item, uint32_t end_item)
 {
-	struct avrcp_player *player = session->target->player;
+	struct avrcp_player *player = target_get_player(session);
 	struct get_folder_items_rsp *rsp;
 	const char *name = NULL;
 	GSList *l;
