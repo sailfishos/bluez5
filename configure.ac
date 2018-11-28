@@ -489,6 +489,11 @@ AC_ARG_ENABLE(jolla_did, AC_HELP_STRING([--enable-jolla-did],
 			 [enable_jolla_did=${enableval}])
 AM_CONDITIONAL(JOLLADIDPLUGIN, test "${enable_jolla_did}" = "yes")
 
+AC_ARG_ENABLE(sailfish_exclude, AC_HELP_STRING([--enable-sailfish-exclude],
+				[compile with Sailfish exclude plugin]),
+				[enable_sailfish_exclude=${enableval}])
+AM_CONDITIONAL(SAILFISHEXCLUDEPLUGIN, test "${enable_sailfish_exclude}" = "yes")
+
 AC_ARG_WITH([contentfilter], AC_HELP_STRING([--with-contentfilter=PLUGIN],
 				[obexd contentfilter plugin (default=dummy)]),
 					[plugin_contentfilter=${withval}])
