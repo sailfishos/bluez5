@@ -379,6 +379,11 @@ AC_ARG_ENABLE(jolla_logcontrol, AC_HELP_STRING([--enable-jolla-logcontrol],
 				[enable_jolla_logcontrol=${enableval}])
 AM_CONDITIONAL(JOLLALOGCONTROLPLUGIN, test "${enable_jolla_logcontrol}" = "yes")
 
+AC_ARG_ENABLE(sailfish_exclude, AC_HELP_STRING([--enable-sailfish-exclude],
+				[compile with Sailfish exclude plugin]),
+				[enable_sailfish_exclude=${enableval}])
+AM_CONDITIONAL(SAILFISHEXCLUDEPLUGIN, test "${enable_sailfish_exclude}" = "yes")
+
 AC_ARG_WITH([phonebook], AC_HELP_STRING([--with-phonebook=PLUGIN],
 				[obexd phonebook plugin (default=dummy)]),
 					[plugin_phonebook=${withval}])
