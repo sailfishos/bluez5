@@ -311,6 +311,11 @@ builtin_modules += jolla_did
 builtin_sources += plugins/jolla-did.c
 endif
 
+if SAILFISHEXCLUDEPLUGIN
+builtin_modules += sailfish_exclude
+builtin_sources += plugins/sailfish-exclude.c
+endif
+
 pkglibexec_PROGRAMS += src/bluetoothd
 
 src_bluetoothd_SOURCES = $(builtin_sources) \
