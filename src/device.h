@@ -168,6 +168,12 @@ void device_set_past_support(struct btd_device *device, bool value);
 
 void device_set_refresh_discovery(struct btd_device *dev, bool refresh);
 
+typedef void (*service_probe_filter_cb) (struct btd_device *device, GSList **services,
+                                         void *user_data);
+guint device_add_service_probe_filter(service_probe_filter_cb filter_cb,
+                                      void *user_data);
+void device_remove_service_probe_filter(guint id);
+
 typedef void (*disconnect_watch) (struct btd_device *device, gboolean removal,
 					void *user_data);
 
