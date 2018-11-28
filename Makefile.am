@@ -296,6 +296,11 @@ builtin_modules += jolla_did
 builtin_sources += plugins/jolla-did.c
 endif
 
+if SAILFISHEXCLUDEPLUGIN
+builtin_modules += sailfish_exclude
+builtin_sources += plugins/sailfish-exclude.c
+endif
+
 if MAINTAINER_MODE
 plugin_LTLIBRARIES += plugins/external-dummy.la
 plugins_external_dummy_la_SOURCES = plugins/external-dummy.c
