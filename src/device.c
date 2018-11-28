@@ -165,6 +165,14 @@ struct svc_callback {
 	void *user_data;
 };
 
+struct service_filter_callback {
+	guint id;
+	service_probe_filter_cb func;
+	void *user_data;
+};
+
+static GSList *service_filter_callbacks;
+
 /* Per-bearer (LE or BR/EDR) device state */
 struct bearer_state {
 	bool paired;
@@ -273,6 +281,7 @@ static const uint16_t uuid_list[] = {
 
 static int device_browse_gatt(struct btd_device *device, DBusMessage *msg);
 static int device_browse_sdp(struct btd_device *device, DBusMessage *msg);
+static void filter_services(struct btd_device *device, GSList **services);
 
 static struct bearer_state *get_state(struct btd_device *dev,
 							uint8_t bdaddr_type)
@@ -4277,9 +4286,10 @@ GSList *btd_device_get_uuids(struct btd_device *device)
 struct probe_data {
 	struct btd_device *dev;
 	GSList *uuids;
+	GSList *services;
 };
 
-static struct btd_service *probe_service(struct btd_device *device,
+static struct btd_service *get_service(struct btd_device *device,
 						struct btd_profile *profile,
 						GSList *uuids)
 {
@@ -4297,31 +4307,21 @@ static struct btd_service *probe_service(struct btd_device *device,
 		return l->data;
 
 	service = service_create(device, profile);
-
-	if (service_probe(service)) {
-		btd_service_unref(service);
-		return NULL;
-	}
-
-	/* Only set auto connect if profile has set the flag and can really
-	 * accept connections.
-	 */
-	if (profile->auto_connect && profile->accept)
-		device_set_auto_connect(device, TRUE);
+	DBG("create new service (profile %s) for device %s", profile->name, device->name);
 
 	return service;
 }
 
 static void dev_probe(struct btd_profile *p, void *user_data)
 {
-	struct probe_data *d = user_data;
+	struct probe_data *probe = user_data;
 	struct btd_service *service;
 
-	service = probe_service(d->dev, p, d->uuids);
+	service = get_service(probe->dev, p, probe->uuids);
 	if (!service)
 		return;
 
-	d->dev->services = g_slist_append(d->dev->services, service);
+	probe->services = g_slist_append(probe->services, service);
 }
 
 void device_probe_profile(gpointer a, gpointer b)
@@ -4329,10 +4329,25 @@ void device_probe_profile(gpointer a, gpointer b)
 	struct btd_device *device = a;
 	struct btd_profile *profile = b;
 	struct btd_service *service;
+	GSList *list = NULL;
 
-	service = probe_service(device, profile, device->uuids);
-	if (!service)
+	DBG("");
+
+	if (!(service = get_service(device, profile, device->uuids)))
 		return;
+
+	list = g_slist_append(list, service);
+	filter_services(device, &list);
+
+	if (!list)
+		return;
+
+	g_slist_free(list);
+
+	if (service_probe(service)) {
+		btd_service_unref(service);
+		return;
+	}
 
 	device->services = g_slist_append(device->services, service);
 
@@ -4362,9 +4377,75 @@ void device_remove_profile(gpointer a, gpointer b)
 	service_remove(service);
 }
 
+static void probe_services(struct btd_device *device, GSList *services)
+{
+	struct btd_service *service;
+	struct btd_profile *profile;
+	GSList *i;
+
+	for (i = services; i; i = i->next) {
+		service = i->data;
+
+		if (service_probe(service)) {
+			btd_service_unref(service);
+			continue;
+		}
+
+		profile = btd_service_get_profile(service);
+
+		/* Only set auto connect if profile has set the flag and can really
+		 * accept connections.
+		 */
+		if (profile->auto_connect && profile->accept)
+			device_set_auto_connect(device, TRUE);
+
+		device->services = g_slist_append(device->services, service);
+	}
+
+}
+
+guint device_add_service_probe_filter(service_probe_filter_cb filter_cb,
+                                      void *user_data)
+{
+	struct service_filter_callback *filter;
+	static guint id = 0;
+
+	filter = g_new0(struct service_filter_callback, 1);
+	filter->id = ++id ? id : ++id;
+	filter->func = filter_cb;
+	filter->user_data = user_data;
+	service_filter_callbacks = g_slist_append(service_filter_callbacks, filter);
+
+	return filter->id;
+}
+
+void device_remove_service_probe_filter(guint id)
+{
+	GSList *i;
+
+	for (i = service_filter_callbacks; i; i = i->next) {
+		struct service_filter_callback *filter = i->data;
+		if (filter->id == id) {
+			service_filter_callbacks = g_slist_delete_link(service_filter_callbacks, i);
+			g_free(filter);
+			return;
+		}
+	}
+}
+
+static void filter_services(struct btd_device *device, GSList **services)
+{
+	GSList *i;
+
+	for (i = service_filter_callbacks; i; i = i->next) {
+		struct service_filter_callback *filter = i->data;
+		filter->func(device, services, filter->user_data);
+	}
+}
+
 void device_probe_profiles(struct btd_device *device, GSList *uuids)
 {
-	struct probe_data d = { device, uuids };
+	struct probe_data probe = { device, uuids, NULL };
 	char addr[18];
 
 	ba2str(&device->bdaddr, addr);
@@ -4376,7 +4457,12 @@ void device_probe_profiles(struct btd_device *device, GSList *uuids)
 
 	DBG("Probing profiles for device %s", addr);
 
-	btd_profile_foreach(dev_probe, &d);
+	btd_profile_foreach(dev_probe, &probe);
+
+	filter_services(device, &probe.services);
+
+	probe_services(device, probe.services);
+	g_slist_free(probe.services);
 
 add_uuids:
 	device_add_uuids(device, uuids);
@@ -6243,6 +6329,8 @@ void btd_device_add_uuid(struct btd_device *device, const char *uuid)
 {
 	GSList *uuid_list;
 	char *new_uuid;
+
+	DBG("device %s, uuid %s", device->name, uuid);
 
 	if (g_slist_find_custom(device->uuids, uuid, bt_uuid_strcmp))
 		return;

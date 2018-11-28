@@ -140,6 +140,12 @@ void device_store_svc_chng_ccc(struct btd_device *device, uint8_t bdaddr_type,
 void device_load_svc_chng_ccc(struct btd_device *device, uint16_t *ccc_le,
 							uint16_t *ccc_bredr);
 
+typedef void (*service_probe_filter_cb) (struct btd_device *device, GSList **services,
+                                         void *user_data);
+guint device_add_service_probe_filter(service_probe_filter_cb filter_cb,
+                                      void *user_data);
+void device_remove_service_probe_filter(guint id);
+
 typedef void (*disconnect_watch) (struct btd_device *device, gboolean removal,
 					void *user_data);
 
