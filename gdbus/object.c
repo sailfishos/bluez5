@@ -1365,6 +1365,10 @@ gboolean g_dbus_register_interface_priv(DBusConnection *connection,
 {
 	struct generic_data *data;
 
+	if (!dbus_validate_path(path, NULL) ||
+				!dbus_validate_interface(name, NULL))
+		return FALSE;
+
 	data = object_path_ref(connection, path);
 	if (data == NULL)
 		return FALSE;
