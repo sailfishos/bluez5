@@ -160,6 +160,7 @@ autoreconf --force --install
     --enable-jolla-dbus-access \
     --enable-jolla-did \
     --enable-jolla-logcontrol \
+    --enable-sailfish-exclude \
     --with-phonebook=sailfish \
     --with-contentfilter=helperapp \
     --enable-jolla-blacklist \
