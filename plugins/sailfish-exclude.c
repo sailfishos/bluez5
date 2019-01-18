@@ -214,7 +214,7 @@ void filter_cb(struct btd_device *device, GSList **services,
 {
 	struct btd_service *service;
 	struct device_exclude *devex;
-	GSList *new_list = NULL;
+	GSList *new_list = g_slist_copy(*services);
 	GSList *i;
 
 	DBG("");
@@ -232,8 +232,7 @@ void filter_cb(struct btd_device *device, GSList **services,
 				device_remove_profile(devex->device, btd_service_get_profile(remove));
 			else
 				btd_service_unref(remove);
-		} else {
-			new_list = g_slist_append(new_list, service);
+			new_list = g_slist_remove(new_list, remove);
 		}
 	}
 
