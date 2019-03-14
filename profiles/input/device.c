@@ -126,6 +126,18 @@ bool input_get_classic_bonded_only(void)
 	return classic_bonded_only;
 }
 
+void input_autodetect_hidp(void)
+{
+	int ctl;
+
+	ctl = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HIDP);
+	uhid_state = ctl < 0 ? UHID_ENABLED : UHID_DISABLED;
+	if (ctl >= 0)
+		close(ctl);
+
+	DBG("Autodetect HIDP: Use %s HIDP", uhid_state == UHID_ENABLED ? "userspace" : "kernel");
+}
+
 static void input_device_enter_reconnect_mode(struct input_device *idev);
 static int connection_disconnect(struct input_device *idev, uint32_t flags);
 
