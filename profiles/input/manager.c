@@ -84,6 +84,7 @@ static int input_init(void)
 	if (config) {
 		int idle_timeout;
 		gboolean uhid_enabled, classic_bonded_only, auto_sec;
+		gboolean uhid_autodetect;
 
 		idle_timeout = g_key_file_get_integer(config, "General",
 							"IdleTimeout", &err);
@@ -93,13 +94,32 @@ static int input_init(void)
 		} else
 			g_clear_error(&err);
 
-		uhid_enabled = g_key_file_get_boolean(config, "General",
-							"UserspaceHID", &err);
-		if (!err) {
-			DBG("input.conf: UserspaceHID=%s", uhid_enabled ?
-							"true" : "false");
-			input_enable_userspace_hid(uhid_enabled);
-		} else
+		if (g_key_file_has_key(config, "General",
+					"AutodetectUserspaceHID", &err)) {
+			uhid_autodetect = g_key_file_get_boolean(config, "General",
+					"AutodetectUserspaceHID", &err);
+			if (!err) {
+				DBG("input.conf: AutodetectUserspaceHID=%s",
+						uhid_autodetect ? "true" : "false");
+				if (uhid_autodetect)
+					input_autodetect_hidp();
+			}
+		} else {
+			if (err) {
+				g_clear_error(&err);
+				err = NULL;
+			}
+
+			uhid_enabled = g_key_file_get_boolean(config, "General",
+					"UserspaceHID", &err);
+			if (!err) {
+				DBG("input.conf: UserspaceHID=%s",
+						uhid_enabled ? "true" : "false");
+				input_enable_userspace_hid(uhid_enabled);
+			}
+		}
+
+		if (err)
 			g_clear_error(&err);
 
 		classic_bonded_only = g_key_file_get_boolean(config, "General",
