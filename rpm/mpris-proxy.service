@@ -1,0 +1,12 @@
+[Unit]
+Description=Bluez5-MPRIS Proxy
+Requires=lipstick.service
+After=lipstick.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/mpris-proxy
+
+[Install]
+WantedBy=post-user-session.target
+
