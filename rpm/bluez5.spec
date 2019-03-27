@@ -10,6 +10,7 @@ Source1:    obexd-wrapper
 Source2:    obexd.conf
 Source3:    bluez.tracing
 Source4:    obexd.tracing
+Source5:    mpris-proxy.service
 Requires:   %{name}-libs = %{version}-%{release}
 Requires:   dbus >= 0.60
 Requires:   hwdata >= 0.215
@@ -192,6 +193,11 @@ ${RPM_BUILD_ROOT}/%{_userunitdir}/obex.service
 # obexd configuration
 mkdir -p ${RPM_BUILD_ROOT}/%{_sysconfdir}/obexd/{plugins,noplugins}
 
+# mpris-proxy service
+install -m644 -D %{SOURCE5} ${RPM_BUILD_ROOT}/%{_userunitdir}/mpris-proxy.service
+mkdir -p $RPM_BUILD_ROOT/%{_userunitdir}/post-user-session.target.wants
+ln -s ../mpris-proxy.service $RPM_BUILD_ROOT/%{_userunitdir}/post-user-session.target.wants/mpris-proxy.service
+
 # HACK!! copy manually missing tools
 cp -a tools/bluetooth-player %{buildroot}%{_bindir}/
 cp -a tools/btmgmt %{buildroot}%{_bindir}/
@@ -220,6 +226,18 @@ rm -rf %{buildroot}%{_datadir}/zsh
 
 %postun libs -p /sbin/ldconfig
 
+%preun
+if [ "$1" -eq 0 ]; then
+systemctl-user stop mpris-proxy.service ||:
+fi
+
+%post
+systemctl-user daemon-reload ||:
+systemctl-user reload-or-try-restart mpris-proxy.service ||:
+
+%postun
+systemctl-user daemon-reload ||:
+
 %files
 %defattr(-,root,root,-)
 %{_libexecdir}/bluetooth/bluetoothd
@@ -228,6 +246,9 @@ rm -rf %{buildroot}%{_datadir}/zsh
 /%{_unitdir}/bluetooth.service
 /%{_unitdir}/network.target.wants/bluetooth.service
 /%{_unitdir}/dbus-org.bluez.service
+%{_bindir}/mpris-proxy
+/%{_userunitdir}/mpris-proxy.service
+/%{_userunitdir}/post-user-session.target.wants/mpris-proxy.service
 %config %{_sysconfdir}/dbus-1/system.d/bluetooth.conf
 %dir %{_localstatedir}/lib/bluetooth
 
@@ -274,7 +295,6 @@ rm -rf %{buildroot}%{_datadir}/zsh
 %{_bindir}/hex2hcd
 %{_bindir}/l2ping
 %{_bindir}/l2test
-%{_bindir}/mpris-proxy
 %{_bindir}/rctest
 %{_bindir}/rfcomm
 %{_bindir}/sdptool
