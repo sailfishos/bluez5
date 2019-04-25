@@ -426,4 +426,12 @@ if (test -z "${plugin_phonebook}"); then
 fi
 AC_SUBST(PLUGIN_PHONEBOOK, [${plugin_phonebook}])
 
+AC_ARG_WITH([contentfilter], AC_HELP_STRING([--with-contentfilter=PLUGIN],
+				[obexd contentfilter plugin (default=dummy)]),
+					[plugin_contentfilter=${withval}])
+if (test -z "${plugin_contentfilter}"); then
+	plugin_contentfilter=dummy
+fi
+AC_SUBST(PLUGIN_CONTENTFILTER, [${plugin_contentfilter}])
+
 AC_OUTPUT(Makefile src/bluetoothd.8 lib/bluez.pc)
