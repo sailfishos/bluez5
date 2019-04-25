@@ -185,7 +185,7 @@ static void phonebook_size_result(const char *buffer, size_t bufsize,
 	if (missed > 0)	{
 		DBG("missed %d", missed);
 
-		pbap->obj->apparam = g_obex_apparam_set_uint16(
+		pbap->obj->apparam = g_obex_apparam_set_uint8(
 							pbap->obj->apparam,
 							NEWMISSEDCALLS_TAG,
 							missed);
@@ -224,7 +224,7 @@ static void query_result(const char *buffer, size_t bufsize, int vcards,
 
 		pbap->obj->firstpacket = TRUE;
 
-		pbap->obj->apparam = g_obex_apparam_set_uint16(
+		pbap->obj->apparam = g_obex_apparam_set_uint8(
 							pbap->obj->apparam,
 							NEWMISSEDCALLS_TAG,
 							missed);
