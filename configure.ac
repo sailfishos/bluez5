@@ -470,5 +470,13 @@ AC_ARG_ENABLE(jolla_did, AC_HELP_STRING([--enable-jolla-did],
 			 [enable_jolla_did=${enableval}])
 AM_CONDITIONAL(JOLLADIDPLUGIN, test "${enable_jolla_did}" = "yes")
 
+AC_ARG_WITH([contentfilter], AC_HELP_STRING([--with-contentfilter=PLUGIN],
+				[obexd contentfilter plugin (default=dummy)]),
+					[plugin_contentfilter=${withval}])
+if (test -z "${plugin_contentfilter}"); then
+	plugin_contentfilter=dummy
+fi
+AC_SUBST(PLUGIN_CONTENTFILTER, [${plugin_contentfilter}])
+
 AC_CONFIG_FILES(Makefile src/bluetoothd.rst lib/bluez.pc mesh/bluetooth-meshd.rst)
 AC_OUTPUT
