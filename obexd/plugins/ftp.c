@@ -281,11 +281,8 @@ int ftp_setpath(struct obex_session *os, void *user_data)
 	if (err == -ENOENT)
 		goto not_found;
 
-	if (err == -ENOENT) {
-		goto not_found;
-	} else if (err < 0) {
+	if (err < 0)
 		goto done;
-	}
 
 	err = access_check(FTP_TARGET, TARGET_SIZE, ACCESS_OP_READ, fullname);
 	if (err < 0) {
@@ -297,6 +294,9 @@ int ftp_setpath(struct obex_session *os, void *user_data)
 
 	if (err < 0) {
 		err = -errno;
+
+		if (err == -ENOENT)
+			goto not_found;
 
 		DBG("stat: %s(%d)", strerror(-err), -err);
 

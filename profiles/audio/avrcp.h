@@ -101,7 +101,7 @@ struct avrcp_player_cb {
 	bool (*pause) (void *user_data);
 	bool (*next) (void *user_data);
 	bool (*previous) (void *user_data);
-	bool (*forward) (void *user_data);
+	bool (*fastforward) (void *user_data);
 	bool (*rewind) (void *user_data);
 };
 

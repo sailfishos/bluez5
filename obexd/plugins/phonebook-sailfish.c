@@ -356,10 +356,7 @@ static void cache_process(struct phonebook_data *data,
 
 static void cache_end(struct phonebook_data *data, gboolean last)
 {
-	(data->ready_cb)(data->user_data,
-			data->newmissedcalls > 0xff
-			? 0xff
-			: data->newmissedcalls);
+	(data->ready_cb)(data->user_data);
 }
 
 static void fetch_one_cb(DBusPendingCall *pend,

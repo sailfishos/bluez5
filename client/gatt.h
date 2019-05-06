@@ -34,8 +34,8 @@ void gatt_list_attributes(const char *device);
 GDBusProxy *gatt_select_attribute(GDBusProxy *parent, const char *path);
 char *gatt_attribute_generator(const char *text, int state);
 
-void gatt_read_attribute(GDBusProxy *proxy);
-void gatt_write_attribute(GDBusProxy *proxy, const char *arg);
+void gatt_read_attribute(GDBusProxy *proxy, int argc, char *argv[]);
+void gatt_write_attribute(GDBusProxy *proxy, int argc, char *argv[]);
 void gatt_notify_attribute(GDBusProxy *proxy, bool enable);
 
 void gatt_acquire_write(GDBusProxy *proxy, const char *arg);
@@ -47,18 +47,26 @@ void gatt_release_notify(GDBusProxy *proxy, const char *arg);
 void gatt_add_manager(GDBusProxy *proxy);
 void gatt_remove_manager(GDBusProxy *proxy);
 
-void gatt_register_app(DBusConnection *conn, GDBusProxy *proxy, wordexp_t *w);
+void gatt_register_app(DBusConnection *conn, GDBusProxy *proxy,
+						int argc, char *argv[]);
 void gatt_unregister_app(DBusConnection *conn, GDBusProxy *proxy);
 
 void gatt_register_service(DBusConnection *conn, GDBusProxy *proxy,
-								wordexp_t *w);
+						int argc, char *argv[]);
 void gatt_unregister_service(DBusConnection *conn, GDBusProxy *proxy,
-								wordexp_t *w);
+						int argc, char *argv[]);
 
-void gatt_register_chrc(DBusConnection *conn, GDBusProxy *proxy, wordexp_t *w);
+void gatt_register_chrc(DBusConnection *conn, GDBusProxy *proxy,
+						int argc, char *argv[]);
 void gatt_unregister_chrc(DBusConnection *conn, GDBusProxy *proxy,
-								wordexp_t *w);
+						int argc, char *argv[]);
 
-void gatt_register_desc(DBusConnection *conn, GDBusProxy *proxy, wordexp_t *w);
+void gatt_register_desc(DBusConnection *conn, GDBusProxy *proxy,
+						int argc, char *argv[]);
 void gatt_unregister_desc(DBusConnection *conn, GDBusProxy *proxy,
-								wordexp_t *w);
+						int argc, char *argv[]);
+
+void gatt_register_include(DBusConnection *conn, GDBusProxy *proxy,
+					int argc, char *argv[]);
+void gatt_unregister_include(DBusConnection *conn, GDBusProxy *proxy,
+						int argc, char *argv[]);

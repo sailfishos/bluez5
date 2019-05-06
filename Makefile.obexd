@@ -1,4 +1,3 @@
-
 if SYSTEMD
 systemduserunitdir = @SYSTEMD_USERUNITDIR@
 systemduserunit_DATA = obexd/src/obex.service
@@ -8,6 +7,8 @@ dbussessionbus_DATA = obexd/src/org.bluez.obex.service
 endif
 
 EXTRA_DIST += obexd/src/obex.service.in obexd/src/org.bluez.obex.service
+
+if OBEX
 
 obex_plugindir = $(libdir)/obex/plugins
 
@@ -32,7 +33,6 @@ obexd_builtin_sources += obexd/plugins/opp.c
 obexd_builtin_modules += ftp
 obexd_builtin_sources += obexd/plugins/ftp.c obexd/plugins/ftp.h
 
-if OBEX
 obexd_builtin_modules += irmc
 obexd_builtin_sources += obexd/plugins/irmc.c
 
@@ -41,7 +41,6 @@ obexd_builtin_sources += obexd/plugins/pbap.c \
 				obexd/plugins/vcard.h obexd/plugins/vcard.c \
 				obexd/plugins/phonebook.h \
 				obexd/plugins/phonebook-@PLUGIN_PHONEBOOK@.c
-endif
 
 obexd_builtin_modules += mas
 obexd_builtin_sources += obexd/plugins/mas.c obexd/src/map_ap.h \
@@ -57,10 +56,10 @@ obexd_builtin_sources += obexd/plugins/contentfilter.h \
 
 obexd_builtin_sources += obexd/src/access.c
 
-#if JOLLABLACKLIST
+if JOLLABLACKLIST
 obexd_builtin_modules += jolla_blacklist
 obexd_builtin_sources += obexd/plugins/jolla-blacklist.c
-#endif
+endif
 
 libexec_PROGRAMS += obexd/src/obexd
 
@@ -86,7 +85,6 @@ obexd_src_obexd_SOURCES = $(btio_sources) $(gobex_sources) \
 			obexd/client/map-event.h obexd/client/map-event.c \
 			obexd/client/transfer.h obexd/client/transfer.c \
 			obexd/client/transport.h obexd/client/transport.c \
-			obexd/client/dbus.h obexd/client/dbus.c \
 			obexd/client/driver.h obexd/client/driver.c \
 			obexd/src/map_ap.h
 obexd_src_obexd_LDADD = lib/libbluetooth-internal.la \
@@ -101,6 +99,8 @@ obexd_src_obexd_CFLAGS = $(AM_CFLAGS) @GLIB_CFLAGS@ @DBUS_CFLAGS@ \
 				-fPIC -D_FILE_OFFSET_BITS=64
 
 obexd_src_obexd_CPPFLAGS = -I$(builddir)/lib -I$(builddir)/obexd/src
+
+endif
 
 obexd_src_obexd_SHORTNAME = obexd
 

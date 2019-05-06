@@ -1,12 +1,18 @@
 #!/usr/bin/python
 
+from __future__ import print_function
+
 import dbus
 import dbus.exceptions
 import dbus.mainloop.glib
 import dbus.service
 
 import array
-import gobject
+
+try:
+  from gi.repository import GObject  # python3
+except ImportError:
+  import gobject as GObject  # python2
 
 from random import randint
 
@@ -53,6 +59,7 @@ class Advertisement(dbus.service.Object):
         self.service_data = None
         self.local_name = None
         self.include_tx_power = None
+        self.data = None
         dbus.service.Object.__init__(self, bus, self.path)
 
     def get_properties(self):
@@ -74,6 +81,10 @@ class Advertisement(dbus.service.Object):
             properties['LocalName'] = dbus.String(self.local_name)
         if self.include_tx_power is not None:
             properties['IncludeTxPower'] = dbus.Boolean(self.include_tx_power)
+
+        if self.data is not None:
+            properties['Data'] = dbus.Dictionary(
+                self.data, signature='yv')
         return {LE_ADVERTISEMENT_IFACE: properties}
 
     def get_path(self):
@@ -104,21 +115,26 @@ class Advertisement(dbus.service.Object):
             self.local_name = ""
         self.local_name = dbus.String(name)
 
+    def add_data(self, ad_type, data):
+        if not self.data:
+            self.data = dbus.Dictionary({}, signature='yv')
+        self.data[ad_type] = dbus.Array(data, signature='y')
+
     @dbus.service.method(DBUS_PROP_IFACE,
                          in_signature='s',
                          out_signature='a{sv}')
     def GetAll(self, interface):
-        print 'GetAll'
+        print('GetAll')
         if interface != LE_ADVERTISEMENT_IFACE:
             raise InvalidArgsException()
-        print 'returning props'
+        print('returning props')
         return self.get_properties()[LE_ADVERTISEMENT_IFACE]
 
     @dbus.service.method(LE_ADVERTISEMENT_IFACE,
                          in_signature='',
                          out_signature='')
     def Release(self):
-        print '%s: Released!' % self.path
+        print('%s: Released!' % self.path)
 
 class TestAdvertisement(Advertisement):
 
@@ -130,14 +146,15 @@ class TestAdvertisement(Advertisement):
         self.add_service_data('9999', [0x00, 0x01, 0x02, 0x03, 0x04])
         self.add_local_name('TestAdvertisement')
         self.include_tx_power = True
+        self.add_data(0x26, [0x01, 0x01, 0x00])
 
 
 def register_ad_cb():
-    print 'Advertisement registered'
+    print('Advertisement registered')
 
 
 def register_ad_error_cb(error):
-    print 'Failed to register advertisement: ' + str(error)
+    print('Failed to register advertisement: ' + str(error))
     mainloop.quit()
 
 
@@ -146,7 +163,7 @@ def find_adapter(bus):
                                DBUS_OM_IFACE)
     objects = remote_om.GetManagedObjects()
 
-    for o, props in objects.iteritems():
+    for o, props in objects.items():
         if LE_ADVERTISING_MANAGER_IFACE in props:
             return o
 
@@ -162,7 +179,7 @@ def main():
 
     adapter = find_adapter(bus)
     if not adapter:
-        print 'LEAdvertisingManager1 interface not found'
+        print('LEAdvertisingManager1 interface not found')
         return
 
     adapter_props = dbus.Interface(bus.get_object(BLUEZ_SERVICE_NAME, adapter),
@@ -175,7 +192,7 @@ def main():
 
     test_advertisement = TestAdvertisement(bus, 0)
 
-    mainloop = gobject.MainLoop()
+    mainloop = GObject.MainLoop()
 
     ad_manager.RegisterAdvertisement(test_advertisement.get_path(), {},
                                      reply_handler=register_ad_cb,

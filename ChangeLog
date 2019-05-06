@@ -1,3 +1,53 @@
+ver 5.50:
+	Fix issue with GATT and reading long values.
+	Fix issue with GATT and reading multiple includes.
+	Fix issue with GATT and service changes when offline.
+	Fix issue with handling secondary service discovery.
+	Fix issue with handling persistency of CCC values.
+	Fix issue with handling Mesh session on disconnection.
+	Fix issue with handling Mesh proxy PDU SAR message length.
+	Fix issue with handling Mesh default heartbeat TTL value.
+	Add support for Mesh node-reset operation handling.
+	Add support for GATT authorization request handling.
+	Add support for GATT minimum key size requirements.
+	Add support for GATT server and included services.
+	Add support for handling additional advertising data.
+	Add support for handling separate discoverable state.
+	Add support for enabling HFP version 1.7 features.
+	Add support for dedicated Bluetooth logging daemon.
+
+ver 5.49:
+	Fix issue with configuring discoverable advertising flag.
+	Fix issue with bearer selection and single mode controllers.
+	Fix issue with Connect and ConnectProfile returning in progress.
+	Fix issue with missing Paired property change when not bonded.
+	Fix issue with storage for controllers without public address.
+	Fix issue with handling AVCTP disconnecting the channel queue.
+	Fix issue with not clearing connectable setting on power off.
+	Fix issue with creating multiple mgmt socket instances.
+	Fix issue with GATT server and BR/EDR only devices.
+	Fix issue with InterfaceAdded event ordering.
+	Add support for generic ConnectDevice method call.
+	Add support for Mesh heartbeat client functionality.
+
+ver 5.48:
+	Fix issue with subscriptions for unpaired devices.
+	Fix issue with handling A2DP and no available SEP.
+	Fix issue with handling AVCTP change path support.
+	Fix issue with handling AVCTP browsing channel.
+	Fix issue with handling AVCTP passthrough PDUs.
+	Fix issue with handling detaching of controller.
+	Fix issue with handling start discovery results.
+	Fix issue with handling non-connectable devices.
+	Fix issue with handling unused parameter in WriteValue.
+	Add support for service side AcquireWrite and AcquireNotify.
+	Add support for providing address type information.
+	Add support for cable based authentication and pairing.
+	Add support for Bluetooth Low-Energy battery service.
+	Add support for BTP client for qualification testing.
+	Add support for additional Mesh control functionality.
+	Mark advertising manager APIs as stable interfaces.
+
 ver 5.47:
 	Fix issue with handling AcquireNotify registration.
 	Fix issue with handling support for reconnection interval.

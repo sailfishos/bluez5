@@ -121,14 +121,25 @@ shared_sources = src/shared/io.h src/shared/timeout.h \
 			src/shared/gap.h src/shared/gap.c \
 			src/shared/tty.h
 
+if READLINE
+shared_sources += src/shared/shell.c src/shared/shell.h
+endif
+
 src_libshared_glib_la_SOURCES = $(shared_sources) \
 				src/shared/io-glib.c \
-				src/shared/timeout-glib.c
+				src/shared/timeout-glib.c \
+				src/shared/mainloop-glib.c
 
 src_libshared_mainloop_la_SOURCES = $(shared_sources) \
 				src/shared/io-mainloop.c \
 				src/shared/timeout-mainloop.c \
 				src/shared/mainloop.h src/shared/mainloop.c
+
+if ELL
+src_libshared_ell_la_SOURCES = $(shared_sources) \
+				src/shared/io-ell.c
+noinst_LTLIBRARIES += src/libshared-ell.la
+endif
 
 attrib_sources = attrib/att.h attrib/att-database.h attrib/att.c \
 		attrib/gatt.h attrib/gatt.c \
@@ -159,11 +170,6 @@ endif
 if JOLLADIDPLUGIN
 builtin_modules += jolla_did
 builtin_sources += plugins/jolla-did.c
-endif
-
-if JOLLALOGCONTROLPLUGIN
-builtin_modules += jolla_logcontrol
-builtin_sources += plugins/jolla-logcontrol.c
 endif
 
 if SAILFISHEXCLUDEPLUGIN
@@ -435,7 +441,8 @@ unit_test_hog_LDADD = src/libshared-glib.la \
 
 unit_tests += unit/test-gattrib
 
-unit_test_gattrib_SOURCES = unit/test-gattrib.c attrib/gattrib.c $(btio_sources) src/log.h src/log.c
+unit_test_gattrib_SOURCES = unit/test-gattrib.c attrib/gattrib.c \
+					$(btio_sources) src/log.h src/log.c
 unit_test_gattrib_LDADD = lib/libbluetooth-internal.la \
 			src/libshared-glib.la \
 			@GLIB_LIBS@ @DBUS_LIBS@ -ldl -lrt
@@ -476,7 +483,7 @@ endif
 pkgconfigdir = $(libdir)/pkgconfig
 
 if LIBRARY
-pkgconfig_DATA = lib/bluez5.pc
+pkgconfig_DATA = lib/bluez.pc
 endif
 
 manual_pages = doc/btmon.1
@@ -489,7 +496,6 @@ EXTRA_DIST += $(manual_pages:.1=.txt)
 
 DISTCHECK_CONFIGURE_FLAGS = --disable-datafiles --enable-library \
 						--enable-health \
-						--enable-mesh \
 						--enable-midi \
 						--enable-manpages \
 						--enable-android \
@@ -522,7 +528,7 @@ $(lib_libbluetooth_la_OBJECTS): $(local_headers)
 
 lib/bluetooth/%.h: lib/%.h
 	$(AM_V_at)$(MKDIR_P) lib/bluetooth
-	$(AM_V_GEN)$(LN_S) -f "$(abs_top_builddir)"/$< $@
+	$(AM_V_GEN)$(LN_S) -f $(abspath $<) $@
 
 if COVERAGE
 clean-coverage:

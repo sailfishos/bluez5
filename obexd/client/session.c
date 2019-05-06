@@ -40,7 +40,6 @@
 #include "gobex/gobex.h"
 
 #include "obexd/src/log.h"
-#include "dbus.h"
 #include "transfer.h"
 #include "session.h"
 #include "driver.h"
@@ -212,6 +211,11 @@ static void file_data_free(void *process_data)
 	g_free(data);
 }
 
+static void request_free(void *data, void *user_data)
+{
+	pending_request_free(data);
+}
+
 static void session_free(struct obc_session *session)
 {
 	DBG("%p", session);
@@ -220,8 +224,7 @@ static void session_free(struct obc_session *session)
 		g_source_remove(session->process_id);
 
 	if (session->queue) {
-		g_queue_foreach(session->queue, (GFunc) pending_request_free,
-									NULL);
+		g_queue_foreach(session->queue, request_free, NULL);
 		g_queue_free(session->queue);
 	}
 

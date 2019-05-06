@@ -61,6 +61,40 @@ Properties	string Type
 			Service Data elements to include. The keys are the
 			UUID to associate with the data.
 
+		dict Data [Experimental]
+
+			Advertising Type to include in the Advertising
+			Data. Key is the advertising type and value is the
+			data as byte array.
+
+			Note: Types already handled by other properties shall
+			not be used.
+
+			Possible values:
+				<type> <byte array>
+				...
+
+			Example:
+				<Transport Discovery> <Organization Flags...>
+				0x26                   0x01         0x01...
+
+		bool Discoverable [Experimental]
+
+			Advertise as general discoverable. When present this
+			will override adapter Discoverable property.
+
+			Note: This property shall not be set when Type is set
+			to broadcast.
+
+		uint16 DiscoverableTimeout [Experimental]
+
+			The discoverable timeout in seconds. A value of zero
+			means that the timeout is disabled and it will stay in
+			discoverable/limited mode forever.
+
+			Note: This property shall not be set when Type is set
+			to broadcast.
+
 		array{string} Includes
 
 			List of features to be included in the advertising
@@ -84,6 +118,17 @@ Properties	string Type
 
 			Possible values: as found on GAP Service.
 
+		uint16_t Duration
+
+			Duration of the advertisement in seconds. If there are
+			other applications advertising no duration is set the
+			default is 2 seconds.
+
+		uint16_t Timeout
+
+			Timeout of the advertisement in seconds. This defines
+			the lifetime of the advertisement.
+
 LE Advertising Manager hierarchy
 ================================
 
@@ -92,7 +137,7 @@ Data which should be broadcast to devices.  Advertisement Data elements must
 follow the API for LE Advertisement Data described above.
 
 Service		org.bluez
-Interface	org.bluez.LEAdvertisingManager1 [Experimental]
+Interface	org.bluez.LEAdvertisingManager1
 Object path	/org/bluez/{hci0,hci1,...}
 
 Methods		RegisterAdvertisement(object advertisement, dict options)
@@ -107,7 +152,7 @@ Methods		RegisterAdvertisement(object advertisement, dict options)
 			InvalidLength error indicates that the data
 			provided generates a data packet which is too long.
 
-			The properties of this object are parser when it is
+			The properties of this object are parsed when it is
 			registered, and any changes are ignored.
 
 			If the same object is registered twice it will result in
@@ -124,7 +169,7 @@ Methods		RegisterAdvertisement(object advertisement, dict options)
 		UnregisterAdvertisement(object advertisement)
 
 			This unregisters an advertisement that has been
-			prevously registered.  The object path parameter must
+			previously registered.  The object path parameter must
 			match the same value that has been used on registration.
 
 			Possible errors: org.bluez.Error.InvalidArguments

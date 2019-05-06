@@ -253,7 +253,7 @@ static void test_post_teardown(const void *test_data)
 
 static void bluetoothd_start(int hci_index)
 {
-	char prg_name[PATH_MAX + 1];
+	char prg_name[PATH_MAX + 1 + 11];
 	char index[8];
 	char *prg_argv[5];
 
@@ -2722,12 +2722,11 @@ void emu_setup_powered_remote_action(void)
 
 	if ((data->hciemu_type == HCIEMU_TYPE_LE) ||
 				(data->hciemu_type == HCIEMU_TYPE_BREDRLE)) {
-		uint8_t adv[4];
+		uint8_t adv[3];
 
 		adv[0] = 0x02;	/* Field length */
 		adv[1] = 0x01;	/* Flags */
 		adv[2] = 0x02;	/* Flags value */
-		adv[3] = 0x00;	/* Field terminator */
 
 		bthost_set_adv_data(bthost, adv, sizeof(adv));
 		bthost_set_adv_enable(bthost, 0x01);

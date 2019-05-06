@@ -61,7 +61,7 @@
 
 #define REQUEST_TIMEOUT (3 * 1000)		/* 3 seconds */
 
-#define MPRIS_SEEK 1000000	/* 1 second */
+#define MPRIS_SEEK (1000000) /* 1 second */
 
 struct media_adapter {
 	struct btd_adapter	*btd_adapter;
@@ -1341,7 +1341,7 @@ static struct avrcp_player_cb player_cb = {
 	.pause = pause,
 	.next = next,
 	.previous = previous,
-	.forward = seek_forward,
+	.fastforward = seek_forward,
 	.rewind = seek_rewind,
 };
 

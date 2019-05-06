@@ -228,15 +228,10 @@ cp -a test/simple-obex-agent %{buildroot}%{_libdir}/bluez/test/
 mkdir -p %{buildroot}%{_sysconfdir}/tracing/obexd/
 cp -a %{SOURCE4} %{buildroot}%{_sysconfdir}/tracing/obexd/
 
-%pre
-if [ "$1" = "1" ]; then
-    # When installing the bluez5 package for the first
-    # time nuke possible bluez4 leftovers. Not done during
-    # package upgrades.
-    systemctl stop bluetooth.service ||:
-    rm -rf "/var/lib/bluetooth"
-fi
+# Rename pkg-config file to differentiate from BlueZ 4.x
+mv %{buildroot}%{_libdir}/pkgconfig/bluez.pc %{buildroot}%{_libdir}/pkgconfig/bluez5.pc
 
+%pre
 %_system_groupadd bluetooth
 
 %preun

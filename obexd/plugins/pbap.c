@@ -68,7 +68,7 @@
 struct cache {
 	gboolean valid;
 	uint32_t index;
-	char *path;
+	gchar *path;
 	GSList *entries;
 };
 
@@ -168,7 +168,7 @@ static const char *cache_find(struct cache *cache, uint32_t handle)
 
 static void invalidate_cache(struct cache *cache)
 {
-	DBG("Invalidating cache.");
+	DBG("invalidating cache (path %s)", cache->path ? cache->path : "<null>");
 	cache->valid = FALSE;
 	cache->index = 0;
 	g_free(cache->path);
@@ -196,7 +196,6 @@ static void phonebook_size_result(const char *buffer, size_t bufsize,
 
 	phonebooksize = vcards;
 
-	pbap->obj->firstpacket = TRUE;
 	pbap->obj->apparam = g_obex_apparam_set_uint16(NULL, PHONEBOOKSIZE_TAG,
 								phonebooksize);
 
@@ -219,8 +218,7 @@ static void query_result(const char *buffer, size_t bufsize, int vcards,
 {
 	struct pbap_session *pbap = user_data;
 
-	DBG("size=%d, vcards=%d, lastpart=%s",
-		bufsize, vcards, lastpart ? "yes" : "no");
+	DBG("");
 
 	if (pbap->obj->request && lastpart) {
 		phonebook_req_finalize(pbap->obj->request);
@@ -415,7 +413,7 @@ static int generate_response(void *user_data)
 	return 0;
 }
 
-static void cache_ready_notify(void *user_data, int missed)
+static void cache_ready_notify(void *user_data)
 {
 	struct pbap_session *pbap = user_data;
 
@@ -426,28 +424,15 @@ static void cache_ready_notify(void *user_data, int missed)
 
 	pbap->cache.valid = TRUE;
 
-	if (missed > 0)	{
-		DBG("missed %d", missed);
-
-		pbap->obj->firstpacket = TRUE;
-
-		pbap->obj->apparam = g_obex_apparam_set_uint8(
-							pbap->obj->apparam,
-							NEWMISSEDCALLS_TAG,
-							missed);
-	}
-
 	generate_response(pbap);
 	obex_object_set_io_flags(pbap->obj, G_IO_IN, 0);
 }
 
-static void cache_entry_done(void *user_data, int missed)
+static void cache_entry_done(void *user_data)
 {
 	struct pbap_session *pbap = user_data;
 	const char *id;
 	int ret;
-
-	(void) missed;
 
 	DBG("");
 
@@ -538,7 +523,6 @@ static int pbap_get(struct obex_session *os, void *user_data)
 		return -EBADR;
 
 	rsize = obex_get_apparam(os, &buffer);
-	DBG("apparam size %d", rsize);
 	if (rsize < 0) {
 		if (g_ascii_strcasecmp(type, VCARDENTRY_TYPE) != 0)
 			return -EBADR;
@@ -562,7 +546,6 @@ static int pbap_get(struct obex_session *os, void *user_data)
 	}
 
 	params = parse_aparam(buffer, rsize);
-	DBG("params %p", params);
 	if (params == NULL)
 		return -EBADR;
 
@@ -589,8 +572,7 @@ static int pbap_get(struct obex_session *os, void *user_data)
 		if (!pbap->cache.valid) {
 			g_free(pbap->cache.path);
 			pbap->cache.path = g_strdup(path);
-		} else if (strcmp(path, pbap->cache.path)) {
-			DBG("'%s' != '%s'", path, pbap->cache.path);
+		} else if (g_strcmp0(path, pbap->cache.path)) {
 			invalidate_cache(&pbap->cache);
 			pbap->cache.path = g_strdup(path);
 		}
@@ -608,8 +590,7 @@ static int pbap_get(struct obex_session *os, void *user_data)
 		if (!pbap->cache.valid) {
 			g_free(pbap->cache.path);
 			pbap->cache.path = g_strdup(path);
-		} else if (strcmp(path, pbap->cache.path)) {
-			DBG("'%s' != '%s'", path, pbap->cache.path);
+		} else if (g_strcmp0(path, pbap->cache.path)) {
 			invalidate_cache(&pbap->cache);
 			pbap->cache.path = g_strdup(path);
 		}
@@ -621,8 +602,7 @@ static int pbap_get(struct obex_session *os, void *user_data)
 		if (!pbap->cache.valid) {
 			g_free(pbap->cache.path);
 			pbap->cache.path = g_strdup(pbap->folder);
-		} else if (strcmp(pbap->folder, pbap->cache.path)) {
-			DBG("'%s' != '%s'", pbap->folder, pbap->cache.path);
+		} else if (g_strcmp0(pbap->folder, pbap->cache.path)) {
 			invalidate_cache(&pbap->cache);
 			pbap->cache.path = g_strdup(pbap->folder);
 		}
@@ -630,7 +610,6 @@ static int pbap_get(struct obex_session *os, void *user_data)
 	} else
 		return -EBADR;
 
-	DBG("path %s", path ? path : "<null>");
 	if (path == NULL)
 		return -EBADR;
 

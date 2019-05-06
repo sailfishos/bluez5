@@ -1,5 +1,5 @@
 AC_PREREQ(2.60)
-AC_INIT(bluez, 5.47)
+AC_INIT(bluez, 5.50)
 
 AM_INIT_AUTOMAKE([foreign subdir-objects color-tests silent-rules
 					tar-pax no-dist-gzip dist-xz])
@@ -244,6 +244,18 @@ if (test "${enable_obex}" != "no"); then
 fi
 AM_CONDITIONAL(OBEX, test "${enable_obex}" != "no")
 
+AC_ARG_ENABLE(btpclient, AC_HELP_STRING([--enable-btpclient],
+		[enable BTP client]), [enable_btpclient=${enableval}])
+AM_CONDITIONAL(BTPCLIENT, test "${enable_btpclient}" = "yes")
+
+if (test "${enable_btpclient}" = "yes" || test "${enable_mesh}" = "yes"); then
+	PKG_CHECK_MODULES(ELL, ell >= 0.3, enable_ell=yes,
+			  AC_MSG_ERROR(ell library >= 0.3 is required))
+	AC_SUBST(ELL_CFLAGS)
+	AC_SUBST(ELL_LIBS)
+fi
+AM_CONDITIONAL(ELL, test "${enable_ell}" = "yes")
+
 AC_ARG_ENABLE(client, AC_HELP_STRING([--disable-client],
 		[disable command line client]), [enable_client=${enableval}])
 AM_CONDITIONAL(CLIENT, test "${enable_client}" != "no")
@@ -316,6 +328,10 @@ AC_ARG_ENABLE(sixaxis, AC_HELP_STRING([--enable-sixaxis],
 AM_CONDITIONAL(SIXAXIS, test "${enable_sixaxis}" = "yes" &&
 					 test "${enable_udev}" != "no")
 
+AC_ARG_ENABLE(logger, AC_HELP_STRING([--enable-logger],
+		[enable HCI logger service]), [enable_logger=${enableval}])
+AM_CONDITIONAL(LOGGER, test "${enable_logger}" = "yes")
+
 if (test "${prefix}" = "NONE"); then
 	dnl no prefix and no localstatedir, so default to /var
 	if (test "$localstatedir" = '${prefix}/var'); then
@@ -374,11 +390,6 @@ AC_ARG_ENABLE(jolla_did, AC_HELP_STRING([--enable-jolla-did],
 			 [enable_jolla_did=${enableval}])
 AM_CONDITIONAL(JOLLADIDPLUGIN, test "${enable_jolla_did}" = "yes")
 
-AC_ARG_ENABLE(jolla_logcontrol, AC_HELP_STRING([--enable-jolla-logcontrol],
-				[compile with Jolla logcontrol plugin]),
-				[enable_jolla_logcontrol=${enableval}])
-AM_CONDITIONAL(JOLLALOGCONTROLPLUGIN, test "${enable_jolla_logcontrol}" = "yes")
-
 AC_ARG_ENABLE(sailfish_exclude, AC_HELP_STRING([--enable-sailfish-exclude],
 				[compile with Sailfish exclude plugin]),
 				[enable_sailfish_exclude=${enableval}])
@@ -413,4 +424,4 @@ AC_ARG_ENABLE(autopair, AC_HELP_STRING([--disable-autopair],
 		[disable autopair plugin]), [enable_autopair=${enableval}])
 AM_CONDITIONAL(AUTOPAIR, test "${enable_autopair}" != "no")
 
-AC_OUTPUT(Makefile src/bluetoothd.8 lib/bluez5.pc)
+AC_OUTPUT(Makefile src/bluetoothd.8 lib/bluez.pc)

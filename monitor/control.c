@@ -1130,10 +1130,17 @@ static int server_fd = -1;
 void control_server(const char *path)
 {
 	struct sockaddr_un addr;
+	size_t len;
 	int fd;
 
 	if (server_fd >= 0)
 		return;
+
+	len = strlen(path);
+	if (len > sizeof(addr.sun_path) - 1) {
+		fprintf(stderr, "Socket name too long\n");
+		return;
+	}
 
 	unlink(path);
 
@@ -1145,7 +1152,7 @@ void control_server(const char *path)
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
-	strcpy(addr.sun_path, path);
+	strncpy(addr.sun_path, path, len - 1);
 
 	if (bind(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
 		perror("Failed to bind server socket");
@@ -1366,12 +1373,12 @@ int control_tty(const char *path, unsigned int speed)
 
 bool control_writer(const char *path)
 {
-	btsnoop_file = btsnoop_create(path, BTSNOOP_FORMAT_MONITOR);
+	btsnoop_file = btsnoop_create(path, 0, 0, BTSNOOP_FORMAT_MONITOR);
 
 	return !!btsnoop_file;
 }
 
-void control_reader(const char *path)
+void control_reader(const char *path, bool pager)
 {
 	unsigned char buf[BTSNOOP_MAX_PACKET_SIZE];
 	uint16_t pktlen;
@@ -1396,7 +1403,8 @@ void control_reader(const char *path)
 		break;
 	}
 
-	open_pager();
+	if (pager)
+		open_pager();
 
 	switch (format) {
 	case BTSNOOP_FORMAT_HCI:
@@ -1430,7 +1438,8 @@ void control_reader(const char *path)
 		break;
 	}
 
-	close_pager();
+	if (pager)
+		close_pager();
 
 	btsnoop_unref(btsnoop_file);
 }

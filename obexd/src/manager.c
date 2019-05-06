@@ -53,6 +53,7 @@
 #define AGENT_INTERFACE OBEXD_SERVICE ".Agent1"
 
 #define TIMEOUT 60*1000 /* Timeout for user response (miliseconds) */
+#define PROGRESS_EMIT_INTERVAL (1) /* Rate limiter for progress emits (seconds) */
 
 struct agent {
 	char *bus_name;
@@ -74,7 +75,8 @@ struct obex_transfer {
 	uint8_t status;
 	char *path;
 	struct obex_session *session;
-	guint emit_timeout;
+	gint64 last_progress_emit;
+	guint emit_timeout_source;
 };
 
 static struct agent *agent = NULL;
@@ -266,6 +268,9 @@ static DBusMessage *transfer_cancel(DBusConnection *connection,
 	struct obex_session *os = transfer->session;
 	const char *sender;
 
+	if (!agent)
+		return agent_does_not_exist(msg);
+
 	if (!os)
 		return invalid_args(msg);
 
@@ -375,7 +380,8 @@ static gboolean transfer_size_exists(const GDBusPropertyTable *property,
 	struct obex_transfer *transfer = data;
 	struct obex_session *session = transfer->session;
 
-	return session->size != OBJECT_SIZE_UNKNOWN;
+	return (session->size != OBJECT_SIZE_UNKNOWN &&
+				session->size != OBJECT_SIZE_DELETE);
 }
 
 static gboolean transfer_get_size(const GDBusPropertyTable *property,
@@ -384,7 +390,8 @@ static gboolean transfer_get_size(const GDBusPropertyTable *property,
 	struct obex_transfer *transfer = data;
 	struct obex_session *session = transfer->session;
 
-	if (session->size == OBJECT_SIZE_UNKNOWN)
+	if (session->size == OBJECT_SIZE_UNKNOWN ||
+				session->size == OBJECT_SIZE_DELETE)
 		return FALSE;
 
 	dbus_message_iter_append_basic(iter, DBUS_TYPE_UINT64, &session->size);
@@ -529,48 +536,42 @@ void manager_cleanup(void)
 	dbus_connection_unref(connection);
 }
 
+void manager_emit_transfer_property(struct obex_transfer *transfer,
+								char *name)
+{
+	if (!transfer->path)
+		return;
+
+	g_dbus_emit_property_changed(connection, transfer->path,
+					TRANSFER_INTERFACE, name);
+}
+
 void manager_emit_transfer_started(struct obex_transfer *transfer)
 {
 	transfer->status = TRANSFER_STATUS_ACTIVE;
 
-	g_dbus_emit_property_changed(connection, transfer->path,
-					TRANSFER_INTERFACE, "Status");
+	manager_emit_transfer_property(transfer, "Status");
 }
 
 static void emit_transfer_completed(struct obex_transfer *transfer,
 							gboolean success)
 {
-	if (transfer->path == NULL)
-		return;
-
 	transfer->status = success ? TRANSFER_STATUS_COMPLETE :
 						TRANSFER_STATUS_ERROR;
 
-	g_dbus_emit_property_changed(connection, transfer->path,
-					TRANSFER_INTERFACE, "Status");
+	manager_emit_transfer_property(transfer, "Status");
 }
 
-static gboolean emit_transfer_progress(gpointer user_data)
-{
-	struct obex_transfer *transfer = user_data;
-
-	transfer->emit_timeout = 0;
-
-	if (transfer->path == NULL)
-		return FALSE;
-
-	g_dbus_emit_property_changed(connection, transfer->path,
-					TRANSFER_INTERFACE, "Transferred");
-
-	return FALSE;
+static void cancel_emit_transfer_progress(struct obex_transfer *transfer) {
+	if (transfer->emit_timeout_source) {
+		g_source_remove(transfer->emit_timeout_source);
+		transfer->emit_timeout_source = 0;
+	}
 }
 
 static void transfer_free(struct obex_transfer *transfer)
 {
-	if (transfer->emit_timeout > 0) {
-		g_source_remove(transfer->emit_timeout);
-		transfer->emit_timeout = 0;
-	}
+	cancel_emit_transfer_progress(transfer);
 
 	g_free(transfer->path);
 	g_free(transfer);
@@ -787,12 +788,32 @@ void manager_unregister_session(struct obex_session *os)
 	g_free(path);
 }
 
+static gboolean emit_transfer_progress(gpointer user_data)
+{
+	struct obex_transfer *transfer = user_data;
+
+	transfer->emit_timeout_source = 0;
+
+	manager_emit_transfer_property(transfer, "Transferred");
+
+	return FALSE;
+}
+
 void manager_emit_transfer_progress(struct obex_transfer *transfer)
 {
-	if (transfer->emit_timeout == 0)
-		transfer->emit_timeout =
-				g_timeout_add_seconds(1, emit_transfer_progress,
-							transfer);
+	gint64 now;
+
+	if (transfer->emit_timeout_source == 0) {
+		now = g_get_monotonic_time();
+		if (now - transfer->last_progress_emit > PROGRESS_EMIT_INTERVAL) {
+			transfer->last_progress_emit = now;
+			manager_emit_transfer_property(transfer, "Transferred");
+		} else
+			transfer->emit_timeout_source =
+				g_timeout_add_seconds(PROGRESS_EMIT_INTERVAL,
+						emit_transfer_progress,
+						transfer);
+	}
 }
 
 void manager_emit_transfer_completed(struct obex_transfer *transfer)
@@ -802,6 +823,7 @@ void manager_emit_transfer_completed(struct obex_transfer *transfer)
 	if (transfer == NULL)
 		return;
 
+	cancel_emit_transfer_progress(transfer);
 	session = transfer->session;
 
 	if (session == NULL || session->object == NULL)

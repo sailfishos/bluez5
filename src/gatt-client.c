@@ -596,6 +596,8 @@ static DBusMessage *descriptor_write_value(DBusConnection *conn,
 	if (parse_value_arg(&iter, &value, &value_len))
 		return btd_error_invalid_args(msg);
 
+	dbus_message_iter_next(&iter);
+
 	if (parse_options(&iter, &offset))
 		return btd_error_invalid_args(msg);
 
@@ -986,6 +988,8 @@ static DBusMessage *characteristic_write_value(DBusConnection *conn,
 	if (parse_value_arg(&iter, &value, &value_len))
 		return btd_error_invalid_args(msg);
 
+	dbus_message_iter_next(&iter);
+
 	if (parse_options(&iter, &offset))
 		return btd_error_invalid_args(msg);
 
@@ -1229,7 +1233,7 @@ static DBusMessage *characteristic_acquire_write(DBusConnection *conn,
 	chrc->write_io = new0(struct pipe_io, 1);
 
 	if (!bt_gatt_client_is_ready(gatt)) {
-		DBG("GATT not ready, wait until it becomes read");
+		/* GATT not ready, wait until it becomes ready */
 		if (!chrc->ready_id)
 			chrc->ready_id = bt_gatt_client_ready_register(gatt,
 							characteristic_ready,
@@ -1488,8 +1492,10 @@ static DBusMessage *characteristic_acquire_notify(DBusConnection *conn,
 						register_notify_io_cb,
 						notify_io_cb,
 						client, NULL);
-	if (!client->notify_id)
+	if (!client->notify_id) {
+		notify_client_unref(client);
 		return btd_error_failed(msg, "Failed to subscribe");
+	}
 
 	queue_push_tail(chrc->notify_clients, client);
 
@@ -1608,11 +1614,9 @@ static const GDBusPropertyTable characteristic_properties[] = {
 					characteristic_notifying_exists },
 	{ "Flags", "as", characteristic_get_flags, NULL, NULL },
 	{ "WriteAcquired", "b", characteristic_get_write_acquired, NULL,
-				characteristic_write_acquired_exists,
-				G_DBUS_PROPERTY_FLAG_EXPERIMENTAL },
+				characteristic_write_acquired_exists },
 	{ "NotifyAcquired", "b", characteristic_get_notify_acquired, NULL,
-				characteristic_notify_acquired_exists,
-				G_DBUS_PROPERTY_FLAG_EXPERIMENTAL },
+				characteristic_notify_acquired_exists },
 	{ }
 };
 
@@ -1624,11 +1628,13 @@ static const GDBusMethodTable characteristic_methods[] = {
 						{ "options", "a{sv}" }),
 					NULL,
 					characteristic_write_value) },
-	{ GDBUS_EXPERIMENTAL_ASYNC_METHOD("AcquireWrite", NULL,
+	{ GDBUS_ASYNC_METHOD("AcquireWrite",
+					GDBUS_ARGS({ "options", "a{sv}" }),
 					GDBUS_ARGS({ "fd", "h" },
 						{ "mtu", "q" }),
 					characteristic_acquire_write) },
-	{ GDBUS_EXPERIMENTAL_ASYNC_METHOD("AcquireNotify", NULL,
+	{ GDBUS_ASYNC_METHOD("AcquireNotify",
+					GDBUS_ARGS({ "options", "a{sv}" }),
 					GDBUS_ARGS({ "fd", "h" },
 						{ "mtu", "q" }),
 					characteristic_acquire_notify) },
@@ -1639,13 +1645,22 @@ static const GDBusMethodTable characteristic_methods[] = {
 	{ }
 };
 
+static void remove_client(void *data)
+{
+	struct notify_client *ntfy_client = data;
+	struct btd_gatt_client *client = ntfy_client->chrc->service->client;
+
+	queue_remove(client->all_notify_clients, ntfy_client);
+
+	notify_client_unref(ntfy_client);
+}
+
 static void characteristic_free(void *data)
 {
 	struct characteristic *chrc = data;
 
 	/* List should be empty here */
 	queue_destroy(chrc->descs, NULL);
-	queue_destroy(chrc->notify_clients, NULL);
 
 	if (chrc->write_io) {
 		queue_remove(chrc->service->client->ios, chrc->write_io->io);
@@ -1656,6 +1671,8 @@ static void characteristic_free(void *data)
 		queue_remove(chrc->service->client->ios, chrc->notify_io->io);
 		pipe_io_destroy(chrc->notify_io);
 	}
+
+	queue_destroy(chrc->notify_clients, remove_client);
 
 	g_free(chrc->path);
 	free(chrc);
@@ -1709,16 +1726,6 @@ static struct characteristic *characteristic_create(
 	return chrc;
 }
 
-static void remove_client(void *data)
-{
-	struct notify_client *ntfy_client = data;
-	struct btd_gatt_client *client = ntfy_client->chrc->service->client;
-
-	queue_remove(client->all_notify_clients, ntfy_client);
-
-	notify_client_unref(ntfy_client);
-}
-
 static void unregister_characteristic(void *data)
 {
 	struct characteristic *chrc = data;
@@ -1732,7 +1739,6 @@ static void unregister_characteristic(void *data)
 	if (chrc->write_op)
 		bt_gatt_client_cancel(gatt, chrc->write_op->id);
 
-	queue_remove_all(chrc->notify_clients, NULL, NULL, remove_client);
 	queue_remove_all(chrc->descs, NULL, NULL, unregister_descriptor);
 
 	g_dbus_unregister_interface(btd_get_dbus_connection(), chrc->path,
@@ -2202,6 +2208,11 @@ static void clear_notify_id(void *data, void *user_data)
 	client->notify_id = 0;
 }
 
+static void client_shutdown(void *data)
+{
+	io_shutdown(data);
+}
+
 void btd_gatt_client_disconnected(struct btd_gatt_client *client)
 {
 	if (!client || !client->gatt)
@@ -2209,8 +2220,7 @@ void btd_gatt_client_disconnected(struct btd_gatt_client *client)
 
 	DBG("Device disconnected. Cleaning up.");
 
-	queue_remove_all(client->ios, NULL, NULL,
-				(queue_destroy_func_t) io_shutdown);
+	queue_remove_all(client->ios, NULL, NULL, client_shutdown);
 
 	/*
 	 * TODO: Once GATT over BR/EDR is properly supported, we should pass the

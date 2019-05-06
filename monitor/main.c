@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
+#include <sys/un.h>
 
 #include "src/shared/mainloop.h"
 #include "src/shared/tty.h"
@@ -71,32 +72,35 @@ static void usage(void)
 		"\t-S, --sco              Dump SCO traffic\n"
 		"\t-A, --a2dp             Dump A2DP stream traffic\n"
 		"\t-E, --ellisys [ip]     Send Ellisys HCI Injection\n"
+		"\t-P, --no-pager         Disable pager usage\n"
 		"\t-h, --help             Show help options\n");
 }
 
 static const struct option main_options[] = {
-	{ "tty",     required_argument, NULL, 'd' },
+	{ "tty",       required_argument, NULL, 'd' },
 	{ "tty-speed", required_argument, NULL, 'B' },
-	{ "read",    required_argument, NULL, 'r' },
-	{ "write",   required_argument, NULL, 'w' },
-	{ "analyze", required_argument, NULL, 'a' },
-	{ "server",  required_argument, NULL, 's' },
-	{ "priority",required_argument, NULL, 'p' },
-	{ "index",   required_argument, NULL, 'i' },
-	{ "time",    no_argument,       NULL, 't' },
-	{ "date",    no_argument,       NULL, 'T' },
-	{ "sco",     no_argument,	NULL, 'S' },
-	{ "a2dp",    no_argument,	NULL, 'A' },
-	{ "ellisys", required_argument, NULL, 'E' },
-	{ "todo",    no_argument,       NULL, '#' },
-	{ "version", no_argument,       NULL, 'v' },
-	{ "help",    no_argument,       NULL, 'h' },
+	{ "read",      required_argument, NULL, 'r' },
+	{ "write",     required_argument, NULL, 'w' },
+	{ "analyze",   required_argument, NULL, 'a' },
+	{ "server",    required_argument, NULL, 's' },
+	{ "priority",  required_argument, NULL, 'p' },
+	{ "index",     required_argument, NULL, 'i' },
+	{ "time",      no_argument,       NULL, 't' },
+	{ "date",      no_argument,       NULL, 'T' },
+	{ "sco",       no_argument,       NULL, 'S' },
+	{ "a2dp",      no_argument,       NULL, 'A' },
+	{ "ellisys",   required_argument, NULL, 'E' },
+	{ "no-pager",  no_argument,       NULL, 'P' },
+	{ "todo",      no_argument,       NULL, '#' },
+	{ "version",   no_argument,       NULL, 'v' },
+	{ "help",      no_argument,       NULL, 'h' },
 	{ }
 };
 
 int main(int argc, char *argv[])
 {
 	unsigned long filter_mask = 0;
+	bool use_pager = true;
 	const char *reader_path = NULL;
 	const char *writer_path = NULL;
 	const char *analyze_path = NULL;
@@ -114,9 +118,10 @@ int main(int argc, char *argv[])
 
 	for (;;) {
 		int opt;
+		struct sockaddr_un addr;
 
-		opt = getopt_long(argc, argv, "d:r:w:a:s:p:i:tTSAE:vh",
-						main_options, NULL);
+		opt = getopt_long(argc, argv, "d:r:w:a:s:p:i:tTSAEP:vh",
+							main_options, NULL);
 		if (opt < 0)
 			break;
 
@@ -141,6 +146,10 @@ int main(int argc, char *argv[])
 			analyze_path = optarg;
 			break;
 		case 's':
+			if (strlen(optarg) > sizeof(addr.sun_path) - 1) {
+				fprintf(stderr, "Socket name too long\n");
+				return EXIT_FAILURE;
+			}
 			control_server(optarg);
 			break;
 		case 'p':
@@ -175,6 +184,9 @@ int main(int argc, char *argv[])
 		case 'E':
 			ellisys_server = optarg;
 			ellisys_port = 24352;
+			break;
+		case 'P':
+			use_pager = false;
 			break;
 		case '#':
 			packet_todo();
@@ -222,7 +234,7 @@ int main(int argc, char *argv[])
 		if (ellisys_server)
 			ellisys_enable(ellisys_server, ellisys_port);
 
-		control_reader(reader_path);
+		control_reader(reader_path, use_pager);
 		return EXIT_SUCCESS;
 	}
 
