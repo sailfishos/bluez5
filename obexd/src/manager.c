@@ -53,7 +53,7 @@
 #define AGENT_INTERFACE OBEXD_SERVICE ".Agent1"
 
 #define TIMEOUT 60*1000 /* Timeout for user response (miliseconds) */
-#define PROGRESS_EMIT_INTERVAL (1) /* Rate limiter for progress emits (seconds) */
+#define PROGRESS_EMIT_INTERVAL_MS (250) /* Rate limiter for progress emits */
 
 struct agent {
 	char *bus_name;
@@ -75,8 +75,8 @@ struct obex_transfer {
 	uint8_t status;
 	char *path;
 	struct obex_session *session;
-	gint64 last_progress_emit;
-	guint emit_timeout_source;
+	guint progress_signal_block;
+	gboolean progress_signal_pending;
 };
 
 static struct agent *agent = NULL;
@@ -562,17 +562,21 @@ static void emit_transfer_completed(struct obex_transfer *transfer,
 	manager_emit_transfer_property(transfer, "Status");
 }
 
-static void cancel_emit_transfer_progress(struct obex_transfer *transfer) {
-	if (transfer->emit_timeout_source) {
-		g_source_remove(transfer->emit_timeout_source);
-		transfer->emit_timeout_source = 0;
+static void unblock_progress_signals(struct obex_transfer *transfer)
+{
+	if (transfer->progress_signal_block) {
+		g_source_remove(transfer->progress_signal_block);
+		transfer->progress_signal_block = 0;
+	}
+	if (transfer->progress_signal_pending) {
+		transfer->progress_signal_pending = FALSE;
+		manager_emit_transfer_property(transfer, "Transferred");
 	}
 }
 
 static void transfer_free(struct obex_transfer *transfer)
 {
-	cancel_emit_transfer_progress(transfer);
-
+	unblock_progress_signals(transfer);
 	g_free(transfer->path);
 	g_free(transfer);
 }
@@ -788,31 +792,29 @@ void manager_unregister_session(struct obex_session *os)
 	g_free(path);
 }
 
-static gboolean emit_transfer_progress(gpointer user_data)
+static gboolean progress_signal_block_timeout(gpointer user_data)
 {
 	struct obex_transfer *transfer = user_data;
 
-	transfer->emit_timeout_source = 0;
-
-	manager_emit_transfer_property(transfer, "Transferred");
-
-	return FALSE;
+	if (transfer->progress_signal_pending) {
+		transfer->progress_signal_pending = FALSE;
+		manager_emit_transfer_property(transfer, "Transferred");
+		return G_SOURCE_CONTINUE;
+	} else {
+		transfer->progress_signal_block = 0;
+		return G_SOURCE_REMOVE;
+	}
 }
 
 void manager_emit_transfer_progress(struct obex_transfer *transfer)
 {
-	gint64 now;
-
-	if (transfer->emit_timeout_source == 0) {
-		now = g_get_monotonic_time();
-		if (now - transfer->last_progress_emit > PROGRESS_EMIT_INTERVAL) {
-			transfer->last_progress_emit = now;
-			manager_emit_transfer_property(transfer, "Transferred");
-		} else
-			transfer->emit_timeout_source =
-				g_timeout_add_seconds(PROGRESS_EMIT_INTERVAL,
-						emit_transfer_progress,
-						transfer);
+	if (transfer->progress_signal_block) {
+		transfer->progress_signal_pending = TRUE;
+	} else {
+		manager_emit_transfer_property(transfer, "Transferred");
+		transfer->progress_signal_block =
+			g_timeout_add(PROGRESS_EMIT_INTERVAL_MS,
+				progress_signal_block_timeout, transfer);
 	}
 }
 
@@ -823,7 +825,7 @@ void manager_emit_transfer_completed(struct obex_transfer *transfer)
 	if (transfer == NULL)
 		return;
 
-	cancel_emit_transfer_progress(transfer);
+	unblock_progress_signals(transfer);
 	session = transfer->session;
 
 	if (session == NULL || session->object == NULL)
