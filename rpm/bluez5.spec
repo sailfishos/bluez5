@@ -251,19 +251,6 @@ systemctl daemon-reload ||:
 
 %postun libs -p /sbin/ldconfig
 
-
-%preun obexd
-if [ "$1" -eq 0 ]; then
-systemctl-user stop obex.service ||:
-fi
-
-%post obexd
-systemctl-user daemon-reload ||:
-systemctl-user reload-or-try-restart obex.service ||:
-
-%postun obexd
-systemctl-user daemon-reload ||:
-
 %files
 %defattr(-,root,root,-)
 %{_libexecdir}/bluetooth/bluetoothd
