@@ -155,8 +155,9 @@ autoreconf --force --install
     --enable-library \
     --enable-sixaxis \
     --enable-test \
-    --with-systemdsystemunitdir=/lib/systemd/system \
+    --with-systemdsystemunitdir=/usr/lib/systemd/system \
     --with-systemduserunitdir=/usr/lib/systemd/user \
+    --with-udevdir=/usr/lib/udev \
     --enable-jolla-dbus-access \
     --enable-jolla-did \
     --enable-jolla-logcontrol \
@@ -180,9 +181,9 @@ rm -rf %{buildroot}
 
 
 # bluez systemd integration
-mkdir -p $RPM_BUILD_ROOT/%{_lib}/systemd/system/network.target.wants
-ln -s ../bluetooth.service $RPM_BUILD_ROOT/%{_lib}/systemd/system/network.target.wants/bluetooth.service
-(cd $RPM_BUILD_ROOT/%{_lib}/systemd/system && ln -s bluetooth.service dbus-org.bluez.service)
+mkdir -p $RPM_BUILD_ROOT/%{_libdir}/systemd/system/network.target.wants
+ln -s ../bluetooth.service $RPM_BUILD_ROOT/%{_libdir}/systemd/system/network.target.wants/bluetooth.service
+(cd $RPM_BUILD_ROOT/%{_libdir}/systemd/system && ln -s bluetooth.service dbus-org.bluez.service)
 
 # bluez runtime files
 install -d -m 0755 $RPM_BUILD_ROOT/%{_localstatedir}/lib/bluetooth
@@ -256,9 +257,9 @@ systemctl daemon-reload ||:
 %{_libexecdir}/bluetooth/bluetoothd
 %{_libdir}/bluetooth/plugins/sixaxis.so
 %{_datadir}/dbus-1/system-services/org.bluez.service
-/%{_lib}/systemd/system/bluetooth.service
-/%{_lib}/systemd/system/network.target.wants/bluetooth.service
-/%{_lib}/systemd/system/dbus-org.bluez.service
+%{_libdir}/systemd/system/bluetooth.service
+%{_libdir}/systemd/system/network.target.wants/bluetooth.service
+%{_libdir}/systemd/system/dbus-org.bluez.service
 %config %{_sysconfdir}/dbus-1/system.d/bluetooth.conf
 %dir %{_localstatedir}/lib/bluetooth
 
@@ -315,8 +316,8 @@ systemctl daemon-reload ||:
 %{_bindir}/rctest
 %{_bindir}/rfcomm
 %{_bindir}/sdptool
-/%{_lib}/udev/hid2hci
-/%{_lib}/udev/rules.d/97-hid2hci.rules
+%{_libdir}/udev/hid2hci
+%{_libdir}/udev/rules.d/97-hid2hci.rules
 
 %files obexd
 %defattr(-,root,root,-)
