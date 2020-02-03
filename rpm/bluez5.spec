@@ -5,7 +5,6 @@ Name:       bluez5
 Summary:    Bluetooth daemon
 Version:    5.47
 Release:    1
-Group:      Applications/System
 License:    GPLv2+
 URL:        http://www.bluez.org/
 Source0:    http://www.kernel.org/pub/linux/bluetooth/%{name}-%{version}.tar.gz
@@ -33,8 +32,6 @@ BuildRequires:  pkgconfig(check)
 BuildRequires:  pkgconfig(libical)
 BuildRequires:  bison
 BuildRequires:  flex
-BuildRequires:  readline
-BuildRequires:  readline-devel
 BuildRequires:  automake
 BuildRequires:  autoconf
 Conflicts: bluez
@@ -44,7 +41,6 @@ Conflicts: bluez
 
 %package configs-mer
 Summary:    Bluetooth (bluez5) default configuration
-Group:      Applications/System
 Requires:   %{name} = %{version}-%{release}
 Provides:   bluez5-configs
 Conflicts:  bluez-configs-mer
@@ -53,7 +49,6 @@ Conflicts:  bluez-configs-mer
 
 %package cups
 Summary:    Bluetooth (bluez5) CUPS support
-Group:      System/Daemons
 Requires:   %{name} = %{version}-%{release}
 Requires:   cups
 Conflicts:  bluez-cups
@@ -62,7 +57,6 @@ Conflicts:  bluez-cups
 
 %package doc
 Summary:    Bluetooth (bluez5) daemon documentation
-Group:      Documentation
 Requires:   %{name} = %{version}-%{release}
 Conflicts:  bluez-doc
 %description doc
@@ -70,7 +64,6 @@ Conflicts:  bluez-doc
 
 %package hcidump
 Summary:    Bluetooth (bluez5) packet analyzer
-Group:      Applications/System
 Requires:   %{name} = %{version}-%{release}
 Conflicts:  bluez-hcidump
 %description hcidump
@@ -78,7 +71,6 @@ Conflicts:  bluez-hcidump
 
 %package libs
 Summary:    Bluetooth (bluez5) library
-Group:      System/Libraries
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 Conflicts:  bluez-libs
@@ -87,7 +79,6 @@ Conflicts:  bluez-libs
 
 %package libs-devel
 Summary:    Bluetooth (bluez5) library development package
-Group:      Development/Libraries
 Requires:   bluez5-libs = %{version}
 Conflicts:  bluez-libs-devel
 %description libs-devel
@@ -95,7 +86,6 @@ Conflicts:  bluez-libs-devel
 
 %package test
 Summary:    Test utilities for Bluetooth (bluez5)
-Group:      Development/Tools
 Requires:   %{name} = %{version}-%{release}
 Requires:   %{name}-libs = %{version}
 Requires:   dbus-python
@@ -106,15 +96,23 @@ Conflicts:  bluez-test
 
 %package tools
 Summary:    Command line tools for Bluetooth (bluez5)
-Group:      Applications/System
+# Readline is GPLv3+
+BuildRequires: pkgconfig(readline)
 Requires:   %{name} = %{version}-%{release}
+Requires:   %{name}-tools-hciattach = %{version}-%{release}
 Conflicts:  bluez-tools
 %description tools
 %{summary}.
 
+%package tools-hciattach
+Summary:    Command line tool for Bluetooth (bluez5)
+Requires:   %{name} = %{version}-%{release}
+Conflicts:  bluez-tools
+%description tools-hciattach
+%{summary}.
+
 %package obexd
 Summary:    OBEX server (bluez5)
-Group:      System/Daemons
 Requires:   %{name} = %{version}-%{release}
 Requires:   obex-capability
 Conflicts:  obexd
@@ -124,13 +122,11 @@ Conflicts:  obexd-server
 
 %package obexd-tools
 Summary:    Command line tools for OBEX (bluez5)
-Group:      Applications/System
 %description obexd-tools
 %{summary}.
 
 %package tracing
 Summary:    Configuration for bluez5 to enable tracing
-Group:      Development/Tools
 Requires:   %{name} = %{version}-%{release}
 Conflicts:  bluez-tracing
 %description tracing
@@ -138,7 +134,6 @@ Will enable tracing for BlueZ 5
 
 %package obexd-tracing
 Summary:    Configuration for bluez5-obexd to enable tracing
-Group:      Development/Tools
 %description obexd-tracing
 Will enable tracing for BlueZ 5 OBEX daemon
 
@@ -159,7 +154,6 @@ autoreconf --force --install
     --with-systemduserunitdir=/usr/lib/systemd/user \
     --enable-jolla-dbus-access \
     --enable-jolla-did \
-    --enable-jolla-logcontrol \
     --enable-sailfish-exclude \
     --with-phonebook=sailfish \
     --with-contentfilter=helperapp \
@@ -305,7 +299,6 @@ systemctl daemon-reload ||:
 %{_bindir}/btmon
 %{_bindir}/ciptool
 %{_bindir}/gatttool
-%{_bindir}/hciattach
 %{_bindir}/hciconfig
 %{_bindir}/hcitool
 %{_bindir}/hex2hcd
@@ -317,6 +310,10 @@ systemctl daemon-reload ||:
 %{_bindir}/sdptool
 /%{_lib}/udev/hid2hci
 /%{_lib}/udev/rules.d/97-hid2hci.rules
+
+%files tools-hciattach
+%defattr(-,root,root,-)
+%{_bindir}/hciattach
 
 %files obexd
 %defattr(-,root,root,-)
