@@ -223,6 +223,15 @@ struct avdtp *avdtp_ref(struct avdtp *session);
 struct avdtp_service_capability *avdtp_service_cap_new(uint8_t category,
 							void *data, int size);
 
+struct avdtp_remote_sep *avdtp_register_remote_sep(struct avdtp *session,
+							uint8_t seid,
+							uint8_t type,
+							GSList *caps);
+
+uint8_t avdtp_get_seid(struct avdtp_remote_sep *sep);
+
+uint8_t avdtp_get_type(struct avdtp_remote_sep *sep);
+
 struct avdtp_service_capability *avdtp_get_codec(struct avdtp_remote_sep *sep);
 
 int avdtp_discover(struct avdtp *session, avdtp_discover_cb_t cb,
@@ -287,6 +296,7 @@ struct avdtp_remote_sep *avdtp_find_remote_sep(struct avdtp *session,
 int avdtp_unregister_sep(struct queue *lseps, struct avdtp_local_sep *sep);
 
 avdtp_state_t avdtp_sep_get_state(struct avdtp_local_sep *sep);
+uint8_t avdtp_sep_get_seid(struct avdtp_local_sep *sep);
 
 void avdtp_error_init(struct avdtp_error *err, uint8_t type, int id);
 const char *avdtp_strerror(struct avdtp_error *err);

@@ -27,6 +27,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <limits.h>
@@ -47,8 +48,6 @@
 #include "src/shared/util.h"
 #include "src/shared/mainloop.h"
 #include "src/shared/btsnoop.h"
-
-#include "src/systemd.h"
 
 #define MONITOR_INDEX_NONE 0xffff
 
@@ -278,12 +277,11 @@ int main(int argc, char *argv[])
 	size_t size_limit = 0;
 	bool parents = false;
 	int exit_status;
-	sigset_t mask;
 	char *endptr;
 
 	mainloop_init();
 
-	sd_notify(0, "STATUS=Starting up");
+	mainloop_sd_notify("STATUS=Starting up");
 
 	while (true) {
 		int opt;
@@ -367,20 +365,14 @@ int main(int argc, char *argv[])
 
 	drop_capabilities();
 
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGINT);
-	sigaddset(&mask, SIGTERM);
-
-	mainloop_set_signal(&mask, signal_callback, NULL, NULL);
-
 	printf("Bluetooth monitor logger ver %s\n", VERSION);
 
-	sd_notify(0, "STATUS=Running");
-	sd_notify(0, "READY=1");
+	mainloop_sd_notify("STATUS=Running");
+	mainloop_sd_notify("READY=1");
 
-	exit_status = mainloop_run();
+	exit_status = mainloop_run_with_signal(signal_callback, NULL);
 
-	sd_notify(0, "STATUS=Quitting");
+	mainloop_sd_notify("STATUS=Quitting");
 
 	btsnoop_unref(btsnoop_file);
 

@@ -26,6 +26,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <inttypes.h>
 
@@ -38,6 +39,7 @@
 
 #define COLOR_OPCODE		COLOR_MAGENTA
 #define COLOR_OPCODE_UNKNOWN	COLOR_WHITE_BG
+#define COLOR_UNKNOWN_OPTIONS_BIT COLOR_WHITE_BG
 
 #define MAX_CHANNEL 16
 
@@ -475,6 +477,221 @@ static void reject_ind_ext(const void *data, uint8_t size)
 	packet_print_error("Error code", pdu->error);
 }
 
+static void length_req_rsp(const void *data, uint8_t size)
+{
+	const struct bt_ll_length *pdu = data;
+
+	print_field("MaxRxOctets: %u", pdu->rx_len);
+	print_field("MaxRxTime: %u", pdu->rx_time);
+	print_field("MaxTxOctets: %u", pdu->tx_len);
+	print_field("MaxtxTime: %u", pdu->tx_time);
+}
+
+static const struct bitfield_data le_phys[] = {
+	{  0, "LE 1M"	},
+	{  1, "LE 2M"	},
+	{  2, "LE Coded"},
+	{ }
+};
+
+static void phy_req_rsp(const void *data, uint8_t size)
+{
+	const struct bt_ll_phy *pdu = data;
+	uint8_t mask;
+
+	print_field("RX PHYs: 0x%2.2x", pdu->rx_phys);
+
+	mask = print_bitfield(2, pdu->rx_phys, le_phys);
+	if (mask)
+		print_text(COLOR_UNKNOWN_OPTIONS_BIT, "  Reserved"
+							" (0x%2.2x)", mask);
+	print_field("TX PHYs: 0x%2.2x", pdu->tx_phys);
+
+	mask = print_bitfield(2, pdu->tx_phys, le_phys);
+	if (mask)
+		print_text(COLOR_UNKNOWN_OPTIONS_BIT, "  Reserved"
+							" (0x%2.2x)", mask);
+}
+
+static void phy_update_ind(const void *data, uint8_t size)
+{
+	const struct bt_ll_phy_update_ind *pdu = data;
+	uint8_t mask;
+
+	print_field("M_TO_S_PHY: 0x%2.2x", pdu->m_phy);
+
+	mask = print_bitfield(2, pdu->m_phy, le_phys);
+	if (mask)
+		print_text(COLOR_UNKNOWN_OPTIONS_BIT, "  Reserved"
+							" (0x%2.2x)", mask);
+
+	print_field("S_TO_M_PHY: 0x%2.2x", pdu->s_phy);
+
+	mask = print_bitfield(2, pdu->s_phy, le_phys);
+	if (mask)
+		print_text(COLOR_UNKNOWN_OPTIONS_BIT, "  Reserved"
+							" (0x%2.2x)", mask);
+
+	print_field("Instant: 0x%4.4x", pdu->instant);
+}
+
+static void min_used_channels(const void *data, uint8_t size)
+{
+	const struct bt_ll_min_used_channels *pdu = data;
+	uint8_t mask;
+
+	print_field("PHYS: 0x%2.2x", pdu->phys);
+
+	mask = print_bitfield(2, pdu->phys, le_phys);
+	if (mask)
+		print_text(COLOR_UNKNOWN_OPTIONS_BIT, "  Reserved"
+							" (0x%2.2x)", mask);
+
+	print_field("MinUsedChannels: 0x%2.2x", pdu->min_channels);
+}
+
+static void cte_req(const void *data, uint8_t size)
+{
+	const struct bt_ll_cte_req *pdu = data;
+
+	print_field("MinCTELenReq: 0x%2.2x", pdu->cte & 0xf8);
+	print_field("CTETypeReq: 0x%2.2x", pdu->cte & 0x03);
+
+	switch (pdu->cte & 0x03) {
+	case 0x00:
+		print_field("  AoA Constant Tone Extension");
+		break;
+	case 0x01:
+		print_field("  AoD Constant Tone Extension with 1 μs slots");
+		break;
+	case 0x02:
+		print_field("  AoD Constant Tone Extension with 2 μs slots");
+		break;
+	}
+}
+
+static void periodic_sync_ind(const void *data, uint8_t size)
+{
+	const struct bt_ll_periodic_sync_ind *pdu = data;
+	uint8_t mask;
+
+	print_field("ID: 0x%4.4x", pdu->id);
+	print_field("SyncInfo:");
+	packet_hexdump(pdu->info, sizeof(pdu->info));
+	print_field("connEventCount: 0x%4.4x", pdu->event_count);
+	print_field("lastPaEventCounter: 0x%4.4x", pdu->last_counter);
+	print_field("SID: 0x%2.2x", pdu->adv_info & 0xf0);
+	print_field("AType: %s", pdu->adv_info & 0x08 ? "random" : "public");
+	print_field("SCA: 0x%2.2x", pdu->adv_info & 0x07);
+	print_field("PHY: 0x%2.2x", pdu->phy);
+
+	mask = print_bitfield(2, pdu->phy, le_phys);
+	if (mask)
+		print_text(COLOR_UNKNOWN_OPTIONS_BIT, "  Reserved"
+							" (0x%2.2x)", mask);
+
+	packet_print_addr("AdvA", pdu->adv_addr, pdu->adv_info & 0x08);
+	print_field("syncConnEventCount: 0x%4.4x", pdu->sync_counter);
+}
+
+static void clock_acc_req_rsp(const void *data, uint8_t size)
+{
+	const struct bt_ll_clock_acc *pdu = data;
+
+	print_field("SCA: 0x%2.2x", pdu->sca);
+}
+
+static void cis_req(const void *data, uint8_t size)
+{
+	const struct bt_ll_cis_req *cmd = data;
+	uint32_t interval;
+	uint8_t mask;
+
+	print_field("CIG ID: 0x%2.2x", cmd->cig);
+	print_field("CIS ID: 0x%2.2x", cmd->cis);
+	print_field("Master to Slave PHY: 0x%2.2x", cmd->m_phy);
+
+	mask = print_bitfield(2, cmd->m_phy, le_phys);
+	if (mask)
+		print_text(COLOR_UNKNOWN_OPTIONS_BIT, "  Reserved"
+							" (0x%2.2x)", mask);
+
+	print_field("Slave To Master PHY: 0x%2.2x", cmd->s_phy);
+
+	mask = print_bitfield(2, cmd->s_phy, le_phys);
+	if (mask)
+		print_text(COLOR_UNKNOWN_OPTIONS_BIT, "  Reserved"
+							" (0x%2.2x)", mask);
+
+	print_field("Master to Slave Maximum SDU: %u", cmd->m_sdu);
+	print_field("Slave to Master Maximum SDU: %u", cmd->s_sdu);
+
+	memcpy(&interval, cmd->m_interval, sizeof(cmd->m_interval));
+	print_field("Master to Slave Interval: 0x%6.6x", le32_to_cpu(interval));
+	memcpy(&interval, cmd->s_interval, sizeof(cmd->s_interval));
+	print_field("Slave to Master Interval: 0x%6.6x", le32_to_cpu(interval));
+
+	print_field("Master to Slave Maximum PDU: %u", cmd->m_pdu);
+	print_field("Slave to Master Maximum PDU: %u", cmd->s_pdu);
+
+	print_field("Burst Number: %u us", cmd->bn);
+
+	memcpy(&interval, cmd->sub_interval, sizeof(cmd->sub_interval));
+	print_field("Sub-Interval: 0x%6.6x", le32_to_cpu(interval));
+
+	print_field("Master to Slave Flush Timeout: %u", cmd->m_ft);
+	print_field("Slave to Master Flush Timeout: %u", cmd->s_ft);
+
+	print_field("ISO Interval: 0x%4.4x", le16_to_cpu(cmd->iso_interval));
+
+	memcpy(&interval, cmd->offset_min, sizeof(cmd->offset_min));
+	print_field("CIS Offset Minimum: 0x%6.6x", le32_to_cpu(interval));
+	memcpy(&interval, cmd->offset_max, sizeof(cmd->offset_max));
+	print_field("CIS Offset Maximum: 0x%6.6x", le32_to_cpu(interval));
+
+	print_field("Connection Event Count: %u", cmd->conn_event_count);
+}
+
+static void cis_rsp(const void *data, uint8_t size)
+{
+	const struct bt_ll_cis_rsp *rsp = data;
+	uint32_t interval;
+
+	memcpy(&interval, rsp->offset_min, sizeof(rsp->offset_min));
+	print_field("CIS Offset Minimum: 0x%6.6x", le32_to_cpu(interval));
+	memcpy(&interval, rsp->offset_max, sizeof(rsp->offset_max));
+	print_field("CIS Offset Maximum: 0x%6.6x", le32_to_cpu(interval));
+
+	print_field("Connection Event Count: %u", rsp->conn_event_count);
+}
+
+static void cis_ind(const void *data, uint8_t size)
+{
+	const struct bt_ll_cis_ind *ind = data;
+	uint32_t interval;
+
+	print_field("CIS Access Address: 0x%4.4x", le32_to_cpu(ind->addr));
+	memcpy(&interval, ind->cis_offset, sizeof(ind->cis_offset));
+	print_field("CIS Offset: 0x%6.6x", le32_to_cpu(interval));
+
+	memcpy(&interval, ind->cig_sync_delay, sizeof(ind->cig_sync_delay));
+	print_field("CIG Synchronization Delay: 0x%6.6x",
+					le32_to_cpu(interval));
+	memcpy(&interval, ind->cis_sync_delay, sizeof(ind->cis_sync_delay));
+	print_field("CIS Synchronization Delay: %u us",
+					le32_to_cpu(interval));
+	print_field("Connection Event Count: %u", ind->conn_event_count);
+}
+
+static void cis_term_ind(const void *data, uint8_t size)
+{
+	const struct bt_ll_cis_term_ind *ind = data;
+
+	print_field("CIG ID: 0x%2.2x", ind->cig);
+	print_field("CIS ID: 0x%2.2x", ind->cis);
+	packet_print_error("Reason", ind->reason);
+}
+
 struct llcp_data {
 	uint8_t opcode;
 	const char *str;
@@ -504,12 +721,26 @@ static const struct llcp_data llcp_table[] = {
 	{ 0x11, "LL_REJECT_IND_EXT",        reject_ind_ext,     2, true },
 	{ 0x12, "LL_PING_REQ",              null_pdu,           0, true },
 	{ 0x13, "LL_PING_RSP",              null_pdu,           0, true },
-	{ 0x14, "LL_LENGTH_REQ",            NULL,               8, true },
-	{ 0x15, "LL_LENGTH_RSP",            NULL,               8, true },
-	{ 0x16, "LL_PHY_REQ",               NULL,               2, true },
-	{ 0x17, "LL_PHY_RSP",               NULL,               2, true },
-	{ 0x18, "LL_PHY_UPDATE_IND",        NULL,               4, true },
-	{ 0x19, "LL_MIN_USED_CHANNELS_IND", NULL,               2, true },
+	{ 0x14, "LL_LENGTH_REQ",            length_req_rsp,     8, true },
+	{ 0x15, "LL_LENGTH_RSP",            length_req_rsp,     8, true },
+	{ 0x16, "LL_PHY_REQ",               phy_req_rsp,        2, true },
+	{ 0x17, "LL_PHY_RSP",               phy_req_rsp,        2, true },
+	{ 0x18, "LL_PHY_UPDATE_IND",        phy_update_ind,     4, true },
+	{ 0x19, "LL_MIN_USED_CHANNELS_IND", min_used_channels,  2, true },
+	{ 0x1a, "LL_CTE_REQ",               cte_req,            1, true },
+	{ 0x1b, "LL_CTE_RSP",               null_pdu,           0, true },
+	{ 0x1c, "LL_PERIODIC_SYNC_IND",     periodic_sync_ind, 34, true },
+	{ 0x1d, "LL_CLOCK_ACCURACY_REQ",    clock_acc_req_rsp,  1, true },
+	{ 0x1e, "LL_CLOCK_ACCURACY_RSP",    clock_acc_req_rsp,  1, true },
+	{ BT_LL_CIS_REQ, "LL_CIS_REQ",      cis_req,
+					sizeof(struct bt_ll_cis_req), true },
+	{ BT_LL_CIS_RSP, "LL_CIS_RSP",      cis_rsp,
+					sizeof(struct bt_ll_cis_rsp), true },
+	{ BT_LL_CIS_IND, "LL_CIS_IND",      cis_ind,
+					sizeof(struct bt_ll_cis_ind), true },
+	{ BT_LL_CIS_TERMINATE_IND, "LL_CIS_TERMINATE_IND", cis_term_ind,
+					sizeof(struct bt_ll_cis_term_ind),
+					true },
 	{ }
 };
 

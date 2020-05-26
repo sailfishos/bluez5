@@ -25,6 +25,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <unistd.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -68,11 +69,11 @@ struct context {
 
 #define data(args...) ((const unsigned char[]) { args })
 
-#define raw_pdu(args...)    \
-{      \
-	.valid = true,		\
-	.data = data(args), \
-	.size = sizeof(data(args)),\
+#define raw_pdu(args...)					\
+{								\
+	.valid = true,						\
+	.data = g_memdup(data(args), sizeof(data(args))),	\
+	.size = sizeof(data(args)),				\
 }
 
 #define false_pdu()	\

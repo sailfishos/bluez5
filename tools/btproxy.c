@@ -26,6 +26,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <errno.h>
 #include <ctype.h>
@@ -72,14 +73,14 @@ static void hexdump_print(const char *str, void *user_data)
 }
 
 struct proxy {
-	/* Receive commands, ACL and SCO data */
+	/* Receive commands, ACL, SCO and ISO data */
 	int host_fd;
 	uint8_t host_buf[4096];
 	uint16_t host_len;
 	bool host_shutdown;
 	bool host_skip_first_zero;
 
-	/* Receive events, ACL and SCO data */
+	/* Receive events, ACL, SCO and ISO data */
 	int dev_fd;
 	uint8_t dev_buf[4096];
 	uint16_t dev_len;
@@ -295,6 +296,7 @@ static void host_read_callback(int fd, uint32_t events, void *user_data)
 	struct bt_hci_cmd_hdr *cmd_hdr;
 	struct bt_hci_acl_hdr *acl_hdr;
 	struct bt_hci_sco_hdr *sco_hdr;
+	struct bt_hci_iso_hdr *iso_hdr;
 	ssize_t len;
 	uint16_t pktlen;
 
@@ -363,6 +365,13 @@ process_packet:
 		sco_hdr = (void *) (proxy->host_buf + 1);
 		pktlen = 1 + sizeof(*sco_hdr) + sco_hdr->dlen;
 		break;
+	case BT_H4_ISO_PKT:
+		if (proxy->host_len < 1 + sizeof(*iso_hdr))
+			return;
+
+		iso_hdr = (void *) (proxy->host_buf + 1);
+		pktlen = 1 + sizeof(*iso_hdr) + cpu_to_le16(iso_hdr->dlen);
+		break;
 	case 0xff:
 		/* Notification packet from /dev/vhci - ignore */
 		proxy->host_len = 0;
@@ -417,6 +426,7 @@ static void dev_read_callback(int fd, uint32_t events, void *user_data)
 	struct bt_hci_evt_hdr *evt_hdr;
 	struct bt_hci_acl_hdr *acl_hdr;
 	struct bt_hci_sco_hdr *sco_hdr;
+	struct bt_hci_iso_hdr *iso_hdr;
 	ssize_t len;
 	uint16_t pktlen;
 
@@ -474,6 +484,13 @@ process_packet:
 
 		sco_hdr = (void *) (proxy->dev_buf + 1);
 		pktlen = 1 + sizeof(*sco_hdr) + sco_hdr->dlen;
+		break;
+	case BT_H4_ISO_PKT:
+		if (proxy->dev_len < 1 + sizeof(*iso_hdr))
+			return;
+
+		iso_hdr = (void *) (proxy->dev_buf + 1);
+		pktlen = 1 + sizeof(*iso_hdr) + cpu_to_le16(iso_hdr->dlen);
 		break;
 	default:
 		fprintf(stderr, "Received unknown device packet type 0x%02x\n",
@@ -780,7 +797,6 @@ int main(int argc, char *argv[])
 	bool use_redirect = false;
 	uint8_t type = HCI_PRIMARY;
 	const char *str;
-	sigset_t mask;
 
 	for (;;) {
 		int opt;
@@ -870,12 +886,6 @@ int main(int argc, char *argv[])
 
 	mainloop_init();
 
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGINT);
-	sigaddset(&mask, SIGTERM);
-
-	mainloop_set_signal(&mask, signal_callback, NULL, NULL);
-
 	if (connect_address || use_redirect) {
 		int host_fd, dev_fd;
 
@@ -930,5 +940,5 @@ int main(int argc, char *argv[])
 							NULL, NULL);
 	}
 
-	return mainloop_run();
+	return mainloop_run_with_signal(signal_callback, NULL);
 }

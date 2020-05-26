@@ -47,6 +47,9 @@
 #define has_bredr(btdev)	(!((btdev)->features[4] & 0x20))
 #define has_le(btdev)		(!!((btdev)->features[4] & 0x40))
 
+#define ACL_HANDLE 42
+#define ISO_HANDLE 44
+
 struct hook {
 	btdev_hook_func handler;
 	void *user_data;
@@ -92,6 +95,8 @@ struct btdev {
 	uint8_t  feat_page_2[8];
 	uint16_t acl_mtu;
 	uint16_t acl_max_pkt;
+	uint16_t iso_mtu;
+	uint16_t iso_max_pkt;
 	uint8_t  country_code;
 	uint8_t  bdaddr[6];
 	uint8_t  random_addr[6];
@@ -139,12 +144,18 @@ struct btdev {
 	uint8_t  le_filter_dup;
 	uint8_t  le_adv_enable;
 	uint8_t  le_ltk[16];
+	struct {
+		struct bt_hci_cmd_le_set_cig_params params;
+		struct bt_hci_cis_params cis;
+	} __attribute__ ((packed)) le_cig;
 
 	uint8_t le_local_sk256[32];
 
 	uint16_t sync_train_interval;
 	uint32_t sync_train_timeout;
 	uint8_t  sync_train_service_data;
+
+	uint16_t le_ext_adv_type;
 };
 
 struct inquiry_data {
@@ -410,6 +421,56 @@ static void set_bredr20_commands(struct btdev *btdev)
 	set_common_commands_bredr20(btdev);
 }
 
+static void set_le_50_commands(struct btdev *btdev)
+{
+	btdev->commands[36] |= 0x02;	/* LE Set Adv Set Random Address */
+	btdev->commands[36] |= 0x04;	/* LE Set Ext Adv Parameters */
+	btdev->commands[36] |= 0x08;	/* LE Set Ext Adv Data */
+	btdev->commands[36] |= 0x10;	/* LE Set Ext Scan Response Data */
+	btdev->commands[36] |= 0x20;	/* LE Set Ext Adv Enable */
+	btdev->commands[36] |= 0x40;	/* LE Read Maximum Adv Data Length */
+	btdev->commands[36] |= 0x80;	/* LE Read Num of Supported Adv Sets */
+	btdev->commands[37] |= 0x01;	/* LE Remove Adv Set */
+	btdev->commands[37] |= 0x02;	/* LE Clear Adv Sets */
+	btdev->commands[37] |= 0x04;	/* LE Set Periodic Adv Parameters */
+	btdev->commands[37] |= 0x08;	/* LE Set Periodic Adv Data */
+	btdev->commands[37] |= 0x10;	/* LE Set Periodic Adv Enable */
+	btdev->commands[37] |= 0x20;	/* LE Set Ext Scan Parameters */
+	btdev->commands[37] |= 0x40;	/* LE Set Ext Scan Enable */
+	btdev->commands[37] |= 0x80;	/* LE Ext Create Connection */
+	btdev->commands[38] |= 0x01;	/* LE Periodic Adv Create Sync */
+	btdev->commands[38] |= 0x02;	/* LE Periodic Adv Create Sync Cancel */
+	btdev->commands[38] |= 0x04;	/* LE Periodic Adv Terminate Sync */
+	btdev->commands[38] |= 0x08;	/* LE Add Device To Periodic Adv List */
+	btdev->commands[38] |= 0x10;	/* LE Remove Periodic Adv List */
+	btdev->commands[38] |= 0x20;	/* LE Clear Periodic Adv List */
+	btdev->commands[38] |= 0x40;	/* LE Read Periodic Adv List Size */
+}
+
+static void set_le_60_commands(struct btdev *btdev)
+{
+	btdev->commands[41] |= 0x20;	/* LE Read Buffer Size v2 */
+	btdev->commands[41] |= 0x40;	/* LE Read ISO TX Sync */
+	btdev->commands[41] |= 0x80;	/* LE Set CIG Parameters */
+	btdev->commands[42] |= 0x01;	/* LE Set CIG Parameters Test */
+	btdev->commands[42] |= 0x02;	/* LE Create CIS */
+	btdev->commands[42] |= 0x04;	/* LE Remove CIG */
+	btdev->commands[42] |= 0x08;	/* LE Accept CIS */
+	btdev->commands[42] |= 0x10;	/* LE Reject CIS */
+	btdev->commands[42] |= 0x20;	/* LE Create BIG */
+	btdev->commands[42] |= 0x40;	/* LE Create BIG Test */
+	btdev->commands[42] |= 0x80;	/* LE Terminate BIG */
+	btdev->commands[43] |= 0x01;	/* LE BIG Create Sync */
+	btdev->commands[43] |= 0x02;	/* LE BIG Terminate Sync */
+	btdev->commands[43] |= 0x04;	/* LE Request Peer SCA */
+	btdev->commands[43] |= 0x08;	/* LE Setup ISO Path */
+	btdev->commands[43] |= 0x10;	/* LE Remove ISO Path */
+	btdev->commands[43] |= 0x20;	/* LE ISO TX Test */
+	btdev->commands[43] |= 0x40;	/* LE ISO RX Test */
+	btdev->commands[43] |= 0x80;	/* LE ISO Read Test Counter */
+	btdev->commands[44] |= 0x01;	/* LE ISO Test End */
+}
+
 static void set_le_commands(struct btdev *btdev)
 {
 	set_common_commands_all(btdev);
@@ -450,6 +511,14 @@ static void set_le_commands(struct btdev *btdev)
 	/* Extra LE commands for >= 4.2 adapters */
 	btdev->commands[34] |= 0x02;	/* LE Read Local P-256 Public Key */
 	btdev->commands[34] |= 0x04;	/* LE Generate DHKey */
+
+	/* Extra LE commands for >= 5.0 adapters */
+	if (btdev->type >= BTDEV_TYPE_BREDRLE50)
+		set_le_50_commands(btdev);
+
+	/* Extra LE commands for >= 6.0 adapters */
+	if (btdev->type >= BTDEV_TYPE_BREDRLE60)
+		set_le_60_commands(btdev);
 }
 
 static void set_bredrle_commands(struct btdev *btdev)
@@ -501,6 +570,30 @@ static void set_bredrle_features(struct btdev *btdev)
 	btdev->features[7] |= 0x01;	/* Link Supervision Timeout Event */
 	btdev->features[7] |= 0x02;	/* Inquiry TX Power Level */
 	btdev->features[7] |= 0x80;	/* Extended features */
+
+	if (btdev->type >= BTDEV_TYPE_BREDRLE50) {
+		/* These BREDR features are added to test new configuration
+		 * command. If this is added above it will break existing tests
+		 */
+		btdev->features[0] |= 0x01;	/* 3 slot Packets */
+		btdev->features[0] |= 0x02;	/* 5 slot Packets */
+		btdev->features[3] |= 0x02;	/* EDR ACL 2M mode */
+		btdev->features[3] |= 0x04;	/* EDR ACL 3M mode */
+		btdev->features[4] |= 0x80;	/* 3 slot EDR ACL packets */
+		btdev->features[5] |= 0x01;	/* 5 slot EDR ACL packets */
+
+		btdev->le_features[1] |= 0x01;	/* LE 2M PHY */
+		btdev->le_features[1] |= 0x08;	/* LE Coded PHY */
+		btdev->le_features[1] |= 0x10;  /* LE EXT ADV */
+	}
+
+	if (btdev->type >= BTDEV_TYPE_BREDRLE60) {
+		btdev->le_features[3] |= 0x10;  /* LE CIS Master */
+		btdev->le_features[3] |= 0x20;  /* LE CIS Slave */
+		btdev->le_features[3] |= 0x40;  /* LE ISO Broadcaster */
+		btdev->le_features[3] |= 0x80;  /* LE Synchronized Receiver */
+		btdev->le_features[4] |= 0x01;  /* LE ISO channels */
+	}
 
 	btdev->feat_page_2[0] |= 0x01;	/* CSB - Master Operation */
 	btdev->feat_page_2[0] |= 0x02;	/* CSB - Slave Operation */
@@ -596,7 +689,9 @@ struct btdev *btdev_create(enum btdev_type type, uint16_t id)
 
 	memset(btdev, 0, sizeof(*btdev));
 
-	if (type == BTDEV_TYPE_BREDRLE || type == BTDEV_TYPE_LE) {
+	if (type == BTDEV_TYPE_BREDRLE || type == BTDEV_TYPE_LE ||
+			type == BTDEV_TYPE_BREDRLE50 ||
+			type == BTDEV_TYPE_BREDRLE60) {
 		btdev->crypto = bt_crypto_new();
 		if (!btdev->crypto) {
 			free(btdev);
@@ -611,6 +706,8 @@ struct btdev *btdev_create(enum btdev_type type, uint16_t id)
 
 	switch (btdev->type) {
 	case BTDEV_TYPE_BREDRLE:
+	case BTDEV_TYPE_BREDRLE50:
+	case BTDEV_TYPE_BREDRLE60:
 		btdev->version = 0x09;
 		set_bredrle_features(btdev);
 		set_bredrle_commands(btdev);
@@ -649,6 +746,9 @@ struct btdev *btdev_create(enum btdev_type type, uint16_t id)
 
 	btdev->acl_mtu = 192;
 	btdev->acl_max_pkt = 1;
+
+	btdev->iso_mtu = 251;
+	btdev->iso_max_pkt = 1;
 
 	btdev->country_code = 0x00;
 
@@ -843,13 +943,13 @@ static void le_meta_event(struct btdev *btdev, uint8_t event,
 	send_event(btdev, BT_HCI_EVT_LE_META_EVENT, pkt_data, 1 + len);
 }
 
-static void num_completed_packets(struct btdev *btdev)
+static void num_completed_packets(struct btdev *btdev, uint16_t handle)
 {
 	if (btdev->conn) {
 		struct bt_hci_evt_num_completed_packets ncp;
 
 		ncp.num_handles = 1;
-		ncp.handle = cpu_to_le16(42);
+		ncp.handle = cpu_to_le16(handle);
 		ncp.count = cpu_to_le16(1);
 
 		send_event(btdev, BT_HCI_EVT_NUM_COMPLETED_PACKETS,
@@ -1056,12 +1156,12 @@ static void conn_complete(struct btdev *btdev,
 		memcpy(cc.bdaddr, btdev->bdaddr, 6);
 		cc.encr_mode = 0x00;
 
-		cc.handle = cpu_to_le16(42);
+		cc.handle = cpu_to_le16(ACL_HANDLE);
 		cc.link_type = 0x01;
 
 		send_event(remote, BT_HCI_EVT_CONN_COMPLETE, &cc, sizeof(cc));
 
-		cc.handle = cpu_to_le16(42);
+		cc.handle = cpu_to_le16(ACL_HANDLE);
 		cc.link_type = 0x01;
 	} else {
 		cc.handle = cpu_to_le16(0x0000);
@@ -1158,7 +1258,7 @@ static void le_conn_complete(struct btdev *btdev,
 			memcpy(cc->peer_addr, btdev->bdaddr, 6);
 
 		cc->role = 0x01;
-		cc->handle = cpu_to_le16(42);
+		cc->handle = cpu_to_le16(ACL_HANDLE);
 		cc->interval = lecc->max_interval;
 		cc->latency = lecc->latency;
 		cc->supv_timeout = lecc->supv_timeout;
@@ -1169,6 +1269,53 @@ static void le_conn_complete(struct btdev *btdev,
 	cc->status = status;
 	cc->peer_addr_type = lecc->peer_addr_type;
 	memcpy(cc->peer_addr, lecc->peer_addr, 6);
+	cc->role = 0x00;
+
+	send_event(btdev, BT_HCI_EVT_LE_META_EVENT, buf, sizeof(buf));
+}
+
+static void le_ext_conn_complete(struct btdev *btdev,
+			const struct bt_hci_cmd_le_ext_create_conn *leecc,
+			uint8_t status)
+{
+	char buf[1 + sizeof(struct bt_hci_evt_le_enhanced_conn_complete)];
+	struct bt_hci_evt_le_enhanced_conn_complete *cc = (void *) &buf[1];
+	struct bt_hci_le_ext_create_conn *lecc = (void *)leecc->data;
+
+	memset(buf, 0, sizeof(buf));
+
+	buf[0] = BT_HCI_EVT_LE_ENHANCED_CONN_COMPLETE;
+
+	if (!status) {
+		struct btdev *remote;
+
+		remote = find_btdev_by_bdaddr_type(leecc->peer_addr,
+							leecc->peer_addr_type);
+
+		btdev->conn = remote;
+		btdev->le_adv_enable = 0;
+		remote->conn = btdev;
+		remote->le_adv_enable = 0;
+
+		cc->status = status;
+		cc->peer_addr_type = btdev->le_scan_own_addr_type;
+		if (cc->peer_addr_type == 0x01)
+			memcpy(cc->peer_addr, btdev->random_addr, 6);
+		else
+			memcpy(cc->peer_addr, btdev->bdaddr, 6);
+
+		cc->role = 0x01;
+		cc->handle = cpu_to_le16(ACL_HANDLE);
+		cc->interval = lecc->max_interval;
+		cc->latency = lecc->latency;
+		cc->supv_timeout = lecc->supv_timeout;
+
+		send_event(remote, BT_HCI_EVT_LE_META_EVENT, buf, sizeof(buf));
+	}
+
+	cc->status = status;
+	cc->peer_addr_type = leecc->peer_addr_type;
+	memcpy(cc->peer_addr, leecc->peer_addr, 6);
 	cc->role = 0x00;
 
 	send_event(btdev, BT_HCI_EVT_LE_META_EVENT, buf, sizeof(buf));
@@ -1202,12 +1349,32 @@ static bool adv_match(struct btdev *scan, struct btdev *adv)
 	return !memcmp(scan_addr(scan), adv->le_adv_direct_addr, 6);
 }
 
+static bool ext_adv_match(struct btdev *scan, struct btdev *adv)
+{
+	/* Match everything if this is not directed advertising */
+	if (!(adv->le_ext_adv_type & 0x04))
+		return true;
+
+	if (scan->le_scan_own_addr_type != adv->le_adv_direct_addr_type)
+		return false;
+
+	return !memcmp(scan_addr(scan), adv->le_adv_direct_addr, 6);
+}
+
 static bool adv_connectable(struct btdev *btdev)
 {
 	if (!btdev->le_adv_enable)
 		return false;
 
 	return btdev->le_adv_type != 0x03;
+}
+
+static bool ext_adv_connectable(struct btdev *btdev)
+{
+	if (!btdev->le_adv_enable)
+		return false;
+
+	return btdev->le_ext_adv_type & 0x01;
 }
 
 static void le_conn_request(struct btdev *btdev,
@@ -1222,6 +1389,78 @@ static void le_conn_request(struct btdev *btdev,
 	else
 		le_conn_complete(btdev, lecc,
 					BT_HCI_ERR_CONN_FAILED_TO_ESTABLISH);
+}
+
+static void le_ext_conn_request(struct btdev *btdev,
+			const struct bt_hci_cmd_le_ext_create_conn *leecc)
+{
+	struct btdev *remote = find_btdev_by_bdaddr_type(leecc->peer_addr,
+							leecc->peer_addr_type);
+
+	if (remote && ext_adv_connectable(remote) &&
+			ext_adv_match(btdev, remote) &&
+			remote->le_adv_own_addr == leecc->peer_addr_type)
+		le_ext_conn_complete(btdev, leecc, 0);
+	else
+		le_ext_conn_complete(btdev, leecc,
+					BT_HCI_ERR_CONN_FAILED_TO_ESTABLISH);
+}
+
+static void le_cis_estabilished(struct btdev *dev, uint8_t status)
+{
+	struct bt_hci_evt_le_cis_established evt;
+
+	memset(&evt, 0, sizeof(evt));
+
+	evt.status = status;
+
+	if (!evt.status) {
+		evt.conn_handle = cpu_to_le16(ISO_HANDLE);
+		/* TODO: Figure out if these values makes sense */
+		memcpy(evt.cig_sync_delay, dev->le_cig.params.m_interval,
+				sizeof(dev->le_cig.params.m_interval));
+		memcpy(evt.cis_sync_delay, dev->le_cig.params.s_interval,
+				sizeof(dev->le_cig.params.s_interval));
+		memcpy(evt.m_latency, &dev->le_cig.params.m_latency,
+				sizeof(dev->le_cig.params.m_latency));
+		memcpy(evt.s_latency, &dev->le_cig.params.s_latency,
+				sizeof(dev->le_cig.params.s_latency));
+		evt.m_phy = dev->le_cig.cis.m_phy;
+		evt.s_phy = dev->le_cig.cis.s_phy;
+		evt.nse = 0x01;
+		evt.m_bn = 0x01;
+		evt.s_bn = 0x01;
+		evt.m_ft = 0x01;
+		evt.s_ft = 0x01;
+		evt.m_mtu = dev->iso_mtu;
+		evt.s_mtu = dev->iso_mtu;
+		evt.interval = dev->le_cig.params.m_latency;
+	}
+
+	le_meta_event(dev, BT_HCI_EVT_LE_CIS_ESTABLISHED, &evt, sizeof(evt));
+
+	if (dev->conn)
+		le_meta_event(dev->conn, BT_HCI_EVT_LE_CIS_ESTABLISHED, &evt,
+							sizeof(evt));
+}
+
+static void le_cis_request(struct btdev *dev,
+				const struct bt_hci_cmd_le_create_cis *leccis)
+{
+	struct btdev *remote = dev->conn;
+
+	if (remote) {
+		struct bt_hci_evt_le_cis_req evt;
+
+		evt.acl_handle = cpu_to_le16(ACL_HANDLE);
+		evt.cis_handle = cpu_to_le16(ISO_HANDLE);
+		evt.cis_id = 0x00;
+		evt.cis_id = 0x00;
+
+		le_meta_event(remote, BT_HCI_EVT_LE_CIS_REQ, &evt, sizeof(evt));
+	} else {
+		le_cis_estabilished(dev, BT_HCI_ERR_UNKNOWN_CONN_ID);
+	}
 }
 
 static void conn_request(struct btdev *btdev, const uint8_t *bdaddr)
@@ -1332,8 +1571,10 @@ static void disconnect_complete(struct btdev *btdev, uint16_t handle,
 	dc.handle = cpu_to_le16(handle);
 	dc.reason = reason;
 
-	btdev->conn = NULL;
-	remote->conn = NULL;
+	if (dc.handle == ACL_HANDLE) {
+		btdev->conn = NULL;
+		remote->conn = NULL;
+	}
 
 	send_event(btdev, BT_HCI_EVT_DISCONNECT_COMPLETE, &dc, sizeof(dc));
 	send_event(remote, BT_HCI_EVT_DISCONNECT_COMPLETE, &dc, sizeof(dc));
@@ -1360,7 +1601,7 @@ static void link_key_req_reply_complete(struct btdev *btdev,
 		return;
 	}
 
-	ev.handle = cpu_to_le16(42);
+	ev.handle = cpu_to_le16(ACL_HANDLE);
 
 	if (!memcmp(btdev->link_key, remote->link_key, 16))
 		ev.status = BT_HCI_ERR_SUCCESS;
@@ -1455,7 +1696,7 @@ static void encrypt_change(struct btdev *btdev, uint8_t mode, uint8_t status)
 	struct bt_hci_evt_encrypt_change ev;
 
 	ev.status = status;
-	ev.handle = cpu_to_le16(42);
+	ev.handle = cpu_to_le16(ACL_HANDLE);
 	ev.encr_mode = mode;
 
 	send_event(btdev, BT_HCI_EVT_ENCRYPT_CHANGE, &ev, sizeof(ev));
@@ -1496,7 +1737,7 @@ static void pin_code_req_reply_complete(struct btdev *btdev,
 	}
 
 	if (remote->conn) {
-		ev.handle = cpu_to_le16(42);
+		ev.handle = cpu_to_le16(ACL_HANDLE);
 		send_event(remote, BT_HCI_EVT_AUTH_COMPLETE, &ev, sizeof(ev));
 	} else {
 		conn_complete(remote, btdev->bdaddr, ev.status);
@@ -1519,7 +1760,7 @@ static void pin_code_req_neg_reply_complete(struct btdev *btdev,
 	}
 
 	ev.status = BT_HCI_ERR_PIN_OR_KEY_MISSING;
-	ev.handle = cpu_to_le16(42);
+	ev.handle = cpu_to_le16(ACL_HANDLE);
 
 	if (btdev->conn)
 		send_event(btdev, BT_HCI_EVT_AUTH_COMPLETE, &ev, sizeof(ev));
@@ -1812,7 +2053,7 @@ static void ssp_complete(struct btdev *btdev, const uint8_t *bdaddr,
 	}
 
 	auth.status = status;
-	auth.handle = cpu_to_le16(42);
+	auth.handle = cpu_to_le16(ACL_HANDLE);
 	send_event(init, BT_HCI_EVT_AUTH_COMPLETE, &auth, sizeof(auth));
 }
 
@@ -1851,6 +2092,46 @@ static void le_send_adv_report(struct btdev *btdev, const struct btdev *remote,
 					1 + 10 + meta_event.lar.data_len + 1);
 }
 
+static void send_ext_adv(struct btdev *btdev, const struct btdev *remote,
+					uint16_t type, bool is_scan_rsp)
+{
+	struct __packed {
+		uint8_t subevent;
+		uint8_t num_reports;
+		union {
+			struct bt_hci_le_ext_adv_report lear;
+			uint8_t raw[24 + 31];
+		};
+	} meta_event;
+
+	meta_event.subevent = BT_HCI_EVT_LE_EXT_ADV_REPORT;
+
+	memset(&meta_event.lear, 0, sizeof(meta_event.lear));
+	meta_event.num_reports = 1;
+	meta_event.lear.event_type = cpu_to_le16(type);
+	meta_event.lear.addr_type = remote->le_adv_own_addr;
+	memcpy(meta_event.lear.addr, adv_addr(remote), 6);
+	meta_event.lear.rssi = 127;
+	meta_event.lear.tx_power = 127;
+	/* Right now we dont care about phy in adv report */
+	meta_event.lear.primary_phy = 0x01;
+	meta_event.lear.secondary_phy = 0x01;
+
+	/* Scan or advertising response */
+	if (is_scan_rsp) {
+		meta_event.lear.data_len = remote->le_scan_data_len;
+		memcpy(meta_event.lear.data, remote->le_scan_data,
+						meta_event.lear.data_len);
+	} else {
+		meta_event.lear.data_len = remote->le_adv_data_len;
+		memcpy(meta_event.lear.data, remote->le_adv_data,
+						meta_event.lear.data_len);
+	}
+
+	send_event(btdev, BT_HCI_EVT_LE_META_EVENT, &meta_event,
+					1 + 1 + 24 + meta_event.lear.data_len);
+}
+
 static uint8_t get_adv_report_type(uint8_t adv_type)
 {
 	/*
@@ -1861,6 +2142,25 @@ static uint8_t get_adv_report_type(uint8_t adv_type)
 		return 0x01;
 
 	return adv_type;
+}
+
+static uint8_t get_ext_adv_type(uint8_t ext_adv_type)
+{
+	/*
+	 * If legacy bit is not set then just reset high duty cycle directed
+	 * bit.
+	 */
+	if (!(ext_adv_type & 0x10))
+		return (ext_adv_type & 0xf7);
+
+	/*
+	 * Connectable low duty cycle directed advertising creates a
+	 * connectable directed advertising report type.
+	 */
+	if (ext_adv_type == 0x001d)
+		return 0x0015;
+
+	return ext_adv_type;
 }
 
 static void le_set_adv_enable_complete(struct btdev *btdev)
@@ -1888,6 +2188,46 @@ static void le_set_adv_enable_complete(struct btdev *btdev)
 		/* ADV_IND & ADV_SCAN_IND generate a scan response */
 		if (btdev->le_adv_type == 0x00 || btdev->le_adv_type == 0x02)
 			le_send_adv_report(btdev_list[i], btdev, 0x04);
+	}
+}
+
+static void le_set_ext_adv_enable_complete(struct btdev *btdev)
+{
+	uint16_t report_type;
+	int i;
+
+	report_type = get_ext_adv_type(btdev->le_ext_adv_type);
+
+	for (i = 0; i < MAX_BTDEV_ENTRIES; i++) {
+		if (!btdev_list[i] || btdev_list[i] == btdev)
+			continue;
+
+		if (!btdev_list[i]->le_scan_enable)
+			continue;
+
+		if (!ext_adv_match(btdev_list[i], btdev))
+			continue;
+
+		send_ext_adv(btdev_list[i], btdev, report_type,
+								false);
+
+		if (btdev_list[i]->le_scan_type != 0x01)
+			continue;
+
+		/* if scannable bit is set the send scan response */
+		if (btdev->le_ext_adv_type & 0x02) {
+			if (btdev->le_ext_adv_type == 0x13)
+				report_type = 0x1b;
+			else if (btdev->le_ext_adv_type == 0x12)
+				report_type = 0x1a;
+			else if (!(btdev->le_ext_adv_type & 0x10))
+				report_type &= 0x08;
+			else
+				continue;
+
+			send_ext_adv(btdev_list[i], btdev,
+							report_type, true);
+		}
 	}
 }
 
@@ -1920,6 +2260,44 @@ static void le_set_scan_enable_complete(struct btdev *btdev)
 	}
 }
 
+static void le_set_ext_scan_enable_complete(struct btdev *btdev)
+{
+	int i;
+
+	for (i = 0; i < MAX_BTDEV_ENTRIES; i++) {
+		uint16_t report_type;
+
+		if (!btdev_list[i] || btdev_list[i] == btdev)
+			continue;
+
+		if (!btdev_list[i]->le_adv_enable)
+			continue;
+
+		if (!ext_adv_match(btdev, btdev_list[i]))
+			continue;
+
+		report_type = get_ext_adv_type(btdev_list[i]->le_ext_adv_type);
+		send_ext_adv(btdev, btdev_list[i], report_type, false);
+
+		if (btdev->le_scan_type != 0x01)
+			continue;
+
+		/* if scannable bit is set the send scan response */
+		if (btdev_list[i]->le_ext_adv_type & 0x02) {
+			if (btdev_list[i]->le_ext_adv_type == 0x13)
+				report_type = 0x1b;
+			else if (btdev_list[i]->le_ext_adv_type == 0x12)
+				report_type = 0x1a;
+			else if (!(btdev_list[i]->le_ext_adv_type & 0x10))
+				report_type &= 0x08;
+			else
+				continue;
+
+			send_ext_adv(btdev, btdev_list[i], report_type, true);
+		}
+	}
+}
+
 static void le_read_remote_features_complete(struct btdev *btdev)
 {
 	char buf[1 + sizeof(struct bt_hci_evt_le_remote_features_complete)];
@@ -1938,7 +2316,7 @@ static void le_read_remote_features_complete(struct btdev *btdev)
 	memset(buf, 0, sizeof(buf));
 	buf[0] = BT_HCI_EVT_LE_REMOTE_FEATURES_COMPLETE;
 	ev->status = BT_HCI_ERR_SUCCESS;
-	ev->handle = cpu_to_le16(42);
+	ev->handle = cpu_to_le16(ACL_HANDLE);
 	memcpy(ev->features, remote->le_features, 8);
 
 	send_event(btdev, BT_HCI_EVT_LE_META_EVENT, buf, sizeof(buf));
@@ -1961,7 +2339,7 @@ static void le_start_encrypt_complete(struct btdev *btdev, uint16_t ediv,
 
 	memset(buf, 0, sizeof(buf));
 	buf[0] = BT_HCI_EVT_LE_LONG_TERM_KEY_REQUEST;
-	ev->handle = cpu_to_le16(42);
+	ev->handle = cpu_to_le16(ACL_HANDLE);
 	ev->ediv = ediv;
 	ev->rand = rand;
 
@@ -1975,7 +2353,7 @@ static void le_encrypt_complete(struct btdev *btdev)
 	struct btdev *remote = btdev->conn;
 
 	memset(&rp, 0, sizeof(rp));
-	rp.handle = cpu_to_le16(42);
+	rp.handle = cpu_to_le16(ACL_HANDLE);
 
 	if (!remote) {
 		rp.status = BT_HCI_ERR_UNKNOWN_CONN_ID;
@@ -1997,7 +2375,7 @@ static void le_encrypt_complete(struct btdev *btdev)
 		ev.encr_mode = 0x01;
 	}
 
-	ev.handle = cpu_to_le16(42);
+	ev.handle = cpu_to_le16(ACL_HANDLE);
 
 	send_event(btdev, BT_HCI_EVT_ENCRYPT_CHANGE, &ev, sizeof(ev));
 	send_event(remote, BT_HCI_EVT_ENCRYPT_CHANGE, &ev, sizeof(ev));
@@ -2010,7 +2388,7 @@ static void ltk_neg_reply_complete(struct btdev *btdev)
 	struct btdev *remote = btdev->conn;
 
 	memset(&rp, 0, sizeof(rp));
-	rp.handle = cpu_to_le16(42);
+	rp.handle = cpu_to_le16(ACL_HANDLE);
 
 	if (!remote) {
 		rp.status = BT_HCI_ERR_UNKNOWN_CONN_ID;
@@ -2024,7 +2402,7 @@ static void ltk_neg_reply_complete(struct btdev *btdev)
 
 	memset(&ev, 0, sizeof(ev));
 	ev.status = BT_HCI_ERR_PIN_OR_KEY_MISSING;
-	ev.handle = cpu_to_le16(42);
+	ev.handle = cpu_to_le16(ACL_HANDLE);
 
 	send_event(remote, BT_HCI_EVT_ENCRYPT_CHANGE, &ev, sizeof(ev));
 }
@@ -2086,6 +2464,16 @@ static void default_cmd(struct btdev *btdev, uint16_t opcode,
 	const struct bt_hci_cmd_read_local_amp_assoc *rlaa_cmd;
 	const struct bt_hci_cmd_read_rssi *rrssi;
 	const struct bt_hci_cmd_read_tx_power *rtxp;
+	const struct bt_hci_cmd_le_set_adv_set_rand_addr *lsasra;
+	const struct bt_hci_cmd_le_set_ext_adv_params *lseap;
+	const struct bt_hci_cmd_le_set_ext_adv_enable *lseae;
+	const struct bt_hci_cmd_le_set_ext_adv_data *lsead;
+	const struct bt_hci_cmd_le_set_ext_scan_rsp_data *lsesrd;
+	const struct bt_hci_cmd_le_set_default_phy *phys;
+	const struct bt_hci_cmd_le_set_ext_scan_params *lsesp;
+	const struct bt_hci_le_scan_phy *lsp;
+	const struct bt_hci_cmd_le_set_ext_scan_enable *lsese;
+	const struct bt_hci_cmd_le_reject_cis *lrcis;
 	struct bt_hci_rsp_read_default_link_policy rdlp;
 	struct bt_hci_rsp_read_stored_link_key rslk;
 	struct bt_hci_rsp_write_stored_link_key wslk;
@@ -2145,6 +2533,13 @@ static void default_cmd(struct btdev *btdev, uint16_t opcode,
 	struct bt_hci_rsp_read_tx_power rtxp_rsp;
 	struct bt_hci_evt_le_read_local_pk256_complete pk_evt;
 	struct bt_hci_evt_le_generate_dhkey_complete dh_evt;
+	struct bt_hci_rsp_le_read_num_supported_adv_sets rlrnsas;
+	struct bt_hci_rsp_le_set_ext_adv_params rlseap;
+	struct bt_hci_rsp_le_read_buffer_size_v2 lrbsv2;
+	struct lescp {
+		struct bt_hci_rsp_le_set_cig_params params;
+		uint16_t handle;
+	} __attribute__ ((packed)) lscp;
 	uint8_t status, page;
 
 	switch (opcode) {
@@ -2679,7 +3074,9 @@ static void default_cmd(struct btdev *btdev, uint16_t opcode,
 		break;
 
 	case BT_HCI_CMD_READ_LE_HOST_SUPPORTED:
-		if (btdev->type != BTDEV_TYPE_BREDRLE)
+		if (btdev->type != BTDEV_TYPE_BREDRLE &&
+				btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
 			goto unsupported;
 		rlhs.status = BT_HCI_ERR_SUCCESS;
 		rlhs.supported = btdev->le_supported;
@@ -2688,7 +3085,10 @@ static void default_cmd(struct btdev *btdev, uint16_t opcode,
 		break;
 
 	case BT_HCI_CMD_WRITE_LE_HOST_SUPPORTED:
-		if (btdev->type != BTDEV_TYPE_BREDRLE)
+		if (btdev->type != BTDEV_TYPE_BREDRLE &&
+				btdev->type != BTDEV_TYPE_LE &&
+				btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
 			goto unsupported;
 		wlhs = data;
 		btdev->le_supported = wlhs->supported;
@@ -2698,7 +3098,9 @@ static void default_cmd(struct btdev *btdev, uint16_t opcode,
 		break;
 
 	case BT_HCI_CMD_READ_SECURE_CONN_SUPPORT:
-		if (btdev->type != BTDEV_TYPE_BREDRLE)
+		if (btdev->type != BTDEV_TYPE_BREDRLE &&
+				btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
 			goto unsupported;
 		rscs.status = BT_HCI_ERR_SUCCESS;
 		rscs.support = btdev->secure_conn_support;
@@ -2706,7 +3108,9 @@ static void default_cmd(struct btdev *btdev, uint16_t opcode,
 		break;
 
 	case BT_HCI_CMD_WRITE_SECURE_CONN_SUPPORT:
-		if (btdev->type != BTDEV_TYPE_BREDRLE)
+		if (btdev->type != BTDEV_TYPE_BREDRLE &&
+				btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
 			goto unsupported;
 		wscs = data;
 		btdev->secure_conn_support = wscs->support;
@@ -2715,14 +3119,18 @@ static void default_cmd(struct btdev *btdev, uint16_t opcode,
 		break;
 
 	case BT_HCI_CMD_READ_LOCAL_OOB_EXT_DATA:
-		if (btdev->type != BTDEV_TYPE_BREDRLE)
+		if (btdev->type != BTDEV_TYPE_BREDRLE &&
+				btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
 			goto unsupported;
 		rloed.status = BT_HCI_ERR_SUCCESS;
 		cmd_complete(btdev, opcode, &rloed, sizeof(rloed));
 		break;
 
 	case BT_HCI_CMD_READ_SYNC_TRAIN_PARAMS:
-		if (btdev->type != BTDEV_TYPE_BREDRLE)
+		if (btdev->type != BTDEV_TYPE_BREDRLE &&
+				btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
 			goto unsupported;
 		rstp.status = BT_HCI_ERR_SUCCESS;
 		rstp.interval = cpu_to_le16(btdev->sync_train_interval);
@@ -2872,7 +3280,9 @@ static void default_cmd(struct btdev *btdev, uint16_t opcode,
 
 	case BT_HCI_CMD_READ_ENCRYPT_KEY_SIZE:
 		if (btdev->type != BTDEV_TYPE_BREDRLE &&
-					btdev->type != BTDEV_TYPE_BREDR)
+					btdev->type != BTDEV_TYPE_BREDR &&
+					btdev->type != BTDEV_TYPE_BREDRLE50 &&
+					btdev->type != BTDEV_TYPE_BREDRLE60)
 			goto unsupported;
 		reks = data;
 		read_enc_key_size_complete(btdev, le16_to_cpu(reks->handle));
@@ -2918,7 +3328,8 @@ static void default_cmd(struct btdev *btdev, uint16_t opcode,
 		break;
 
 	case BT_HCI_CMD_SET_EVENT_MASK_PAGE2:
-		if (btdev->type != BTDEV_TYPE_BREDRLE)
+		if (btdev->type == BTDEV_TYPE_BREDR20 ||
+				btdev->type == BTDEV_TYPE_AMP)
 			goto unsupported;
 		semp2 = data;
 		memcpy(btdev->event_mask_page2, semp2->mask, 8);
@@ -3245,6 +3656,211 @@ static void default_cmd(struct btdev *btdev, uint16_t opcode,
 		lcprnr_rsp.status = BT_HCI_ERR_SUCCESS;
 		cmd_complete(btdev, opcode, &lcprnr_rsp, sizeof(lcprnr_rsp));
 		break;
+	case BT_HCI_CMD_LE_READ_NUM_SUPPORTED_ADV_SETS:
+		if (btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+
+		rlrnsas.status = BT_HCI_ERR_SUCCESS;
+		/* Support one set as of now */
+		rlrnsas.num_of_sets = 1;
+		cmd_complete(btdev, opcode, &rlrnsas, sizeof(rlrnsas));
+		break;
+	case BT_HCI_CMD_LE_SET_ADV_SET_RAND_ADDR:
+		if (btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+
+		lsasra = data;
+		memcpy(btdev->random_addr, lsasra->bdaddr, 6);
+		status = BT_HCI_ERR_SUCCESS;
+		cmd_complete(btdev, opcode, &status, sizeof(status));
+		break;
+	case BT_HCI_CMD_LE_SET_EXT_ADV_PARAMS:
+		if (btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+
+		if (btdev->le_adv_enable) {
+			status = BT_HCI_ERR_COMMAND_DISALLOWED;
+			cmd_complete(btdev, opcode, &status, sizeof(status));
+			break;
+		}
+
+		lseap = data;
+		btdev->le_ext_adv_type = le16_to_cpu(lseap->evt_properties);
+		btdev->le_adv_own_addr = lseap->own_addr_type;
+		btdev->le_adv_direct_addr_type = lseap->peer_addr_type;
+		memcpy(btdev->le_adv_direct_addr, lseap->peer_addr, 6);
+
+		rlseap.status = BT_HCI_ERR_SUCCESS;
+		rlseap.tx_power = 0;
+		cmd_complete(btdev, opcode, &rlseap, sizeof(rlseap));
+		break;
+	case BT_HCI_CMD_LE_SET_EXT_ADV_ENABLE:
+		if (btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+
+		lseae = data;
+		if (btdev->le_adv_enable == lseae->enable)
+			status = BT_HCI_ERR_COMMAND_DISALLOWED;
+		else {
+			btdev->le_adv_enable = lseae->enable;
+			status = BT_HCI_ERR_SUCCESS;
+		}
+		cmd_complete(btdev, opcode, &status, sizeof(status));
+		if (status == BT_HCI_ERR_SUCCESS && btdev->le_adv_enable)
+			le_set_ext_adv_enable_complete(btdev);
+		break;
+	case BT_HCI_CMD_LE_SET_EXT_ADV_DATA:
+		if (btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+
+		lsead = data;
+		btdev->le_adv_data_len = lsead->data_len;
+		memcpy(btdev->le_adv_data, lsead->data, 31);
+		status = BT_HCI_ERR_SUCCESS;
+		cmd_complete(btdev, opcode, &status, sizeof(status));
+		break;
+	case BT_HCI_CMD_LE_SET_EXT_SCAN_RSP_DATA:
+		if (btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+
+		lsesrd = data;
+		btdev->le_scan_data_len = lsesrd->data_len;
+		memcpy(btdev->le_scan_data, lsesrd->data, 31);
+		status = BT_HCI_ERR_SUCCESS;
+		cmd_complete(btdev, opcode, &status, sizeof(status));
+		break;
+	case BT_HCI_CMD_LE_REMOVE_ADV_SET:
+		if (btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+
+		status = BT_HCI_ERR_SUCCESS;
+		cmd_complete(btdev, opcode, &status, sizeof(status));
+		break;
+	case BT_HCI_CMD_LE_CLEAR_ADV_SETS:
+		if (btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+
+		status = BT_HCI_ERR_SUCCESS;
+		cmd_complete(btdev, opcode, &status, sizeof(status));
+		break;
+	case BT_HCI_CMD_LE_SET_DEFAULT_PHY:
+		if (btdev->type == BTDEV_TYPE_BREDR)
+			goto unsupported;
+		phys = data;
+		if (phys->all_phys > 0x03 ||
+			(!(phys->all_phys & 0x01) &&
+				(!phys->tx_phys || phys->tx_phys > 0x07)) ||
+			(!(phys->all_phys & 0x02) &&
+				(!phys->rx_phys || phys->rx_phys > 0x07)))
+			status = BT_HCI_ERR_INVALID_PARAMETERS;
+		else
+			status = BT_HCI_ERR_SUCCESS;
+		cmd_complete(btdev, opcode, &status, sizeof(status));
+		break;
+	case BT_HCI_CMD_LE_SET_EXT_SCAN_PARAMS:
+		if (btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+
+		lsesp = data;
+		lsp = (void *)lsesp->data;
+
+		if (btdev->le_scan_enable)
+			status = BT_HCI_ERR_COMMAND_DISALLOWED;
+		else if (lsesp->num_phys == 0)
+			status = BT_HCI_ERR_INVALID_PARAMETERS;
+		else {
+			status = BT_HCI_ERR_SUCCESS;
+			/* Currently we dont support multiple types in single
+			 * command So just take the first one will do.
+			 */
+			btdev->le_scan_type = lsp->type;
+			btdev->le_scan_own_addr_type = lsesp->own_addr_type;
+		}
+
+		cmd_complete(btdev, opcode, &status, sizeof(status));
+		break;
+	case BT_HCI_CMD_LE_SET_EXT_SCAN_ENABLE:
+		if (btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+
+		lsese = data;
+		if (btdev->le_scan_enable == lsese->enable)
+			status = BT_HCI_ERR_COMMAND_DISALLOWED;
+		else {
+			btdev->le_scan_enable = lsese->enable;
+			btdev->le_filter_dup = lsese->filter_dup;
+			status = BT_HCI_ERR_SUCCESS;
+		}
+		cmd_complete(btdev, opcode, &status, sizeof(status));
+		break;
+	case BT_HCI_CMD_LE_EXT_CREATE_CONN:
+		if (btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+
+		cmd_status(btdev, BT_HCI_ERR_SUCCESS, opcode);
+		break;
+
+	case BT_HCI_CMD_LE_READ_BUFFER_SIZE_V2:
+		if (btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+		lrbsv2.status = BT_HCI_ERR_SUCCESS;
+		lrbsv2.acl_mtu = cpu_to_le16(btdev->acl_mtu);
+		lrbsv2.acl_max_pkt = btdev->acl_max_pkt;
+		lrbsv2.iso_mtu = cpu_to_le16(btdev->iso_mtu);
+		lrbsv2.iso_max_pkt = btdev->iso_max_pkt;
+		cmd_complete(btdev, opcode, &lrbsv2, sizeof(lrbsv2));
+		break;
+
+	case BT_HCI_CMD_LE_SET_CIG_PARAMS:
+		if (btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+		memcpy(&btdev->le_cig, data, len);
+		lscp.params.status = BT_HCI_ERR_SUCCESS;
+		lscp.params.cig_id = 0x00;
+		lscp.params.num_handles = 1;
+		lscp.handle = cpu_to_le16(ISO_HANDLE);
+		cmd_complete(btdev, opcode, &lscp, sizeof(lscp));
+		break;
+
+	case BT_HCI_CMD_LE_CREATE_CIS:
+		if (btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+
+		cmd_status(btdev, BT_HCI_ERR_SUCCESS, opcode);
+
+		break;
+
+	case BT_HCI_CMD_LE_ACCEPT_CIS:
+		if (btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+
+		cmd_status(btdev, BT_HCI_ERR_SUCCESS, opcode);
+		le_cis_estabilished(btdev, BT_HCI_ERR_SUCCESS);
+
+		break;
+
+	case BT_HCI_CMD_LE_REJECT_CIS:
+		if (btdev->type != BTDEV_TYPE_BREDRLE60)
+			goto unsupported;
+
+		cmd_status(btdev, BT_HCI_ERR_SUCCESS, opcode);
+
+		lrcis = data;
+		le_cis_estabilished(btdev, lrcis->reason);
+
+		break;
+
 	default:
 		goto unsupported;
 	}
@@ -3282,6 +3898,9 @@ static void default_cmd_completion(struct btdev *btdev, uint16_t opcode,
 	const struct bt_hci_cmd_le_conn_param_req_reply *lcprr;
 	const struct bt_hci_cmd_le_conn_param_req_neg_reply *lcprnr;
 	const struct bt_hci_cmd_le_set_scan_enable *lsse;
+	const struct bt_hci_cmd_le_set_ext_scan_enable *lsese;
+	const struct bt_hci_cmd_le_ext_create_conn *leecc;
+	const struct bt_hci_cmd_le_create_cis *leccis;
 
 	switch (opcode) {
 	case BT_HCI_CMD_INQUIRY:
@@ -3476,7 +4095,30 @@ static void default_cmd_completion(struct btdev *btdev, uint16_t opcode,
 		lsse = data;
 		if (btdev->le_scan_enable && lsse->enable)
 			le_set_scan_enable_complete(btdev);
-
+		break;
+	case BT_HCI_CMD_LE_SET_EXT_SCAN_ENABLE:
+		if (btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
+			return;
+		lsese = data;
+		if (btdev->le_scan_enable && lsese->enable)
+			le_set_ext_scan_enable_complete(btdev);
+		break;
+	case BT_HCI_CMD_LE_EXT_CREATE_CONN:
+		if (btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
+			return;
+		leecc = data;
+		btdev->le_scan_own_addr_type = leecc->own_addr_type;
+		le_ext_conn_request(btdev, leecc);
+		break;
+	case BT_HCI_CMD_LE_CREATE_CIS:
+		if (btdev->type != BTDEV_TYPE_BREDRLE50 &&
+				btdev->type != BTDEV_TYPE_BREDRLE60)
+			return;
+		leccis = data;
+		le_cis_request(btdev, leccis);
+		break;
 	}
 }
 
@@ -3585,6 +4227,16 @@ static void send_acl(struct btdev *conn, const void *data, uint16_t len)
 	send_packet(conn, iov, 3);
 }
 
+static void send_iso(struct btdev *conn, const void *data, uint16_t len)
+{
+	struct iovec iov;
+
+	iov.iov_base = (void *) (data);
+	iov.iov_len = len;
+
+	send_packet(conn, &iov, 1);
+}
+
 void btdev_receive_h4(struct btdev *btdev, const void *data, uint16_t len)
 {
 	uint8_t pkt_type;
@@ -3604,7 +4256,12 @@ void btdev_receive_h4(struct btdev *btdev, const void *data, uint16_t len)
 	case BT_H4_ACL_PKT:
 		if (btdev->conn)
 			send_acl(btdev->conn, data, len);
-		num_completed_packets(btdev);
+		num_completed_packets(btdev, ACL_HANDLE);
+		break;
+	case BT_H4_ISO_PKT:
+		num_completed_packets(btdev, ISO_HANDLE);
+		if (btdev->conn)
+			send_iso(btdev->conn, data, len);
 		break;
 	default:
 		printf("Unsupported packet 0x%2.2x\n", pkt_type);

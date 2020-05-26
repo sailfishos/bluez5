@@ -186,6 +186,10 @@ static int hog_accept(struct btd_service *service)
 			return -EINVAL;
 	}
 
+	/* HOGP 1.0 Section 6.1 requires bonding */
+	if (!device_is_bonded(device, btd_device_get_bdaddr_type(device)))
+		return -ECONNREFUSED;
+
 	/* TODO: Replace GAttrib with bt_gatt_client */
 	bt_hog_attach(dev->hog, attrib);
 
@@ -199,6 +203,8 @@ static int hog_disconnect(struct btd_service *service)
 	struct hog_device *dev = btd_service_get_user_data(service);
 
 	bt_hog_detach(dev->hog);
+	bt_hog_unref(dev->hog);
+	dev->hog = NULL;
 
 	btd_service_disconnecting_complete(service, 0);
 

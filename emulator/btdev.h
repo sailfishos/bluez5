@@ -63,6 +63,8 @@ enum btdev_type {
 	BTDEV_TYPE_LE,
 	BTDEV_TYPE_AMP,
 	BTDEV_TYPE_BREDR20,
+	BTDEV_TYPE_BREDRLE50,
+	BTDEV_TYPE_BREDRLE60,
 };
 
 enum btdev_hook_type {

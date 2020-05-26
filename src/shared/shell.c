@@ -25,8 +25,10 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <errno.h>
+#include <syslog.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -45,6 +47,7 @@
 #include "src/shared/util.h"
 #include "src/shared/queue.h"
 #include "src/shared/shell.h"
+#include "src/shared/log.h"
 
 #define CMD_LENGTH	48
 #define print_text(color, fmt, args...) \
@@ -61,17 +64,31 @@ struct bt_shell_env {
 	void *value;
 };
 
+static char *cmplt = "help";
+
+struct bt_shell_prompt_input {
+	char *str;
+	bt_shell_prompt_input_func func;
+	void *user_data;
+};
+
 static struct {
 	bool init;
+	char *name;
+	char history[256];
 	int argc;
 	char **argv;
 	bool mode;
+	bool zsh;
+	bool monitor;
 	int timeout;
 	struct io *input;
 
 	bool saved_prompt;
 	bt_shell_prompt_input_func saved_func;
 	void *saved_user_data;
+
+	struct queue *prompts;
 
 	const struct bt_shell_menu *menu;
 	const struct bt_shell_menu *main;
@@ -82,6 +99,7 @@ static struct {
 } data;
 
 static void shell_print_menu(void);
+static void shell_print_menu_zsh_complete(void);
 
 static void cmd_version(int argc, char *argv[])
 {
@@ -95,9 +113,41 @@ static void cmd_quit(int argc, char *argv[])
 	mainloop_quit();
 }
 
+static void print_cmds(void)
+{
+	const struct bt_shell_menu_entry *entry;
+	const struct queue_entry *submenu;
+
+	if (!data.menu)
+		return;
+
+	printf("Commands:\n");
+
+	for (entry = data.menu->entries; entry->cmd; entry++) {
+		printf("\t%s%s\t%s\n", entry->cmd,
+			strlen(entry->cmd) < 8 ? "\t" : "", entry->desc);
+	}
+
+	for (submenu = queue_get_entries(data.submenus); submenu;
+					submenu = submenu->next) {
+		struct bt_shell_menu *menu = submenu->data;
+
+		printf("\n\t%s.:\n", menu->name);
+
+		for (entry = menu->entries; entry->cmd; entry++) {
+			printf("\t\t%s%s\t%s\n", entry->cmd,
+				strlen(entry->cmd) < 8 ? "\t" : "",
+				entry->desc);
+		}
+	}
+}
+
 static void cmd_help(int argc, char *argv[])
 {
-	shell_print_menu();
+	if (argv[0] == cmplt)
+		print_cmds();
+	else
+		shell_print_menu();
 
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
@@ -112,8 +162,6 @@ static const struct bt_shell_menu *find_menu(const char *name, size_t len)
 
 		if (!strncmp(menu->name, name, len))
 			return menu;
-
-
 	}
 
 	return NULL;
@@ -221,7 +269,7 @@ static const struct bt_shell_menu_entry default_menu[] = {
 	{ "help",         NULL,       cmd_help,
 					"Display help about this program" },
 	{ "export",       NULL,       cmd_export,
-						"Print evironment variables" },
+						"Print environment variables" },
 	{ }
 };
 
@@ -241,6 +289,11 @@ static void shell_print_menu(void)
 
 	if (!data.menu)
 		return;
+
+	if (data.zsh) {
+		shell_print_menu_zsh_complete();
+		return;
+	}
 
 	print_text(COLOR_HIGHLIGHT, "Menu %s:", data.menu->name);
 	print_text(COLOR_HIGHLIGHT, "Available commands:");
@@ -265,6 +318,21 @@ static void shell_print_menu(void)
 			continue;
 
 		print_menu(entry->cmd, entry->arg ? : "", entry->desc ? : "");
+	}
+}
+
+static void shell_print_menu_zsh_complete(void)
+{
+	const struct bt_shell_menu_entry *entry;
+
+	for (entry = data.menu->entries; entry->cmd; entry++)
+		printf("%s:%s\n", entry->cmd, entry->desc ? : "");
+
+	for (entry = default_menu; entry->cmd; entry++) {
+		if (entry->exists && !entry->exists(data.menu))
+			continue;
+
+		printf("%s:%s\n", entry->cmd, entry->desc ? : "");
 	}
 }
 
@@ -487,6 +555,12 @@ void bt_shell_printf(const char *fmt, ...)
 	vprintf(fmt, args);
 	va_end(args);
 
+	if (data.monitor) {
+		va_start(args, fmt);
+		bt_log_vprintf(0xffff, data.name, LOG_INFO, fmt, args);
+		va_end(args);
+	}
+
 	if (save_input) {
 		if (!data.saved_prompt)
 			rl_restore_prompt();
@@ -516,27 +590,64 @@ void bt_shell_usage()
 					data.exec->arg ? data.exec->arg : "");
 }
 
-void bt_shell_prompt_input(const char *label, const char *msg,
-			bt_shell_prompt_input_func func, void *user_data)
+static void prompt_input(const char *str, bt_shell_prompt_input_func func,
+							void *user_data)
 {
-	if (!data.init || data.mode)
-		return;
-
-	/* Normal use should not prompt for user input to the value a second
-	 * time before it releases the prompt, but we take a safe action. */
-	if (data.saved_prompt)
-		return;
-
 	data.saved_prompt = true;
 	data.saved_func = func;
 	data.saved_user_data = user_data;
 
 	rl_save_prompt();
-	bt_shell_printf(COLOR_RED "[%s]" COLOR_OFF " %s ", label, msg);
+	bt_shell_set_prompt(str);
+}
+
+void bt_shell_prompt_input(const char *label, const char *msg,
+			bt_shell_prompt_input_func func, void *user_data)
+{
+	char *str;
+
+	if (!data.init || data.mode)
+		return;
+
+	if (data.saved_prompt) {
+		struct bt_shell_prompt_input *prompt;
+
+		prompt = new0(struct bt_shell_prompt_input, 1);
+
+		if (asprintf(&str, COLOR_HIGHLIGHT "[%s] %s " COLOR_OFF, label,
+								msg) < 0) {
+			free(prompt);
+			return;
+		}
+
+		prompt->func = func;
+		prompt->user_data = user_data;
+
+		queue_push_tail(data.prompts, prompt);
+
+		return;
+	}
+
+	if (asprintf(&str, COLOR_HIGHLIGHT "[%s] %s " COLOR_OFF, label,
+								msg) < 0)
+		return;
+
+	prompt_input(str, func, user_data);
+
+	free(str);
+}
+
+static void prompt_free(void *data)
+{
+	struct bt_shell_prompt_input *prompt = data;
+
+	free(prompt->str);
+	free(prompt);
 }
 
 int bt_shell_release_prompt(const char *input)
 {
+	struct bt_shell_prompt_input *prompt;
 	bt_shell_prompt_input_func func;
 	void *user_data;
 
@@ -550,10 +661,19 @@ int bt_shell_release_prompt(const char *input)
 	func = data.saved_func;
 	user_data = data.saved_user_data;
 
+	prompt = queue_pop_head(data.prompts);
+	if (prompt)
+		data.saved_prompt = true;
+
 	data.saved_func = NULL;
 	data.saved_user_data = NULL;
 
 	func(input, user_data);
+
+	if (prompt) {
+		prompt_input(prompt->str, prompt->func, prompt->user_data);
+		prompt_free(prompt);
+	}
 
 	return 0;
 }
@@ -561,6 +681,7 @@ int bt_shell_release_prompt(const char *input)
 static void rl_handler(char *input)
 {
 	wordexp_t w;
+	HIST_ENTRY *last;
 
 	if (!input) {
 		rl_insert_text("quit");
@@ -576,8 +697,13 @@ static void rl_handler(char *input)
 	if (!bt_shell_release_prompt(input))
 		goto done;
 
-	if (history_search(input, -1))
+	last = history_get(history_length + history_base - 1);
+	/* append only if input is different from previous command */
+	if (!last || strcmp(input, last->line))
 		add_history(input);
+
+	if (data.monitor)
+		bt_log_printf(0xffff, data.name, LOG_INFO, "%s", input);
 
 	if (wordexp(input, &w, WRDE_NOCMD))
 		goto done;
@@ -814,27 +940,18 @@ static bool io_hup(struct io *io, void *user_data)
 	return false;
 }
 
-static bool signal_read(struct io *io, void *user_data)
+static void signal_callback(int signum, void *user_data)
 {
 	static bool terminated = false;
-	struct signalfd_siginfo si;
-	ssize_t result;
-	int fd;
 
-	fd = io_get_fd(io);
-
-	result = read(fd, &si, sizeof(si));
-	if (result != sizeof(si))
-		return false;
-
-	switch (si.ssi_signo) {
+	switch (signum) {
 	case SIGINT:
 		if (data.input && !data.mode) {
 			rl_replace_line("", 0);
 			rl_crlf();
 			rl_on_new_line();
 			rl_redisplay();
-			return true;
+			return;
 		}
 
 		/*
@@ -857,38 +974,48 @@ static bool signal_read(struct io *io, void *user_data)
 		terminated = true;
 		break;
 	}
-
-	return false;
 }
 
-static struct io *setup_signalfd(void)
+static void rl_init_history(void)
 {
-	struct io *io;
-	sigset_t mask;
-	int fd;
+	const char *name;
+	char *dir;
 
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGINT);
-	sigaddset(&mask, SIGTERM);
+	memset(data.history, 0, sizeof(data.history));
 
-	if (sigprocmask(SIG_BLOCK, &mask, NULL) < 0) {
-		perror("Failed to set signal mask");
-		return 0;
+	name = strrchr(data.name, '/');
+	if (!name)
+		name = data.name;
+	else
+		name++;
+
+	dir = getenv("XDG_CACHE_HOME");
+	if (dir) {
+		snprintf(data.history, sizeof(data.history), "%s/.%s_history",
+							dir, name);
+		goto done;
 	}
 
-	fd = signalfd(-1, &mask, 0);
-	if (fd < 0) {
-		perror("Failed to create signal descriptor");
-		return 0;
+	dir = getenv("HOME");
+	if (dir) {
+		snprintf(data.history, sizeof(data.history),
+				"%s/.cache/.%s_history", dir, name);
+		goto done;
 	}
 
-	io = io_new(fd);
+	dir = getenv("PWD");
+	if (dir) {
+		snprintf(data.history, sizeof(data.history), "%s/.%s_history",
+							dir, name);
+		goto done;
+	}
 
-	io_set_close_on_destroy(io, true);
-	io_set_read_handler(io, signal_read, NULL, NULL);
-	io_set_disconnect_handler(io, io_hup, NULL, NULL);
+	return;
 
-	return io;
+done:
+	read_history(data.history);
+	using_history();
+	bt_shell_set_env("HISTORY", data.history);
 }
 
 static void rl_init(void)
@@ -896,33 +1023,41 @@ static void rl_init(void)
 	if (data.mode)
 		return;
 
+	/* Allow conditional parsing of the ~/.inputrc file. */
+	rl_readline_name = data.name;
+
 	setlinebuf(stdout);
 	rl_attempted_completion_function = shell_completion;
 
 	rl_erase_empty_line = 1;
 	rl_callback_handler_install(NULL, rl_handler);
+
+	rl_init_history();
 }
 
 static const struct option main_options[] = {
 	{ "version",	no_argument, 0, 'v' },
 	{ "help",	no_argument, 0, 'h' },
 	{ "timeout",	required_argument, 0, 't' },
+	{ "monitor",	no_argument, 0, 'm' },
+	{ "zsh-complete",	no_argument, 0, 'z' },
 };
 
 static void usage(int argc, char **argv, const struct bt_shell_opt *opt)
 {
 	unsigned int i;
 
-	printf("%s ver %s\n", argv[0], VERSION);
+	printf("%s ver %s\n", data.name, VERSION);
 	printf("Usage:\n"
-		"\t%s [options]\n", argv[0]);
+		"\t%s [--options] [commands]\n", data.name);
 
 	printf("Options:\n");
 
 	for (i = 0; opt && opt->options[i].name; i++)
 		printf("\t--%s \t%s\n", opt->options[i].name, opt->help[i]);
 
-	printf("\t--timeout \tTimeout in seconds for non-interactive mode\n"
+	printf("\t--monitor \tEnable monitor output\n"
+		"\t--timeout \tTimeout in seconds for non-interactive mode\n"
 		"\t--version \tDisplay version\n"
 		"\t--help \t\tDisplay help\n");
 }
@@ -941,22 +1076,40 @@ void bt_shell_init(int argc, char **argv, const struct bt_shell_opt *opt)
 	if (opt) {
 		memcpy(options + offset, opt->options,
 				sizeof(struct option) * opt->optno);
-		snprintf(optstr, sizeof(optstr), "+hvt:%s", opt->optstr);
+		snprintf(optstr, sizeof(optstr), "+mhvt:%s", opt->optstr);
 	} else
-		snprintf(optstr, sizeof(optstr), "+hvt:");
+		snprintf(optstr, sizeof(optstr), "+mhvt:");
+
+	data.name = strrchr(argv[0], '/');
+	if (!data.name)
+		data.name = strdup(argv[0]);
+	else
+		data.name = strdup(++data.name);
 
 	while ((c = getopt_long(argc, argv, optstr, options, &index)) != -1) {
 		switch (c) {
 		case 'v':
-			printf("%s: %s\n", argv[0], VERSION);
+			printf("%s: %s\n", data.name, VERSION);
 			exit(EXIT_SUCCESS);
 			return;
 		case 'h':
 			usage(argc, argv, opt);
-			exit(EXIT_SUCCESS);
-			return;
+			data.argc = 1;
+			data.argv = &cmplt;
+			data.mode = 1;
+			goto done;
 		case 't':
 			data.timeout = atoi(optarg);
+			break;
+		case 'z':
+			data.zsh = 1;
+			break;
+		case 'm':
+			data.monitor = true;
+			if (bt_log_open() < 0) {
+				data.monitor = false;
+				printf("Unable to open logging channel\n");
+			}
 			break;
 		default:
 			if (index < 0) {
@@ -978,11 +1131,14 @@ void bt_shell_init(int argc, char **argv, const struct bt_shell_opt *opt)
 		index = -1;
 	}
 
+	bt_shell_set_env("SHELL", data.name);
+
 	data.argc = argc - optind;
 	data.argv = argv + optind;
 	optind = 0;
 	data.mode = (data.argc > 0);
 
+done:
 	if (data.mode)
 		bt_shell_set_env("NON_INTERACTIVE", &data.mode);
 
@@ -991,12 +1147,16 @@ void bt_shell_init(int argc, char **argv, const struct bt_shell_opt *opt)
 	rl_init();
 
 	data.init = true;
+	data.prompts = queue_new();
 }
 
 static void rl_cleanup(void)
 {
 	if (data.mode)
 		return;
+
+	if (data.history[0] != '\0')
+		write_history(data.history);
 
 	rl_message("");
 	rl_callback_handler_remove();
@@ -1012,14 +1172,9 @@ static void env_destroy(void *data)
 
 int bt_shell_run(void)
 {
-	struct io *signal;
 	int status;
 
-	signal = setup_signalfd();
-
-	status = mainloop_run();
-
-	io_destroy(signal);
+	status = mainloop_run_with_signal(signal_callback, NULL);
 
 	bt_shell_cleanup();
 
@@ -1036,9 +1191,16 @@ void bt_shell_cleanup(void)
 		data.envs = NULL;
 	}
 
+	if (data.monitor)
+		bt_log_close();
+
 	rl_cleanup();
 
+	queue_destroy(data.prompts, prompt_free);
+	data.prompts = NULL;
+
 	data.init = false;
+	free(data.name);
 }
 
 void bt_shell_quit(int status)
@@ -1089,7 +1251,7 @@ void bt_shell_set_prompt(const char *string)
 		return;
 
 	rl_set_prompt(string);
-	bt_shell_printf("\r");
+	rl_redisplay();
 }
 
 static bool input_read(struct io *io, void *user_data)

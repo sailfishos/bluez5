@@ -39,13 +39,15 @@
 
 #include "src/shared/shell.h"
 #include "src/shared/util.h"
-#include "mesh/mesh-net.h"
-#include "mesh/keys.h"
-#include "mesh/net.h"
-#include "mesh/node.h"
-#include "mesh/prov-db.h"
-#include "mesh/util.h"
-#include "mesh/config-model.h"
+
+#include "tools/mesh/config-model.h"
+
+#include "tools/mesh-gatt/mesh-net.h"
+#include "tools/mesh-gatt/keys.h"
+#include "tools/mesh-gatt/net.h"
+#include "tools/mesh-gatt/node.h"
+#include "tools/mesh-gatt/prov-db.h"
+#include "tools/mesh-gatt/util.h"
 
 #define MIN_COMPOSITION_LEN 16
 
@@ -589,7 +591,7 @@ static void cmd_app_key(int argc, char *argv[], uint32_t opcode)
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 	}
 
-	msg[n++] = net_idx & 0xf;
+	msg[n++] = net_idx & 0xff;
 	msg[n++] = ((net_idx >> 8) & 0xf) |
 		((app_idx << 4) & 0xf0);
 	msg[n++] = app_idx >> 4;

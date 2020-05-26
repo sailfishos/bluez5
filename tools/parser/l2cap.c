@@ -26,6 +26,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
@@ -56,7 +57,7 @@ typedef struct {
 	uint8_t mode;
 	uint8_t ext_ctrl;
 } cid_info;
-#define CID_TABLE_SIZE 20
+#define CID_TABLE_SIZE 32
 
 static cid_info cid_table[2][CID_TABLE_SIZE];
 

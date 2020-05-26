@@ -25,6 +25,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
@@ -799,6 +800,13 @@ static gboolean parse_argument(int argc, char *argv[], const char **arg_table,
 {
 	const char **opt;
 
+	if (!strcmp(argv[1], "help")) {
+		for (opt = arg_table; opt && *opt; opt++)
+			bt_shell_printf("%s\n", *opt);
+		bt_shell_noninteractive_quit(EXIT_SUCCESS);
+		return FALSE;
+	}
+
 	if (!strcmp(argv[1], "on") || !strcmp(argv[1], "yes")) {
 		*value = TRUE;
 		if (option)
@@ -838,7 +846,6 @@ static void cmd_list(int argc, char *argv[])
 static void cmd_show(int argc, char *argv[])
 {
 	struct adapter *adapter;
-	GDBusProxy *proxy;
 	DBusMessageIter iter;
 	const char *address;
 
@@ -846,7 +853,7 @@ static void cmd_show(int argc, char *argv[])
 		if (check_default_ctrl() == FALSE)
 			return bt_shell_noninteractive_quit(EXIT_FAILURE);
 
-		proxy = default_ctrl->proxy;
+		adapter = default_ctrl;
 	} else {
 		adapter = find_ctrl_by_address(ctrl_list, argv[1]);
 		if (!adapter) {
@@ -854,15 +861,14 @@ static void cmd_show(int argc, char *argv[])
 								argv[1]);
 			return bt_shell_noninteractive_quit(EXIT_FAILURE);
 		}
-		proxy = adapter->proxy;
 	}
 
-	if (g_dbus_proxy_get_property(proxy, "Address", &iter) == FALSE)
+	if (!g_dbus_proxy_get_property(adapter->proxy, "Address", &iter))
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 
 	dbus_message_iter_get_basic(&iter, &address);
 
-	if (g_dbus_proxy_get_property(proxy, "AddressType", &iter) == TRUE) {
+	if (g_dbus_proxy_get_property(adapter->proxy, "AddressType", &iter)) {
 		const char *type;
 
 		dbus_message_iter_get_basic(&iter, &type);
@@ -872,15 +878,24 @@ static void cmd_show(int argc, char *argv[])
 		bt_shell_printf("Controller %s\n", address);
 	}
 
-	print_property(proxy, "Name");
-	print_property(proxy, "Alias");
-	print_property(proxy, "Class");
-	print_property(proxy, "Powered");
-	print_property(proxy, "Discoverable");
-	print_property(proxy, "Pairable");
-	print_uuids(proxy);
-	print_property(proxy, "Modalias");
-	print_property(proxy, "Discovering");
+	print_property(adapter->proxy, "Name");
+	print_property(adapter->proxy, "Alias");
+	print_property(adapter->proxy, "Class");
+	print_property(adapter->proxy, "Powered");
+	print_property(adapter->proxy, "Discoverable");
+	print_property(adapter->proxy, "DiscoverableTimeout");
+	print_property(adapter->proxy, "Pairable");
+	print_uuids(adapter->proxy);
+	print_property(adapter->proxy, "Modalias");
+	print_property(adapter->proxy, "Discovering");
+
+	if (adapter->ad_proxy) {
+		bt_shell_printf("Advertising Features:\n");
+		print_property(adapter->ad_proxy, "ActiveInstances");
+		print_property(adapter->ad_proxy, "SupportedInstances");
+		print_property(adapter->ad_proxy, "SupportedIncludes");
+		print_property(adapter->ad_proxy, "SupportedSecondaryChannels");
+	}
 
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
@@ -1061,6 +1076,47 @@ static void cmd_discoverable(int argc, char *argv[])
 	return bt_shell_noninteractive_quit(EXIT_FAILURE);
 }
 
+static void cmd_discoverable_timeout(int argc, char *argv[])
+{
+	uint32_t value;
+	char *endptr = NULL;
+	char *str;
+
+	if (argc < 2) {
+		DBusMessageIter iter;
+
+		if (!g_dbus_proxy_get_property(default_ctrl->proxy,
+					"DiscoverableTimeout", &iter)) {
+			bt_shell_printf("Unable to get DiscoverableTimeout\n");
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+
+		dbus_message_iter_get_basic(&iter, &value);
+
+		bt_shell_printf("DiscoverableTimeout: %d seconds\n", value);
+
+		return;
+	}
+
+	value = strtol(argv[1], &endptr, 0);
+	if (!endptr || *endptr != '\0' || value > UINT32_MAX) {
+		bt_shell_printf("Invalid argument\n");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	str = g_strdup_printf("discoverable-timeout %d", value);
+
+	if (g_dbus_proxy_set_property_basic(default_ctrl->proxy,
+					"DiscoverableTimeout",
+					DBUS_TYPE_UINT32, &value,
+					generic_callback, str, g_free))
+		return;
+
+	g_free(str);
+
+	return bt_shell_noninteractive_quit(EXIT_FAILURE);
+}
+
 static void cmd_agent(int argc, char *argv[])
 {
 	dbus_bool_t enable;
@@ -1097,6 +1153,25 @@ static void cmd_default_agent(int argc, char *argv[])
 	agent_default(dbus_conn, agent_manager);
 }
 
+#define	DISTANCE_VAL_INVALID	0x7FFF
+
+static struct set_discovery_filter_args {
+	char *transport;
+	char *pattern;
+	dbus_uint16_t rssi;
+	dbus_int16_t pathloss;
+	char **uuids;
+	size_t uuids_len;
+	dbus_bool_t duplicate;
+	dbus_bool_t discoverable;
+	bool set;
+	bool active;
+} filter = {
+	.rssi = DISTANCE_VAL_INVALID,
+	.pathloss = DISTANCE_VAL_INVALID,
+	.set = true,
+};
+
 static void start_discovery_reply(DBusMessage *message, void *user_data)
 {
 	dbus_bool_t enable = GPOINTER_TO_UINT(user_data);
@@ -1112,24 +1187,23 @@ static void start_discovery_reply(DBusMessage *message, void *user_data)
 	}
 
 	bt_shell_printf("Discovery %s\n", enable ? "started" : "stopped");
+
+	filter.active = enable;
 	/* Leave the discovery running even on noninteractive mode */
 }
 
-#define	DISTANCE_VAL_INVALID	0x7FFF
+static void clear_discovery_filter(DBusMessageIter *iter, void *user_data)
+{
+	DBusMessageIter dict;
 
-static struct set_discovery_filter_args {
-	char *transport;
-	dbus_uint16_t rssi;
-	dbus_int16_t pathloss;
-	char **uuids;
-	size_t uuids_len;
-	dbus_bool_t duplicate;
-	bool set;
-} filter = {
-	.rssi = DISTANCE_VAL_INVALID,
-	.pathloss = DISTANCE_VAL_INVALID,
-	.set = true,
-};
+	dbus_message_iter_open_container(iter, DBUS_TYPE_ARRAY,
+				DBUS_DICT_ENTRY_BEGIN_CHAR_AS_STRING
+				DBUS_TYPE_STRING_AS_STRING
+				DBUS_TYPE_VARIANT_AS_STRING
+				DBUS_DICT_ENTRY_END_CHAR_AS_STRING, &dict);
+
+	dbus_message_iter_close_container(iter, &dict);
+}
 
 static void set_discovery_filter_setup(DBusMessageIter *iter, void *user_data)
 {
@@ -1163,6 +1237,15 @@ static void set_discovery_filter_setup(DBusMessageIter *iter, void *user_data)
 						DBUS_TYPE_BOOLEAN,
 						&args->duplicate);
 
+	if (args->discoverable)
+		g_dbus_dict_append_entry(&dict, "Discoverable",
+						DBUS_TYPE_BOOLEAN,
+						&args->discoverable);
+
+	if (args->pattern != NULL)
+		g_dbus_dict_append_entry(&dict, "Pattern", DBUS_TYPE_STRING,
+						&args->pattern);
+
 	dbus_message_iter_close_container(iter, &dict);
 }
 
@@ -1185,14 +1268,18 @@ static void set_discovery_filter_reply(DBusMessage *message, void *user_data)
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static void set_discovery_filter(void)
+static void set_discovery_filter(bool cleared)
 {
+	GDBusSetupFunction func;
+
 	if (check_default_ctrl() == FALSE || filter.set)
 		return;
 
+	func = cleared ? clear_discovery_filter : set_discovery_filter_setup;
+
 	if (g_dbus_proxy_method_call(default_ctrl->proxy, "SetDiscoveryFilter",
-		set_discovery_filter_setup, set_discovery_filter_reply,
-		&filter, NULL) == FALSE) {
+					func, set_discovery_filter_reply,
+					&filter, NULL) == FALSE) {
 		bt_shell_printf("Failed to set discovery filter\n");
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 	}
@@ -1212,7 +1299,7 @@ static void cmd_scan(int argc, char *argv[])
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 
 	if (enable == TRUE) {
-		set_discovery_filter();
+		set_discovery_filter(false);
 		method = "StartDiscovery";
 	} else
 		method = "StopDiscovery";
@@ -1254,6 +1341,9 @@ static void cmd_scan_filter_uuids(int argc, char *argv[])
 
 commit:
 	filter.set = false;
+
+	if (filter.active)
+		set_discovery_filter(false);
 }
 
 static void cmd_scan_filter_rssi(int argc, char *argv[])
@@ -1268,6 +1358,9 @@ static void cmd_scan_filter_rssi(int argc, char *argv[])
 	filter.rssi = atoi(argv[1]);
 
 	filter.set = false;
+
+	if (filter.active)
+		set_discovery_filter(false);
 }
 
 static void cmd_scan_filter_pathloss(int argc, char *argv[])
@@ -1283,6 +1376,9 @@ static void cmd_scan_filter_pathloss(int argc, char *argv[])
 	filter.pathloss = atoi(argv[1]);
 
 	filter.set = false;
+
+	if (filter.active)
+		set_discovery_filter(false);
 }
 
 static void cmd_scan_filter_transport(int argc, char *argv[])
@@ -1298,6 +1394,9 @@ static void cmd_scan_filter_transport(int argc, char *argv[])
 	filter.transport = g_strdup(argv[1]);
 
 	filter.set = false;
+
+	if (filter.active)
+		set_discovery_filter(false);
 }
 
 static void cmd_scan_filter_duplicate_data(int argc, char *argv[])
@@ -1318,6 +1417,48 @@ static void cmd_scan_filter_duplicate_data(int argc, char *argv[])
 	}
 
 	filter.set = false;
+
+	if (filter.active)
+		set_discovery_filter(false);
+}
+
+static void cmd_scan_filter_discoverable(int argc, char *argv[])
+{
+	if (argc < 2 || !strlen(argv[1])) {
+		bt_shell_printf("Discoverable: %s\n",
+				filter.discoverable ? "on" : "off");
+		return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+	}
+
+	if (!strcmp(argv[1], "on"))
+		filter.discoverable = true;
+	else if (!strcmp(argv[1], "off"))
+		filter.discoverable = false;
+	else {
+		bt_shell_printf("Invalid option: %s\n", argv[1]);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	filter.set = false;
+
+	if (filter.active)
+		set_discovery_filter(false);
+}
+
+static void cmd_scan_filter_pattern(int argc, char *argv[])
+{
+	if (argc < 2 || !strlen(argv[1])) {
+		bt_shell_printf("Pattern: %s\n", filter.pattern);
+		return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+	}
+
+	free(filter.pattern);
+	filter.pattern = strdup(argv[1]);
+
+	filter.set = false;
+
+	if (filter.active)
+		set_discovery_filter(false);
 }
 
 static void filter_clear_uuids(void)
@@ -1348,6 +1489,17 @@ static void filter_clear_duplicate(void)
 	filter.duplicate = false;
 }
 
+static void filter_clear_discoverable(void)
+{
+	filter.discoverable = false;
+}
+
+static void filter_clear_pattern(void)
+{
+	free(filter.pattern);
+	filter.pattern = NULL;
+}
+
 struct clear_entry {
 	const char *name;
 	void (*clear) (void);
@@ -1359,6 +1511,8 @@ static const struct clear_entry filter_clear[] = {
 	{ "pathloss", filter_clear_pathloss },
 	{ "transport", filter_clear_transport },
 	{ "duplicate-data", filter_clear_duplicate },
+	{ "discoverable", filter_clear_discoverable },
+	{ "pattern", filter_clear_pattern },
 	{}
 };
 
@@ -1423,7 +1577,7 @@ static void cmd_scan_filter_clear(int argc, char *argv[])
 	if (check_default_ctrl() == FALSE)
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 
-	set_discovery_filter();
+	set_discovery_filter(all);
 }
 
 static struct GDBusProxy *find_device(int argc, char *argv[])
@@ -1666,10 +1820,10 @@ static void remove_device(GDBusProxy *proxy)
 {
 	char *path;
 
-	path = g_strdup(g_dbus_proxy_get_path(proxy));
-
 	if (!default_ctrl)
 		return;
+
+	path = g_strdup(g_dbus_proxy_get_path(proxy));
 
 	if (g_dbus_proxy_method_call(default_ctrl->proxy, "RemoveDevice",
 						remove_device_setup,
@@ -1792,12 +1946,21 @@ static void cmd_disconn(int argc, char *argv[])
 static void cmd_list_attributes(int argc, char *argv[])
 {
 	GDBusProxy *proxy;
+	const char *path;
+
+	if (argc > 1 && !strcmp(argv[1], "local")) {
+		path = argv[1];
+		goto done;
+	}
 
 	proxy = find_device(argc, argv);
 	if (!proxy)
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 
-	gatt_list_attributes(g_dbus_proxy_get_path(proxy));
+	path = g_dbus_proxy_get_path(proxy);
+
+done:
+	gatt_list_attributes(path);
 
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
@@ -1981,6 +2144,19 @@ static void cmd_notify(int argc, char *argv[])
 	}
 
 	gatt_notify_attribute(default_attr, enable ? true : false);
+}
+
+static void cmd_clone(int argc, char *argv[])
+{
+	GDBusProxy *proxy;
+
+	proxy = default_attr ? default_attr : default_dev;
+	if (!proxy) {
+		bt_shell_printf("Not connected\n");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	gatt_clone_attribute(proxy, argc, argv);
 }
 
 static void cmd_register_app(int argc, char *argv[])
@@ -2344,6 +2520,16 @@ static void cmd_advertise_timeout(int argc, char *argv[])
 	ad_advertise_timeout(dbus_conn, &value);
 }
 
+static void cmd_advertise_secondary(int argc, char *argv[])
+{
+	if (argc < 2) {
+		ad_advertise_secondary(dbus_conn, NULL);
+		return;
+	}
+
+	ad_advertise_secondary(dbus_conn, argv[1]);
+}
+
 static void ad_clear_uuids(void)
 {
 	ad_disable_uuids(dbus_conn);
@@ -2395,6 +2581,13 @@ static void ad_clear_timeout(void)
 	ad_advertise_timeout(dbus_conn, &value);
 }
 
+static void ad_clear_secondary(void)
+{
+	const char *value = "";
+
+	ad_advertise_secondary(dbus_conn, value);
+}
+
 static const struct clear_entry ad_clear[] = {
 	{ "uuids",		ad_clear_uuids },
 	{ "service",		ad_clear_service },
@@ -2405,6 +2598,7 @@ static const struct clear_entry ad_clear[] = {
 	{ "appearance",		ad_clear_appearance },
 	{ "duration",		ad_clear_duration },
 	{ "timeout",		ad_clear_timeout },
+	{ "secondary",		ad_clear_secondary },
 	{}
 };
 
@@ -2448,6 +2642,8 @@ static const struct bt_shell_menu advertise_menu = {
 			"Set/Get advertise duration" },
 	{ "timeout", "[seconds]", cmd_advertise_timeout,
 			"Set/Get advertise timeout" },
+	{ "secondary", "[1M/2M/Coded]", cmd_advertise_secondary,
+			"Set/Get advertise secondary channel" },
 	{ "clear", "[uuids/service/manufacturer/config-name...]", cmd_ad_clear,
 			"Clear advertise config" },
 	{ } },
@@ -2468,7 +2664,14 @@ static const struct bt_shell_menu scan_menu = {
 	{ "duplicate-data", "[on/off]", cmd_scan_filter_duplicate_data,
 				"Set/Get duplicate data filter",
 				NULL },
-	{ "clear", "[uuids/rssi/pathloss/transport/duplicate-data]",
+	{ "discoverable", "[on/off]", cmd_scan_filter_discoverable,
+				"Set/Get discoverable filter",
+				NULL },
+	{ "pattern", "[value]", cmd_scan_filter_pattern,
+				"Set/Get pattern filter",
+				NULL },
+	{ "clear",
+	"[uuids/rssi/pathloss/transport/duplicate-data/discoverable/pattern]",
 				cmd_scan_filter_clear,
 				"Clears discovery filter.",
 				filter_clear_generator },
@@ -2479,14 +2682,14 @@ static const struct bt_shell_menu gatt_menu = {
 	.name = "gatt",
 	.desc = "Generic Attribute Submenu",
 	.entries = {
-	{ "list-attributes", "[dev]", cmd_list_attributes, "List attributes",
-							dev_generator },
+	{ "list-attributes", "[dev/local]", cmd_list_attributes,
+				"List attributes", dev_generator },
 	{ "select-attribute", "<attribute/UUID>",  cmd_select_attribute,
 				"Select attribute", attribute_generator },
 	{ "attribute-info", "[attribute/UUID]",  cmd_attribute_info,
 				"Select attribute", attribute_generator },
 	{ "read", "[offset]", cmd_read, "Read attribute value" },
-	{ "write", "<data=xx xx ...> [offset]", cmd_write,
+	{ "write", "<data=xx xx ...> [offset] [type]", cmd_write,
 						"Write attribute value" },
 	{ "acquire-write", NULL, cmd_acquire_write,
 					"Acquire Write file descriptor" },
@@ -2498,26 +2701,29 @@ static const struct bt_shell_menu gatt_menu = {
 					"Release Notify file descriptor" },
 	{ "notify",       "<on/off>", cmd_notify, "Notify attribute value",
 							NULL },
+	{ "clone",	  "[dev/attribute/UUID]", cmd_clone,
+						"Clone a device or attribute" },
 	{ "register-application", "[UUID ...]", cmd_register_app,
 						"Register profile to connect" },
 	{ "unregister-application", NULL, cmd_unregister_app,
 						"Unregister profile" },
-	{ "register-service", "<UUID>", cmd_register_service,
+	{ "register-service", "<UUID> [handle]", cmd_register_service,
 					"Register application service."  },
 	{ "unregister-service", "<UUID/object>", cmd_unregister_service,
 					"Unregister application service" },
-	{ "register-includes", "<UUID>", cmd_register_includes,
+	{ "register-includes", "<UUID> [handle]", cmd_register_includes,
 					"Register as Included service in." },
 	{ "unregister-includes", "<Service-UUID><Inc-UUID>",
 			cmd_unregister_includes,
 				 "Unregister Included service." },
-	{ "register-characteristic", "<UUID> <Flags=read,write,notify...> "
-					, cmd_register_characteristic,
-					"Register application characteristic" },
+	{ "register-characteristic",
+			"<UUID> <Flags=read,write,notify...> [handle]",
+			cmd_register_characteristic,
+			"Register application characteristic" },
 	{ "unregister-characteristic", "<UUID/object>",
 				cmd_unregister_characteristic,
 				"Unregister application characteristic" },
-	{ "register-descriptor", "<UUID> <Flags=read,write...>",
+	{ "register-descriptor", "<UUID> <Flags=read,write...> [handle]",
 					cmd_register_descriptor,
 					"Register application descriptor" },
 	{ "unregister-descriptor", "<UUID/object>",
@@ -2549,6 +2755,8 @@ static const struct bt_shell_menu main_menu = {
 	{ "discoverable", "<on/off>", cmd_discoverable,
 					"Set controller discoverable mode",
 							NULL },
+	{ "discoverable-timeout", "[value]", cmd_discoverable_timeout,
+					"Set discoverable timeout", NULL },
 	{ "agent",        "<on/off/capability>", cmd_agent,
 				"Enable/disable agent with given capability",
 							capability_generator},
@@ -2627,6 +2835,8 @@ int main(int argc, char *argv[])
 
 	dbus_conn = g_dbus_setup_bus(DBUS_BUS_SYSTEM, NULL, NULL);
 	g_dbus_attach_object_manager(dbus_conn);
+
+	bt_shell_set_env("DBUS_CONNECTION", dbus_conn);
 
 	client = g_dbus_client_new(dbus_conn, "org.bluez", "/org/bluez");
 

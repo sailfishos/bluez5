@@ -27,6 +27,10 @@
 #define __packed __attribute__((packed))
 #endif
 
+#define BT_ATT_CID		4
+#define BT_ATT_PSM		31
+#define BT_ATT_EATT_PSM		0x27
+
 #define BT_ATT_SECURITY_AUTO	0
 #define BT_ATT_SECURITY_LOW	1
 #define BT_ATT_SECURITY_MEDIUM	2
@@ -37,9 +41,10 @@
 #define BT_ATT_MAX_LE_MTU	517
 #define BT_ATT_MAX_VALUE_LEN	512
 
-#define BT_ATT_LINK_BREDR	0x00
-#define BT_ATT_LINK_LE		0x01
-#define BT_ATT_LINK_LOCAL	0xff
+#define BT_ATT_BREDR		0x00
+#define BT_ATT_LE		0x01
+#define BT_ATT_EATT		0x02
+#define BT_ATT_LOCAL		0xff
 
 /* ATT protocol opcodes */
 #define BT_ATT_OP_ERROR_RSP			0x01
@@ -67,9 +72,12 @@
 #define BT_ATT_OP_PREP_WRITE_RSP		0x17
 #define BT_ATT_OP_EXEC_WRITE_REQ		0x18
 #define BT_ATT_OP_EXEC_WRITE_RSP		0x19
-#define BT_ATT_OP_HANDLE_VAL_NOT		0x1B
-#define BT_ATT_OP_HANDLE_VAL_IND		0x1D
-#define BT_ATT_OP_HANDLE_VAL_CONF		0x1E
+#define BT_ATT_OP_HANDLE_NFY			0x1B
+#define BT_ATT_OP_HANDLE_IND			0x1D
+#define BT_ATT_OP_HANDLE_CONF			0x1E
+#define BT_ATT_OP_READ_MULT_VL_REQ		0x20
+#define BT_ATT_OP_READ_MULT_VL_RSP		0x21
+#define BT_ATT_OP_HANDLE_NFY_MULT		0x23
 
 /* Packed struct definitions for ATT protocol PDUs */
 /* TODO: Complete these definitions for all opcodes */
@@ -100,6 +108,8 @@ struct bt_att_pdu_error_rsp {
 #define BT_ATT_ERROR_INSUFFICIENT_ENCRYPTION		0x0F
 #define BT_ATT_ERROR_UNSUPPORTED_GROUP_TYPE		0x10
 #define BT_ATT_ERROR_INSUFFICIENT_RESOURCES		0x11
+#define BT_ATT_ERROR_DB_OUT_OF_SYNC			0x12
+#define BT_ATT_ERROR_VALUE_NOT_ALLOWED			0x13
 
 /*
  * Common Profile and Service Error Code descriptions (see Supplement to the
@@ -154,3 +164,11 @@ struct bt_att_pdu_error_rsp {
 #define BT_GATT_CHRC_EXT_PROP_AUTH_WRITE		0x20
 #define BT_GATT_CHRC_EXT_PROP_AUTH	(BT_GATT_CHRC_EXT_PROP_AUTH_READ | \
 					BT_GATT_CHRC_EXT_PROP_AUTH_WRITE)
+
+/* GATT Characteristic Client Features Bitfield values */
+#define BT_GATT_CHRC_CLI_FEAT_ROBUST_CACHING		0x01
+#define BT_GATT_CHRC_CLI_FEAT_EATT			0x02
+#define BT_GATT_CHRC_CLI_FEAT_NFY_MULTI			0x04
+
+/* GATT Characteristic Server Features Bitfield values */
+#define BT_GATT_CHRC_SERVER_FEAT_EATT			0x01

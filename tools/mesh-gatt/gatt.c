@@ -40,11 +40,12 @@
 #include "gdbus/gdbus.h"
 #include "lib/bluetooth.h"
 #include "lib/uuid.h"
-#include "mesh/node.h"
-#include "mesh/util.h"
-#include "mesh/gatt.h"
-#include "mesh/prov.h"
-#include "mesh/net.h"
+
+#include "tools/mesh-gatt/node.h"
+#include "tools/mesh-gatt/util.h"
+#include "tools/mesh-gatt/gatt.h"
+#include "tools/mesh-gatt/prov.h"
+#include "tools/mesh-gatt/net.h"
 
 #define MESH_PROV_DATA_OUT_UUID_STR	"00002adc-0000-1000-8000-00805f9b34fb"
 #define MESH_PROXY_DATA_OUT_UUID_STR	"00002ade-0000-1000-8000-00805f9b34fb"
@@ -166,7 +167,25 @@ uint16_t mesh_gatt_sar(uint8_t **pkt, uint16_t size)
 	}
 }
 
-static bool pipe_write(struct io *io, void *user_data)
+static int sock_send(struct io *io, struct iovec *iov, size_t iovlen)
+{
+	struct msghdr msg;
+	int ret;
+
+	memset(&msg, 0, sizeof(msg));
+	msg.msg_iov = iov;
+	msg.msg_iovlen = iovlen;
+
+	ret = sendmsg(io_get_fd(io), &msg, MSG_NOSIGNAL);
+	if (ret < 0) {
+		ret = -errno;
+		bt_shell_printf("sendmsg: %s", strerror(-ret));
+	}
+
+	return ret;
+}
+
+static bool sock_write(struct io *io, void *user_data)
 {
 	struct write_data *data = user_data;
 	struct iovec iov[2];
@@ -200,9 +219,8 @@ static bool pipe_write(struct io *io, void *user_data)
 
 		iov[1] = data->iov;
 
-		err = io_send(io, iov, 2);
+		err = sock_send(io, iov, 2);
 		if (err < 0) {
-			bt_shell_printf("Failed to write: %s\n", strerror(-err));
 			write_data_free(data);
 			return false;
 		}
@@ -247,7 +265,7 @@ static void notify_io_destroy(void)
 	notify_mtu = 0;
 }
 
-static bool pipe_hup(struct io *io, void *user_data)
+static bool sock_hup(struct io *io, void *user_data)
 {
 	bt_shell_printf("%s closed\n", io == notify_io ? "Notify" : "Write");
 
@@ -259,7 +277,7 @@ static bool pipe_hup(struct io *io, void *user_data)
 	return false;
 }
 
-static struct io *pipe_io_new(int fd)
+static struct io *sock_io_new(int fd)
 {
 	struct io *io;
 
@@ -267,7 +285,7 @@ static struct io *pipe_io_new(int fd)
 
 	io_set_close_on_destroy(io, true);
 
-	io_set_disconnect_handler(io, pipe_hup, NULL, NULL);
+	io_set_disconnect_handler(io, sock_hup, NULL, NULL);
 
 	return io;
 }
@@ -296,9 +314,9 @@ static void acquire_write_reply(DBusMessage *message, void *user_data)
 
 	bt_shell_printf("AcquireWrite success: fd %d MTU %u\n", fd, write_mtu);
 
-	write_io = pipe_io_new(fd);
+	write_io = sock_io_new(fd);
 
-	pipe_write(write_io, data);
+	sock_write(write_io, data);
 }
 
 static void acquire_setup(DBusMessageIter *iter, void *user_data)
@@ -342,7 +360,7 @@ bool mesh_gatt_write(GDBusProxy *proxy, uint8_t *buf, uint16_t len,
 	data->cb = cb;
 
 	if (write_io)
-		return pipe_write(write_io, data);
+		return sock_write(write_io, data);
 
 	if (g_dbus_proxy_method_call(proxy, "AcquireWrite",
 				acquire_setup, acquire_write_reply,
@@ -377,9 +395,11 @@ done:
 	g_free(data);
 }
 
-static bool pipe_read(struct io *io, bool prov, void *user_data)
+static bool sock_read(struct io *io, bool prov, void *user_data)
 {
 	struct mesh_node *node = user_data;
+	struct msghdr msg;
+	struct iovec iov;
 	uint8_t buf[512];
 	uint8_t *res;
 	int fd = io_get_fd(io);
@@ -388,9 +408,19 @@ static bool pipe_read(struct io *io, bool prov, void *user_data)
 	if (io != notify_io)
 		return true;
 
-	while ((len = read(fd, buf, sizeof(buf)))) {
-		if (len <= 0)
-			break;
+	iov.iov_base = buf;
+	iov.iov_len = sizeof(buf);
+
+	memset(&msg, 0, sizeof(msg));
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+
+	while ((len = recvmsg(fd, &msg, MSG_DONTWAIT))) {
+		if (len < 0) {
+			if (errno == EAGAIN)
+				break;
+			return false;
+		}
 
 		res = buf;
 		len_sar = mesh_gatt_sar(&res, len);
@@ -401,17 +431,22 @@ static bool pipe_read(struct io *io, bool prov, void *user_data)
 				net_data_ready(res, len_sar);
 		}
 	}
+
+	/* When socket is orderly closed, then recvmsg returns 0 */
+	if (len == 0)
+		return false;
+
 	return true;
 }
 
-static bool pipe_read_prov(struct io *io, void *user_data)
+static bool sock_read_prov(struct io *io, void *user_data)
 {
-	return pipe_read(io, true, user_data);
+	return sock_read(io, true, user_data);
 }
 
-static bool pipe_read_proxy(struct io *io, void *user_data)
+static bool sock_read_proxy(struct io *io, void *user_data)
 {
-	return pipe_read(io, false, user_data);
+	return sock_read(io, false, user_data);
 }
 
 static void acquire_notify_reply(DBusMessage *message, void *user_data)
@@ -457,15 +492,15 @@ static void acquire_notify_reply(DBusMessage *message, void *user_data)
 	if (g_dbus_proxy_get_property(data->proxy, "UUID", &iter) == FALSE)
 		goto done;
 
-	notify_io = pipe_io_new(fd);
+	notify_io = sock_io_new(fd);
 
 	dbus_message_iter_get_basic(&iter, &uuid);
 
 	if (!bt_uuid_strcmp(uuid, MESH_PROV_DATA_OUT_UUID_STR))
-		io_set_read_handler(notify_io, pipe_read_prov, data->user_data,
+		io_set_read_handler(notify_io, sock_read_prov, data->user_data,
 									NULL);
 	else if (!bt_uuid_strcmp(uuid, MESH_PROXY_DATA_OUT_UUID_STR))
-		io_set_read_handler(notify_io, pipe_read_proxy, data->user_data,
+		io_set_read_handler(notify_io, sock_read_proxy, data->user_data,
 									NULL);
 
 done:

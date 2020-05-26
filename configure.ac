@@ -1,10 +1,9 @@
 AC_PREREQ(2.60)
-AC_INIT(bluez, 5.50)
+AC_INIT(bluez, 5.54)
 
 AM_INIT_AUTOMAKE([foreign subdir-objects color-tests silent-rules
 					tar-pax no-dist-gzip dist-xz])
 AC_CONFIG_HEADERS(config.h)
-AC_USE_SYSTEM_EXTENSIONS
 
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
 
@@ -46,6 +45,8 @@ MISC_FLAGS
 
 AC_ARG_ENABLE(threads, AC_HELP_STRING([--enable-threads],
 		[enable threading support]), [enable_threads=${enableval}])
+
+AC_CHECK_FUNCS(explicit_bzero)
 
 AC_CHECK_FUNC(signalfd, dummy=yes,
 			AC_MSG_ERROR(signalfd support is required))
@@ -117,6 +118,18 @@ if (test -z "${path_dbussessionbusdir}"); then
 	AC_MSG_RESULT([${path_dbussessionbusdir}])
 fi
 AC_SUBST(DBUS_SESSIONBUSDIR, [${path_dbussessionbusdir}])
+
+AC_ARG_WITH([zsh-completion-dir], AC_HELP_STRING([--with-zsh-completion-dir=DIR],
+				[path to install zsh completions]),
+					[path_zshcompletiondir=${withval}],
+						[path_zshcompletiondir="yes"])
+
+if (test "${path_zshcompletiondir}" = "yes"); then
+	path_zshcompletiondir="$datarootdir/zsh/site-functions"
+	AC_MSG_RESULT([${path_zshcompletiondir}])
+fi
+AC_SUBST(ZSH_COMPLETIONDIR, [${path_zshcompletiondir}])
+AM_CONDITIONAL(ZSH_COMPLETIONS, test "${path_zshcompletiondir}" != "no")
 
 AC_ARG_ENABLE(backtrace, AC_HELP_STRING([--enable-backtrace],
 		[compile backtrace support]), [enable_backtrace=${enableval}])
@@ -216,9 +229,9 @@ AC_ARG_ENABLE(mesh, AC_HELP_STRING([--enable-mesh],
 		[enable Mesh profile support]), [enable_mesh=${enableval}])
 AM_CONDITIONAL(MESH, test "${enable_mesh}" = "yes")
 
-if (test "${enable_mesh}" == "yes"); then
-	PKG_CHECK_MODULES(JSONC, json-c, dummy=yes,
-				AC_MSG_ERROR(json-c is required))
+if (test "${enable_mesh}" = "yes"); then
+	PKG_CHECK_MODULES(JSONC, json-c >= 0.13, dummy=yes,
+				AC_MSG_ERROR(json-c >= 0.13 is required))
 	AC_SUBST(JSON_CFLAGS)
 	AC_SUBST(JSON_LIBS)
 fi
@@ -248,19 +261,26 @@ AC_ARG_ENABLE(btpclient, AC_HELP_STRING([--enable-btpclient],
 		[enable BTP client]), [enable_btpclient=${enableval}])
 AM_CONDITIONAL(BTPCLIENT, test "${enable_btpclient}" = "yes")
 
-if (test "${enable_btpclient}" = "yes" || test "${enable_mesh}" = "yes"); then
-	PKG_CHECK_MODULES(ELL, ell >= 0.3, enable_ell=yes,
-			  AC_MSG_ERROR(ell library >= 0.3 is required))
+AC_ARG_ENABLE([external_ell], AC_HELP_STRING([--enable-external-ell],
+				[enable external Embedded Linux library]),
+					[enable_external_ell=${enableval}])
+if (test "${enable_external_ell}" = "yes"); then
+	PKG_CHECK_MODULES(ELL, ell >= 0.28, dummy=yes,
+		AC_MSG_ERROR(Embedded Linux library >= 0.28 is required))
 	AC_SUBST(ELL_CFLAGS)
 	AC_SUBST(ELL_LIBS)
 fi
-AM_CONDITIONAL(ELL, test "${enable_ell}" = "yes")
+AM_CONDITIONAL(EXTERNAL_ELL, test "${enable_external_ell}" = "yes" ||
+				(test "${enable_btpclient}" != "yes" &&
+						test "${enable_mesh}" != "yes"))
+AM_CONDITIONAL(LIBSHARED_ELL, test "${enable_btpclient}" = "yes" ||
+						test "${enable_mesh}" = "yes")
 
 AC_ARG_ENABLE(client, AC_HELP_STRING([--disable-client],
 		[disable command line client]), [enable_client=${enableval}])
 AM_CONDITIONAL(CLIENT, test "${enable_client}" != "no")
 
-if (test "${enable_client}" != "no" || test "${enable_mesh}" == "yes"); then
+if (test "${enable_client}" != "no" || test "${enable_mesh}" = "yes"); then
         AC_CHECK_HEADERS(readline/readline.h, enable_readline=yes,
                 AC_MSG_ERROR(readline header files are required))
 fi
@@ -357,6 +377,9 @@ fi
 AC_DEFINE_UNQUOTED(CONFIGDIR, "${configdir}",
 			[Directory for the configuration files])
 AC_SUBST(CONFIGDIR, "${configdir}")
+
+AC_DEFINE_UNQUOTED(MESH_STORAGEDIR, "${storagedir}/mesh",
+			[Directory for the mesh daemon storage files])
 
 AC_ARG_ENABLE(android, AC_HELP_STRING([--enable-android],
 			[enable BlueZ for Android]),

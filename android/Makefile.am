@@ -1,6 +1,6 @@
 if ANDROID
 
-AM_CFLAGS += -DANDROID_VERSION=0x050100
+AM_CPPFLAGS += -DANDROID_VERSION=0x050100
 
 android_plugindir = $(abs_top_srcdir)/android/.libs
 
@@ -12,7 +12,7 @@ android_system_emulator_LDADD = src/libshared-mainloop.la
 noinst_PROGRAMS += android/bluetoothd-snoop
 
 android_bluetoothd_snoop_SOURCES = android/bluetoothd-snoop.c src/log.c
-android_bluetoothd_snoop_LDADD = src/libshared-mainloop.la @GLIB_LIBS@
+android_bluetoothd_snoop_LDADD = src/libshared-mainloop.la $(GLIB_LIBS)
 
 noinst_PROGRAMS += android/bluetoothd
 
@@ -59,7 +59,7 @@ android_bluetoothd_SOURCES = android/main.c \
 				src/sdp-client.h src/sdp-client.c \
 				profiles/network/bnep.h profiles/network/bnep.c
 android_bluetoothd_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la @GLIB_LIBS@
+				src/libshared-glib.la $(GLIB_LIBS)
 
 plugin_LTLIBRARIES += android/bluetooth.default.la
 
@@ -96,7 +96,7 @@ android_bluetooth_default_la_SOURCES = android/hal.h android/hal-bluetooth.c \
 					android/hal-log.h \
 					android/hal-ipc.h android/hal-ipc.c \
 					android/hal-utils.h android/hal-utils.c
-android_bluetooth_default_la_CFLAGS = $(AM_CFLAGS) -I$(srcdir)/android
+android_bluetooth_default_la_CPPFLAGS = $(AM_CPPFLAGS) -I$(srcdir)/android
 android_bluetooth_default_la_LDFLAGS = $(AM_LDFLAGS) -module -avoid-version \
 					-no-undefined
 
@@ -107,9 +107,10 @@ android_avdtptest_SOURCES = android/avdtptest.c \
 				btio/btio.h btio/btio.c \
 				src/shared/util.h src/shared/util.c \
 				src/shared/queue.h src/shared/queue.c \
+				src/shared/log.h src/shared/log.c \
 				android/avdtp.h android/avdtp.c
 android_avdtptest_CFLAGS = $(AM_CFLAGS)
-android_avdtptest_LDADD = lib/libbluetooth-internal.la @GLIB_LIBS@
+android_avdtptest_LDADD = lib/libbluetooth-internal.la $(GLIB_LIBS)
 
 noinst_PROGRAMS += android/haltest
 
@@ -139,9 +140,10 @@ android_haltest_SOURCES = android/client/haltest.c \
 				android/client/if-mce.c \
 				android/hardware/hardware.c \
 				android/hal-utils.h android/hal-utils.c
-android_haltest_CFLAGS = $(AM_CFLAGS) -I$(srcdir)/android \
+android_haltest_CPPFLAGS = $(AM_CPPFLAGS) -I$(srcdir)/android \
 				-DPLUGINDIR=\""$(android_plugindir)"\"
-android_haltest_LDFLAGS = -pthread -ldl -lm
+android_haltest_LDFLAGS = $(AM_LDFLAGS) -pthread
+android_haltest_LDADD = -ldl -lm
 
 noinst_PROGRAMS += android/android-tester
 
@@ -161,11 +163,11 @@ android_android_tester_SOURCES = emulator/hciemu.h emulator/hciemu.c \
 				android/tester-gatt.c \
 				android/tester-map-client.c \
 				android/tester-main.h android/tester-main.c
-android_android_tester_CFLAGS = $(AM_CFLAGS) -I$(srcdir)/android \
+android_android_tester_CPPFLAGS = $(AM_CPPFLAGS) -I$(srcdir)/android \
 				-DPLUGINDIR=\""$(android_plugindir)"\"
 android_android_tester_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la @GLIB_LIBS@
-android_android_tester_LDFLAGS = -pthread -ldl
+				src/libshared-glib.la $(GLIB_LIBS) -ldl
+android_android_tester_LDFLAGS = $(AM_LDFLAGS) -pthread
 
 noinst_PROGRAMS += android/ipc-tester
 
@@ -175,9 +177,9 @@ android_ipc_tester_SOURCES = emulator/hciemu.h emulator/hciemu.c \
 				emulator/smp.c \
 				android/hal-utils.h android/hal-utils.c \
 				android/ipc-common.h android/ipc-tester.c
-android_ipc_tester_CFLAGS = $(AM_CFLAGS) -I$(srcdir)/android
+android_ipc_tester_CPPFLAGS = $(AM_CPPFLAGS) -I$(srcdir)/android
 android_ipc_tester_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la @GLIB_LIBS@
+				src/libshared-glib.la $(GLIB_LIBS)
 
 plugin_LTLIBRARIES += android/audio.a2dp.default.la
 
@@ -191,11 +193,11 @@ android_audio_a2dp_default_la_SOURCES = android/audio-msg.h \
 					android/hardware/audio_effect.h \
 					android/hardware/hardware.h \
 					android/system/audio.h
-android_audio_a2dp_default_la_CFLAGS = $(AM_CFLAGS) -I$(srcdir)/android \
-					@SBC_CFLAGS@
-android_audio_a2dp_default_la_LIBADD = @SBC_LIBS@
+android_audio_a2dp_default_la_CPPFLAGS = $(AM_CPPFLAGS) -I$(srcdir)/android \
+					$(SBC_CFLAGS)
+android_audio_a2dp_default_la_LIBADD = $(SBC_LIBS) -lrt
 android_audio_a2dp_default_la_LDFLAGS = $(AM_LDFLAGS) -module -avoid-version \
-					-no-undefined -pthread -lrt
+					-no-undefined -pthread
 
 plugin_LTLIBRARIES += android/audio.sco.default.la
 
@@ -208,17 +210,17 @@ android_audio_sco_default_la_SOURCES = android/hal-log.h \
 					android/audio_utils/resampler.c \
 					android/audio_utils/resampler.h \
 					android/system/audio.h
-android_audio_sco_default_la_CFLAGS = $(AM_CFLAGS) -I$(srcdir)/android
-android_audio_sco_default_la_LIBADD = @SPEEXDSP_LIBS@
+android_audio_sco_default_la_CPPFLAGS = $(AM_CPPFLAGS) -I$(srcdir)/android
+android_audio_sco_default_la_LIBADD = $(SPEEXDSP_LIBS) -lrt
 android_audio_sco_default_la_LDFLAGS = $(AM_LDFLAGS) -module -avoid-version \
-					-no-undefined -lrt
+					-no-undefined
 unit_tests += android/test-ipc
 
 android_test_ipc_SOURCES = android/test-ipc.c \
 				src/log.h src/log.c \
 				android/ipc-common.h \
 				android/ipc.c android/ipc.h
-android_test_ipc_LDADD = src/libshared-glib.la @GLIB_LIBS@
+android_test_ipc_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 endif
 

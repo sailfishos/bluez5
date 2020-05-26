@@ -22,6 +22,13 @@
  *
  */
 
+#define IO_CAPABILITY_DISPLAYONLY	0x00
+#define IO_CAPABILITY_DISPLAYYESNO	0x01
+#define IO_CAPABILITY_KEYBOARDONLY	0x02
+#define IO_CAPABILITY_NOINPUTNOOUTPUT	0x03
+#define IO_CAPABILITY_KEYBOARDDISPLAY	0x04
+#define IO_CAPABILITY_INVALID		0xFF
+
 struct agent;
 
 typedef void (*agent_cb) (struct agent *agent, DBusError *err,
@@ -38,7 +45,7 @@ void agent_unref(struct agent *agent);
 
 struct agent *agent_get(const char *owner);
 
-int agent_authorize_service(struct agent *agent, const char *path,
+int agent_authorize_service(struct agent *agent, struct btd_device *device,
 				const char *uuid, agent_cb cb,
 				void *user_data, GDestroyNotify destroy);
 

@@ -48,7 +48,7 @@
 
 struct test_pdu {
 	bool valid;
-	const uint8_t *data;
+	uint8_t *data;
 	size_t size;
 };
 
@@ -86,7 +86,7 @@ struct context {
 #define raw_pdu(args...)					\
 	{							\
 		.valid = true,					\
-		.data = data(args),				\
+		.data = g_memdup(data(args), sizeof(data(args))), \
 		.size = sizeof(data(args)),			\
 	}
 
@@ -124,8 +124,16 @@ struct context {
 		raw_pdu(0x02, 0x00, 0x02),				\
 		raw_pdu(0x03, 0x00, 0x02)
 
-#define SERVICE_DATA_1_PDUS						\
+#define READ_SERVER_FEAT_PDUS						\
+		raw_pdu(0x08, 0x01, 0x00, 0xff, 0xff, 0x3a, 0x2b),	\
+		raw_pdu(0x01, 0x08, 0x01, 0x00, 0x0a)
+
+#define CLIENT_INIT_PDUS						\
 		MTU_EXCHANGE_CLIENT_PDUS,				\
+		READ_SERVER_FEAT_PDUS
+
+#define SERVICE_DATA_1_PDUS						\
+		CLIENT_INIT_PDUS,					\
 		raw_pdu(0x10, 0x01, 0x00, 0xff, 0xff, 0x00, 0x28),	\
 		raw_pdu(0x11, 0x06, 0x01, 0x00, 0x04, 0x00, 0x01, 0x18),\
 		raw_pdu(0x10, 0x05, 0x00, 0xff, 0xff, 0x00, 0x28),	\
@@ -150,7 +158,7 @@ struct context {
 		raw_pdu(0x05, 0x01, 0x08, 0x00, 0x01, 0x29)
 
 #define SERVICE_DATA_2_PDUS						\
-		MTU_EXCHANGE_CLIENT_PDUS,				\
+		CLIENT_INIT_PDUS,					\
 		raw_pdu(0x10, 0x01, 0x00, 0xff, 0xff, 0x00, 0x28),	\
 		raw_pdu(0x11, 0x06, 0x01, 0x00, 0x04, 0x00, 0x01, 0x18),\
 		raw_pdu(0x10, 0x05, 0x00, 0xff, 0xff, 0x00, 0x28),	\
@@ -175,7 +183,7 @@ struct context {
 		raw_pdu(0x05, 0x01, 0x0a, 0x00, 0x01, 0x29)
 
 #define SERVICE_DATA_3_PDUS						\
-		MTU_EXCHANGE_CLIENT_PDUS,				\
+		CLIENT_INIT_PDUS,					\
 		raw_pdu(0x10, 0x01, 0x00, 0xff, 0xff, 0x00, 0x28),	\
 		raw_pdu(0x11, 0x06, 0x00, 0x01, 0x21, 0x01, 0x00, 0x18, \
 			0x00, 0x02, 0x00, 0x02, 0x01, 0x18),		\
@@ -306,6 +314,11 @@ static bt_uuid_t uuid_char_128 = {
 static void test_free(gconstpointer user_data)
 {
 	const struct test_data *data = user_data;
+	struct test_pdu *pdu;
+	int i;
+
+	for (i = 0; (pdu = &data->pdu_list[i]) && pdu->valid; i++)
+		g_free(pdu->data);
 
 	g_free(data->test_name);
 	g_free(data->pdu_list);
@@ -382,7 +395,7 @@ static gboolean send_pdu(gpointer user_data)
 
 	len = write(context->fd, pdu->data, pdu->size);
 
-	util_hexdump('<', pdu->data, len, test_debug, "GATT: ");
+	tester_monitor('<', 0x0004, 0x0000, pdu->data, len);
 
 	g_assert_cmpint(len, ==, pdu->size);
 
@@ -440,7 +453,7 @@ static gboolean test_handler(GIOChannel *channel, GIOCondition cond,
 
 	g_assert(len > 0);
 
-	util_hexdump('>', buf, len, test_debug, "GATT: ");
+	tester_monitor('>', 0x0004, 0x0000, buf, len);
 
 	util_hexdump('=', pdu->data, pdu->size, test_debug, "PDU: ");
 
@@ -678,7 +691,7 @@ static struct context *create_context(uint16_t mtu, gconstpointer data)
 		g_assert(context->client_db);
 
 		context->client = bt_gatt_client_new(context->client_db,
-							context->att, mtu);
+							context->att, mtu, 0);
 		g_assert(context->client);
 
 		bt_gatt_client_set_debug(context->client, print_debug,
@@ -1910,7 +1923,9 @@ static void test_server(gconstpointer data)
 
 	g_assert_cmpint(len, ==, pdu.size);
 
-	util_hexdump('<', pdu.data, len, test_debug, "GATT: ");
+	tester_monitor('<', 0x0004, 0x0000, pdu.data, len);
+
+	g_free(pdu.data);
 }
 
 static void test_search_primary(gconstpointer data)
@@ -2256,7 +2271,7 @@ static void test_server_notification(struct context *context)
 	const struct test_step *step = context->data->step;
 
 	bt_gatt_server_send_notification(context->server, step->handle,
-						step->value, step->length);
+					step->value, step->length, false);
 }
 
 static const struct test_step test_notification_server_1 = {
@@ -2364,8 +2379,7 @@ int main(int argc, char *argv[])
 	 * Discovery of Services and Service Characteristics.
 	 */
 	define_test_att("/TP/GAD/CL/BV-01-C", test_search_primary, NULL, NULL,
-			raw_pdu(0x02, 0x00, 0x02),
-			raw_pdu(0x03, 0x00, 0x02),
+			MTU_EXCHANGE_CLIENT_PDUS,
 			raw_pdu(0x10, 0x01, 0x00, 0xff, 0xff, 0x00, 0x28),
 			raw_pdu(0x11, 0x06, 0x10, 0x00, 0x13, 0x00, 0x00, 0x18,
 					0x20, 0x00, 0x29, 0x00, 0xb0, 0x68,
@@ -3238,7 +3252,7 @@ int main(int argc, char *argv[])
 
 	define_test_client("/TP/GAN/CL/BV-01-C", test_client, ts_small_db,
 			&test_notification_1,
-			MTU_EXCHANGE_CLIENT_PDUS,
+			CLIENT_INIT_PDUS,
 			SMALL_DB_DISCOVERY_PDUS,
 			raw_pdu(0x12, 0x04, 0x00, 0x03, 0x00),
 			raw_pdu(0x13),
@@ -3264,7 +3278,7 @@ int main(int argc, char *argv[])
 
 	define_test_client("/TP/GAI/CL/BV-01-C", test_client, ts_small_db,
 			&test_indication_1,
-			MTU_EXCHANGE_CLIENT_PDUS,
+			CLIENT_INIT_PDUS,
 			SMALL_DB_DISCOVERY_PDUS,
 			raw_pdu(0x12, 0x04, 0x00, 0x03, 0x00),
 			raw_pdu(0x13),

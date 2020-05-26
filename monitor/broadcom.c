@@ -26,6 +26,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <inttypes.h>
 
@@ -42,6 +43,16 @@
 static void print_status(uint8_t status)
 {
 	packet_print_error("Status", status);
+}
+
+static void print_handle(uint16_t handle)
+{
+	packet_print_handle(handle);
+}
+
+static void print_rssi(int8_t rssi)
+{
+	packet_print_rssi(rssi);
 }
 
 static void print_sco_routing(uint8_t routing)
@@ -359,6 +370,24 @@ static void write_uart_clock_setting_cmd(const void *data, uint8_t size)
 	print_clock_setting(clock);
 }
 
+static void read_raw_rssi_cmd(const void *data, uint8_t size)
+{
+	uint16_t handle = get_le16(data);
+
+	print_handle(handle);
+}
+
+static void read_raw_rssi_rsp(const void *data, uint8_t size)
+{
+	uint8_t status = get_u8(data);
+	uint16_t handle = get_le16(data + 1);
+	int8_t rssi = get_s8(data + 3);
+
+	print_status(status);
+	print_handle(handle);
+	print_rssi(rssi);
+}
+
 static void write_ram_cmd(const void *data, uint8_t size)
 {
 	uint32_t addr = get_le32(data);
@@ -401,6 +430,29 @@ static void read_vid_pid_rsp(const void *data, uint8_t size)
 
 	print_status(status);
 	print_field("Product: %4.4x:%4.4x", vid, pid);
+}
+
+static void write_high_priority_connection_cmd(const void *data, uint8_t size)
+{
+	uint16_t handle = get_le16(data);
+	uint8_t priority = get_u8(data + 2);
+	const char *str;
+
+	print_handle(handle);
+
+	switch (priority) {
+	case 0x00:
+		str = "Low";
+		break;
+	case 0x01:
+		str = "High";
+		break;
+	default:
+		str = "Reserved";
+		break;
+	}
+
+	print_field("Priority: %s (0x%2.2x)", str, priority);
 }
 
 static const struct {
@@ -478,6 +530,44 @@ static void read_verbose_version_info_rsp(const void *data, uint8_t size)
 	print_field("Build number: %u (0x%4.4x)", build_num, build_num);
 }
 
+static void enable_wbs_cmd(const void *data, uint8_t size)
+{
+	uint8_t mode = get_u8(data);
+	uint16_t codec = get_le16(data + 1);
+	const char *str;
+
+	switch (mode) {
+	case 0x00:
+		str = "Disable WBS";
+		break;
+	case 0x01:
+		str = "Enable WBS";
+		break;
+	default:
+		str = "Reserved";
+		break;
+	}
+
+	print_field("Mode: %s (0x%2.2x)", str, mode);
+
+	switch (codec) {
+	case 0x0000:
+		str = "None";
+		break;
+	case 0x0001:
+		str = "CVSD";
+		break;
+	case 0x0002:
+		str = "mSBC";
+		break;
+	default:
+		str = "Reserved";
+		break;
+	}
+
+	print_field("Codec: %s (0x%4.4x)", str, codec);
+}
+
 static const struct vendor_ocf vendor_ocf_table[] = {
 	{ 0x001, "Write BD ADDR",
 			write_bd_addr_cmd, 6, true,
@@ -512,6 +602,9 @@ static const struct vendor_ocf vendor_ocf_table[] = {
 	{ 0x045, "Write UART Clock Setting",
 			write_uart_clock_setting_cmd, 1, true,
 			status_rsp, 1, true },
+	{ 0x048, "Read Raw RSSI",
+			read_raw_rssi_cmd, 2, true,
+			read_raw_rssi_rsp, 4, true },
 	{ 0x04c, "Write RAM",
 			write_ram_cmd, 4, false,
 			status_rsp, 1, true },
@@ -524,7 +617,9 @@ static const struct vendor_ocf vendor_ocf_table[] = {
 	{ 0x05a, "Read VID PID",
 			null_cmd, 0, true,
 			read_vid_pid_rsp, 5, true },
-	{ 0x057, "Write High Priority Connection" },
+	{ 0x057, "Write High Priority Connection",
+			write_high_priority_connection_cmd, 3, true,
+			status_rsp, 1, true },
 	{ 0x06d, "Write I2SPCM Interface Param" },
 	{ 0x06e, "Read Controller Features",
 			null_cmd, 0, true,
@@ -532,6 +627,9 @@ static const struct vendor_ocf vendor_ocf_table[] = {
 	{ 0x079, "Read Verbose Config Version Info",
 			null_cmd, 0, true,
 			read_verbose_version_info_rsp, 7, true },
+	{ 0x07e, "Enable WBS",
+			enable_wbs_cmd, 3, true,
+			status_rsp, 1, true },
 	{ }
 };
 

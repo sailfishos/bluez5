@@ -32,6 +32,7 @@ typedef void (*a2dp_endpoint_config_t) (struct a2dp_setup *setup, gboolean ret);
 
 struct a2dp_endpoint {
 	const char *(*get_name) (struct a2dp_sep *sep, void *user_data);
+	const char *(*get_path) (struct a2dp_sep *sep, void *user_data);
 	size_t (*get_capabilities) (struct a2dp_sep *sep,
 						uint8_t **capabilities,
 						void *user_data);
@@ -90,4 +91,5 @@ gboolean a2dp_sep_lock(struct a2dp_sep *sep, struct avdtp *session);
 gboolean a2dp_sep_unlock(struct a2dp_sep *sep, struct avdtp *session);
 struct avdtp_stream *a2dp_sep_get_stream(struct a2dp_sep *sep);
 struct btd_device *a2dp_setup_get_device(struct a2dp_setup *setup);
+const char *a2dp_setup_remote_path(struct a2dp_setup *setup);
 struct avdtp *a2dp_avdtp_get(struct btd_device *device);

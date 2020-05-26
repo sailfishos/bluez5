@@ -50,6 +50,14 @@ Properties	string UUID [read-only]
 			Array of object paths representing the included
 			services of this service.
 
+		uint16 Handle [read-write, optional] (Server Only)
+
+			Service handle. When available in the server it
+			would attempt to use to allocate into the database
+			which may fail, to auto allocate the value 0x0000
+			shall be used which will cause the allocated handle to
+			be set once registered.
+
 
 Characteristic hierarchy
 ========================
@@ -68,6 +76,7 @@ Methods		array{byte} ReadValue(dict options)
 			operation was successful.
 
 			Possible options: "offset": uint16 offset
+					  "mtu": Exchanged MTU (Server only)
 					  "device": Object Device (Server only)
 
 			Possible Errors: org.bluez.Error.Failed
@@ -83,9 +92,16 @@ Methods		array{byte} ReadValue(dict options)
 			characteristic.
 
 			Possible options: "offset": Start offset
+					  "type": string
+						Possible values:
+						"command": Write without
+						response
+						"request": Write with response
+						"reliable": Reliable Write
+					  "mtu": Exchanged MTU (Server only)
 					  "device": Device path (Server only)
 					  "link": Link type (Server only)
-					  "prepare-authorize": boolean Is prepare
+					  "prepare-authorize": True if prepare
 							       authorization
 							       request
 
@@ -98,9 +114,9 @@ Methods		array{byte} ReadValue(dict options)
 
 		fd, uint16 AcquireWrite(dict options) [optional]
 
-			Acquire file descriptor and MTU for writing. Usage of
-			WriteValue will be locked causing it to return
-			NotPermitted error.
+			Acquire file descriptor and MTU for writing. Only
+			sockets are supported. Usage of WriteValue will be
+			locked causing it to return NotPermitted error.
 
 			For server the MTU returned shall be equal or smaller
 			than the negotiated MTU.
@@ -120,7 +136,7 @@ Methods		array{byte} ReadValue(dict options)
 			reconnections as the MTU has to be renegotiated.
 
 			Possible options: "device": Object Device (Server only)
-					  "MTU": Exchanged MTU (Server only)
+					  "mtu": Exchanged MTU (Server only)
 					  "link": Link type (Server only)
 
 			Possible Errors: org.bluez.Error.Failed
@@ -128,9 +144,9 @@ Methods		array{byte} ReadValue(dict options)
 
 		fd, uint16 AcquireNotify(dict options) [optional]
 
-			Acquire file descriptor and MTU for notify. Usage of
-			StartNotify will be locked causing it to return
-			NotPermitted error.
+			Acquire file descriptor and MTU for notify. Only
+			sockets are support. Usage of StartNotify will be locked
+			causing it to return NotPermitted error.
 
 			For server the MTU returned shall be equal or smaller
 			than the negotiated MTU.
@@ -156,7 +172,7 @@ Methods		array{byte} ReadValue(dict options)
 			reconnections as the MTU has to be renegotiated.
 
 			Possible options: "device": Object Device (Server only)
-					  "MTU": Exchanged MTU (Server only)
+					  "mtu": Exchanged MTU (Server only)
 					  "link": Link type (Server only)
 
 			Possible Errors: org.bluez.Error.Failed
@@ -245,6 +261,7 @@ Properties	string UUID [read-only]
 				"notify"
 				"indicate"
 				"authenticated-signed-writes"
+				"extended-properties"
 				"reliable-write"
 				"writable-auxiliaries"
 				"encrypt-read"
@@ -254,6 +271,14 @@ Properties	string UUID [read-only]
 				"secure-read" (Server only)
 				"secure-write" (Server only)
 				"authorize"
+
+		uint16 Handle [read-write, optional] (Server Only)
+
+			Characteristic handle. When available in the server it
+			would attempt to use to allocate into the database
+			which may fail, to auto allocate the value 0x0000
+			shall be used which will cause the allocated handle to
+			be set once registered.
 
 Characteristic Descriptors hierarchy
 ====================================
@@ -329,6 +354,14 @@ Properties	string UUID [read-only]
 				"secure-read" (Server Only)
 				"secure-write" (Server Only)
 				"authorize"
+
+		uint16 Handle [read-write, optional] (Server Only)
+
+			Characteristic handle. When available in the server it
+			would attempt to use to allocate into the database
+			which may fail, to auto allocate the value 0x0000
+			shall be used which will cause the allocated handle to
+			be set once registered.
 
 GATT Profile hierarchy
 =====================

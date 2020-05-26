@@ -30,8 +30,9 @@ autom4te.cache
 test-driver
 test-suite.log
 coverage.info
-
 coverage
+ell
+
 lib/bluez.pc
 lib/bluetooth
 src/builtin.h
@@ -68,6 +69,7 @@ tools/bdaddr
 tools/bluemoon
 tools/seq2bseq
 tools/hex2hcd
+tools/bcmfw
 tools/nokfw
 tools/rtlfw
 tools/btiotest
@@ -126,10 +128,13 @@ emulator/btvirt
 emulator/b1ee
 emulator/hfp
 client/bluetoothctl
-mesh/meshctl
+tools/meshctl
+tools/mesh-cfgclient
+mesh/bluetooth-meshd
 
 src/bluetoothd.8
 src/bluetooth.service
+mesh/bluetooth-mesh.service
 
 obexd/src/builtin.h
 obexd/src/obexd
@@ -147,6 +152,7 @@ unit/test-avrcp
 unit/test-gatt
 unit/test-midi
 unit/test-gattrib
+unit/test-mesh-crypto
 unit/test-*.log
 unit/test-*.trs
 

@@ -150,6 +150,13 @@ extern "C" {
 #define MESH_PROXY_DATA_IN				0x2ADD
 #define MESH_PROXY_DATA_OUT				0x2ADE
 
+/* GATT Caching attributes */
+#define GATT_CHARAC_CLI_FEAT				0x2B29
+#define GATT_CHARAC_DB_HASH				0x2B2A
+
+/* GATT Server Supported features */
+#define GATT_CHARAC_SERVER_FEAT				0x2B3A
+
 typedef struct {
 	enum {
 		BT_UUID_UNSPEC = 0,

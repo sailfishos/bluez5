@@ -26,6 +26,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -74,8 +75,6 @@
 #include "storage.h"
 #include "attrib-server.h"
 #include "eir.h"
-
-#define IO_CAPABILITY_NOINPUTNOOUTPUT	0x03
 
 #define DISCONNECT_TIMER	2
 #define DISCOVERY_TIMER		1
@@ -2060,6 +2059,9 @@ static DBusMessage *disconnect_profile(DBusConnection *conn, DBusMessage *msg,
 	if (dev->disconnect)
 		return btd_error_in_progress(msg);
 
+	if (btd_service_get_state(service) == BTD_SERVICE_STATE_DISCONNECTED)
+		return dbus_message_new_method_return(msg);
+
 	dev->disconnect = dbus_message_ref(msg);
 
 	err = btd_service_disconnect(service);
@@ -2071,6 +2073,8 @@ static DBusMessage *disconnect_profile(DBusConnection *conn, DBusMessage *msg,
 
 	if (err == -ENOTSUP)
 		return btd_error_not_supported(msg);
+	else if (err == -EALREADY)
+		return dbus_message_new_method_return(msg);
 
 	return btd_error_failed(msg, strerror(-err));
 }
@@ -2153,6 +2157,18 @@ struct gatt_saver {
 	GKeyFile *key_file;
 };
 
+static void db_hash_read_value_cb(struct gatt_db_attribute *attrib,
+						int err, const uint8_t *value,
+						size_t length, void *user_data)
+{
+	const uint8_t **hash = user_data;
+
+	if (err || (length != 16))
+		return;
+
+	*hash = value;
+}
+
 static void store_desc(struct gatt_db_attribute *attr, void *user_data)
 {
 	struct gatt_saver *saver = user_data;
@@ -2184,7 +2200,7 @@ static void store_chrc(struct gatt_db_attribute *attr, void *user_data)
 	char handle[6], value[100], uuid_str[MAX_LEN_UUID_STR];
 	uint16_t handle_num, value_handle;
 	uint8_t properties;
-	bt_uuid_t uuid;
+	bt_uuid_t uuid, hash_uuid;
 
 	if (!gatt_db_attribute_get_char_data(attr, &handle_num, &value_handle,
 						&properties, &saver->ext_props,
@@ -2195,8 +2211,34 @@ static void store_chrc(struct gatt_db_attribute *attr, void *user_data)
 
 	sprintf(handle, "%04hx", handle_num);
 	bt_uuid_to_string(&uuid, uuid_str, sizeof(uuid_str));
-	sprintf(value, GATT_CHARAC_UUID_STR ":%04hx:%02hhx:%s", value_handle,
-							properties, uuid_str);
+
+	/* Store Database Hash  value if available */
+	bt_uuid16_create(&hash_uuid, GATT_CHARAC_DB_HASH);
+	if (!bt_uuid_cmp(&uuid, &hash_uuid)) {
+		const uint8_t *hash = NULL;
+
+		attr = gatt_db_get_attribute(saver->device->db, value_handle);
+
+		gatt_db_attribute_read(attr, 0, BT_ATT_OP_READ_REQ, NULL,
+					db_hash_read_value_cb, &hash);
+		if (hash)
+			sprintf(value, GATT_CHARAC_UUID_STR ":%04hx:%02hhx:"
+				"%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx"
+				"%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx"
+				"%02hhx%02hhx:%s", value_handle, properties,
+				hash[0], hash[1], hash[2], hash[3],
+				hash[4], hash[5], hash[6], hash[7],
+				hash[8], hash[9], hash[10], hash[11],
+				hash[12], hash[13], hash[14], hash[15],
+				uuid_str);
+		else
+			sprintf(value, GATT_CHARAC_UUID_STR ":%04hx:%02hhx:%s",
+				value_handle, properties, uuid_str);
+
+	} else
+		sprintf(value, GATT_CHARAC_UUID_STR ":%04hx:%02hhx:%s",
+				value_handle, properties, uuid_str);
+
 	g_key_file_set_string(key_file, "Attributes", handle, value);
 
 	gatt_db_service_foreach_desc(attr, store_desc, saver);
@@ -3240,6 +3282,20 @@ static void load_desc_value(struct gatt_db_attribute *attrib,
 		warn("loading descriptor value to db failed");
 }
 
+static ssize_t str2val(const char *str, uint8_t *val, size_t len)
+{
+	const char *pos = str;
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		if (sscanf(pos, "%2hhx", &val[i]) != 1)
+			break;
+		pos += 2;
+	}
+
+	return i;
+}
+
 static int load_desc(char *handle, char *value,
 					struct gatt_db_attribute *service)
 {
@@ -3259,7 +3315,7 @@ static int load_desc(char *handle, char *value,
 		val = 0;
 	}
 
-	DBG("loading descriptor handle: 0x%04x, value: 0x%04x, uuid: %s",
+	DBG("loading descriptor handle: 0x%04x, value: 0x%04x, value uuid: %s",
 				handle_int, val, uuid_str);
 
 	bt_string_to_uuid(&uuid, uuid_str);
@@ -3294,21 +3350,31 @@ static int load_chrc(char *handle, char *value,
 	uint16_t properties, value_handle, handle_int;
 	char uuid_str[MAX_LEN_UUID_STR];
 	struct gatt_db_attribute *att;
+	char val_str[32];
+	uint8_t val[16];
+	size_t val_len;
 	bt_uuid_t uuid;
 
 	if (sscanf(handle, "%04hx", &handle_int) != 1)
 		return -EIO;
 
-	if (sscanf(value, GATT_CHARAC_UUID_STR ":%04hx:%02hx:%s", &value_handle,
-						&properties, uuid_str) != 3)
-		return -EIO;
+	/* Check if there is any value stored */
+	if (sscanf(value, GATT_CHARAC_UUID_STR ":%04hx:%02hx:%32s:%s",
+			&value_handle, &properties, val_str, uuid_str) != 4) {
+		if (sscanf(value, GATT_CHARAC_UUID_STR ":%04hx:%02hx:%s",
+				&value_handle, &properties, uuid_str) != 3)
+			return -EIO;
+		val_len = 0;
+	} else
+		val_len = str2val(val_str, val, sizeof(val));
 
 	bt_string_to_uuid(&uuid, uuid_str);
 
 	/* Log debug message. */
 	DBG("loading characteristic handle: 0x%04x, value handle: 0x%04x,"
-				" properties 0x%04x uuid: %s", handle_int,
-				value_handle, properties, uuid_str);
+				" properties 0x%04x value: %s uuid: %s",
+				handle_int, value_handle, properties,
+				val_len ? val_str : "", uuid_str);
 
 	att = gatt_db_service_insert_characteristic(service, value_handle,
 							&uuid, 0, properties,
@@ -3316,6 +3382,12 @@ static int load_chrc(char *handle, char *value,
 	if (!att || gatt_db_attribute_get_handle(att) != value_handle) {
 		warn("loading characteristic to db failed");
 		return -EIO;
+	}
+
+	if (val_len) {
+		if (!gatt_db_attribute_write(att, 0, val, val_len, 0, NULL,
+						load_desc_value, NULL))
+			return -EIO;
 	}
 
 	return 0;
@@ -4606,27 +4678,18 @@ static void update_bredr_services(struct browse_req *req, sdp_list_t *recs)
 
 	for (seq = recs; seq; seq = seq->next) {
 		sdp_record_t *rec = (sdp_record_t *) seq->data;
-		sdp_list_t *svcclass = NULL;
 		char *profile_uuid;
 
 		if (!rec)
 			break;
 
-		if (sdp_get_service_classes(rec, &svcclass) < 0)
-			continue;
+		/* If service class attribute is missing, svclass will be all
+		 * zero and the resulting uuid string will be NULL.
+		 */
+		profile_uuid = bt_uuid2string(&rec->svclass);
 
-		/* Check for empty service classes list */
-		if (svcclass == NULL) {
-			DBG("Skipping record with no service classes");
+		if (!profile_uuid)
 			continue;
-		}
-
-		/* Extract the first element and skip the remainning */
-		profile_uuid = bt_uuid2string(svcclass->data);
-		if (!profile_uuid) {
-			sdp_list_free(svcclass, free);
-			continue;
-		}
 
 		if (bt_uuid_strcmp(profile_uuid, PNP_UUID) == 0) {
 			uint16_t source, vendor, product, version;
@@ -4660,7 +4723,6 @@ static void update_bredr_services(struct browse_req *req, sdp_list_t *recs)
 
 next:
 		free(profile_uuid);
-		sdp_list_free(svcclass, free);
 	}
 
 	if (sdp_key_file) {
@@ -4955,8 +5017,13 @@ static void gatt_client_init(struct btd_device *device)
 {
 	gatt_client_cleanup(device);
 
+	if (!device->connect && !main_opts.reverse_discovery) {
+		DBG("Reverse service discovery disabled: skipping GATT client");
+		return;
+	}
+
 	device->client = bt_gatt_client_new(device->db, device->att,
-							device->att_mtu);
+							device->att_mtu, 0);
 	if (!device->client) {
 		DBG("Failed to initialize");
 		return;
@@ -5003,7 +5070,7 @@ static void gatt_server_init(struct btd_device *device,
 	gatt_server_cleanup(device);
 
 	device->server = bt_gatt_server_new(db, device->att, device->att_mtu,
-						main_opts.min_enc_key_size);
+						main_opts.key_size);
 	if (!device->server) {
 		error("Failed to initialize bt_gatt_server");
 		return;
@@ -5012,7 +5079,7 @@ static void gatt_server_init(struct btd_device *device,
 	bt_att_set_enc_key_size(device->att, device->ltk_enc_size);
 	bt_gatt_server_set_debug(device->server, gatt_debug, NULL, NULL);
 
-	btd_gatt_database_att_connected(database, device->att);
+	btd_gatt_database_server_connected(database, device->server);
 }
 
 static bool local_counter(uint32_t *sign_cnt, void *user_data)
@@ -5062,6 +5129,22 @@ bool device_attach_att(struct btd_device *dev, GIOChannel *io)
 	if (gerr) {
 		error("bt_io_get: %s", gerr->message);
 		g_error_free(gerr);
+		return false;
+	}
+
+	if (dev->att) {
+		if (main_opts.gatt_channels == bt_att_get_channels(dev->att)) {
+			DBG("EATT channel limit reached");
+			return false;
+		}
+
+		if (!bt_att_attach_fd(dev->att, g_io_channel_unix_get_fd(io))) {
+			DBG("EATT channel connected");
+			g_io_channel_set_close_on_unref(io, FALSE);
+			return true;
+		}
+
+		error("Failed to attach EATT channel");
 		return false;
 	}
 
@@ -5369,9 +5452,9 @@ static int device_browse_sdp(struct btd_device *device, DBusMessage *msg)
 
 	req->sdp_flags = get_sdp_flags(device);
 
-	err = bt_search_service(btd_adapter_get_address(adapter),
-				&device->bdaddr, &uuid, browse_cb, req, NULL,
-				req->sdp_flags);
+	err = bt_search(btd_adapter_get_address(adapter),
+			&device->bdaddr, &uuid, browse_cb, req, NULL,
+			req->sdp_flags);
 	if (err < 0) {
 		browse_request_free(req);
 		return err;
@@ -5572,6 +5655,22 @@ void device_load_svc_chng_ccc(struct btd_device *device, uint16_t *ccc_le,
 
 	key_file = g_key_file_new();
 	g_key_file_load_from_file(key_file, filename, 0, NULL);
+
+	/*
+	 * If there is no "ServiceChanged" section we may be loading data from
+	 * old version which did not persist Service Changed CCC values. Let's
+	 * check if we are bonded and assume indications were enabled by peer
+	 * in such case - it should have done this anyway.
+	 */
+	if (!g_key_file_has_group(key_file, "ServiceChanged")) {
+		if (ccc_le)
+			*ccc_le = device->le_state.bonded ? 0x0002 : 0x0000;
+		if (ccc_bredr)
+			*ccc_bredr = device->bredr_state.bonded ?
+							0x0002 : 0x0000;
+		g_key_file_free(key_file);
+		return;
+	}
 
 	if (ccc_le)
 		*ccc_le = g_key_file_get_integer(key_file, "ServiceChanged",
@@ -5820,7 +5919,7 @@ void device_bonding_complete(struct btd_device *device, uint8_t bdaddr_type,
 		bonding_request_free(bonding);
 	} else if (!state->svc_resolved) {
 		if (!device->browse && !device->discov_timer &&
-				main_opts.reverse_sdp) {
+				main_opts.reverse_discovery) {
 			/* If we are not initiators and there is no currently
 			 * active discovery or discovery timer, set discovery
 			 * timer */
@@ -5864,7 +5963,7 @@ unsigned int device_wait_for_svc_complete(struct btd_device *dev,
 
 	dev->svc_callbacks = g_slist_prepend(dev->svc_callbacks, cb);
 
-	if (state->svc_resolved || !main_opts.reverse_sdp)
+	if (state->svc_resolved || !main_opts.reverse_discovery)
 		cb->idle_id = g_idle_add(svc_idle_cb, cb);
 	else if (dev->discov_timer > 0) {
 		g_source_remove(dev->discov_timer);
@@ -6142,6 +6241,21 @@ int device_confirm_passkey(struct btd_device *device, uint8_t type,
 	struct authentication_req *auth;
 	int err;
 
+	/* Just-Works repairing policy */
+	if (confirm_hint && device_is_paired(device, type)) {
+		if (main_opts.jw_repairing == JW_REPAIRING_NEVER) {
+			btd_adapter_confirm_reply(device->adapter,
+						  &device->bdaddr,
+						  type, FALSE);
+			return 0;
+		} else if (main_opts.jw_repairing == JW_REPAIRING_ALWAYS) {
+			btd_adapter_confirm_reply(device->adapter,
+						  &device->bdaddr,
+						  type, TRUE);
+			return 0;
+		}
+	}
+
 	auth = new_auth(device, type, AUTH_TYPE_CONFIRM, FALSE);
 	if (!auth)
 		return -EPERM;
@@ -6156,6 +6270,12 @@ int device_confirm_passkey(struct btd_device *device, uint8_t type,
 						confirm_cb, auth, NULL);
 
 	if (err < 0) {
+		if (err == -EINPROGRESS) {
+			/* Already in progress */
+			confirm_cb(auth->agent, NULL, auth);
+			return 0;
+		}
+
 		error("Failed requesting authentication");
 		device_auth_req_free(device);
 	}
@@ -6203,6 +6323,12 @@ int device_notify_pincode(struct btd_device *device, gboolean secure,
 	err = agent_display_pincode(auth->agent, device, pincode,
 					display_pincode_cb, auth, NULL);
 	if (err < 0) {
+		if (err == -EINPROGRESS) {
+			/* Already in progress */
+			display_pincode_cb(auth->agent, NULL, auth);
+			return 0;
+		}
+
 		error("Failed requesting authentication");
 		device_auth_req_free(device);
 	}

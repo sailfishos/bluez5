@@ -4,6 +4,7 @@
  *
  *  Copyright (C) 2006-2010  Nokia Corporation
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
+ *  Copyright (C) 2018       Pali Rohár <pali.rohar@gmail.com>
  *
  *
  *  This program is free software; you can redistribute it and/or modify
@@ -167,10 +168,8 @@ struct avdtp_content_protection_capability {
 	uint8_t data[0];
 } __attribute__ ((packed));
 
-static void print_aptx(a2dp_aptx_t *aptx)
+static void print_aptx_common(a2dp_aptx_t *aptx)
 {
-	printf("\t\tVendor Specific Value (aptX)");
-
 	printf("\n\t\t\tFrequencies: ");
 	if (aptx->frequency & APTX_SAMPLING_FREQ_16000)
 		printf("16kHz ");
@@ -186,41 +185,192 @@ static void print_aptx(a2dp_aptx_t *aptx)
 		printf("Mono ");
 	if (aptx->channel_mode & APTX_CHANNEL_MODE_STEREO)
 		printf("Stereo ");
+}
+
+static void print_aptx(a2dp_aptx_t *aptx, uint8_t size)
+{
+	printf("\t\tVendor Specific Value (aptX)");
+
+	if (size < sizeof(*aptx)) {
+		printf(" (broken)\n");
+		return;
+	}
+
+	print_aptx_common(aptx);
 
 	printf("\n");
 }
 
-static void print_ldac(a2dp_ldac_t *ldac)
+static void print_faststream(a2dp_faststream_t *faststream, uint8_t size)
+{
+	printf("\t\tVendor Specific Value (FastStream)");
+
+	if (size < sizeof(*faststream)) {
+		printf(" (broken)\n");
+		return;
+	}
+
+	printf("\n\t\t\tDirections: ");
+	if (faststream->direction & FASTSTREAM_DIRECTION_SINK)
+		printf("sink ");
+	if (faststream->direction & FASTSTREAM_DIRECTION_SOURCE)
+		printf("source ");
+
+	if (faststream->direction & FASTSTREAM_DIRECTION_SINK) {
+		printf("\n\t\t\tSink Frequencies: ");
+		if (faststream->sink_frequency &
+				FASTSTREAM_SINK_SAMPLING_FREQ_44100)
+			printf("44.1kHz ");
+		if (faststream->sink_frequency &
+				FASTSTREAM_SINK_SAMPLING_FREQ_48000)
+			printf("48kHz ");
+	}
+
+	if (faststream->direction & FASTSTREAM_DIRECTION_SOURCE) {
+		printf("\n\t\t\tSource Frequencies: ");
+		if (faststream->source_frequency &
+				FASTSTREAM_SOURCE_SAMPLING_FREQ_16000)
+			printf("16kHz ");
+	}
+
+	printf("\n");
+}
+
+static void print_aptx_ll(a2dp_aptx_ll_t *aptx_ll, uint8_t size)
+{
+	a2dp_aptx_ll_new_caps_t *aptx_ll_new;
+
+	printf("\t\tVendor Specific Value (aptX Low Latency)");
+
+	if (size < sizeof(*aptx_ll)) {
+		printf(" (broken)\n");
+		return;
+	}
+
+	print_aptx_common(&aptx_ll->aptx);
+
+	printf("\n\t\tBidirectional link: %s",
+			aptx_ll->bidirect_link ? "Yes" : "No");
+
+	aptx_ll_new = &aptx_ll->new_caps[0];
+	if (aptx_ll->has_new_caps &&
+	    size >= sizeof(*aptx_ll) + sizeof(*aptx_ll_new)) {
+		printf("\n\t\tTarget codec buffer level: %u",
+			(unsigned int)aptx_ll_new->target_level2 |
+			((unsigned int)(aptx_ll_new->target_level1) << 8));
+		printf("\n\t\tInitial codec buffer level: %u",
+			(unsigned int)aptx_ll_new->initial_level2 |
+			((unsigned int)(aptx_ll_new->initial_level1) << 8));
+		printf("\n\t\tSRA max rate: %g",
+			aptx_ll_new->sra_max_rate / 10000.0);
+		printf("\n\t\tSRA averaging time: %us",
+			(unsigned int)aptx_ll_new->sra_avg_time);
+		printf("\n\t\tGood working codec buffer level: %u",
+			(unsigned int)aptx_ll_new->good_working_level2 |
+			((unsigned int)(aptx_ll_new->good_working_level1) << 8)
+			);
+	}
+
+	printf("\n");
+}
+
+static void print_aptx_hd(a2dp_aptx_hd_t *aptx_hd, uint8_t size)
+{
+	printf("\t\tVendor Specific Value (aptX HD)");
+
+	if (size < sizeof(*aptx_hd)) {
+		printf(" (broken)\n");
+		return;
+	}
+
+	print_aptx_common(&aptx_hd->aptx);
+
+	printf("\n");
+}
+
+static void print_ldac(a2dp_ldac_t *ldac, uint8_t size)
 {
 	printf("\t\tVendor Specific Value (LDAC)");
 
-	printf("\n\t\t\tUnknown: %02x %02x", ldac->unknown[0],
-							ldac->unknown[1]);
+	if (size < sizeof(*ldac)) {
+		printf(" (broken)\n");
+		return;
+	}
+
+	printf("\n\t\t\tFrequencies: ");
+	if (ldac->frequency & LDAC_SAMPLING_FREQ_44100)
+		printf("44.1kHz ");
+	if (ldac->frequency & LDAC_SAMPLING_FREQ_48000)
+		printf("48kHz ");
+	if (ldac->frequency & LDAC_SAMPLING_FREQ_88200)
+		printf("88.2kHz ");
+	if (ldac->frequency & LDAC_SAMPLING_FREQ_96000)
+		printf("96kHz ");
+	if (ldac->frequency & LDAC_SAMPLING_FREQ_176400)
+		printf("176.4kHz ");
+	if (ldac->frequency & LDAC_SAMPLING_FREQ_192000)
+		printf("192kHz ");
+
+	printf("\n\t\t\tChannel modes: ");
+	if (ldac->channel_mode & LDAC_CHANNEL_MODE_MONO)
+		printf("Mono ");
+	if (ldac->channel_mode & LDAC_CHANNEL_MODE_DUAL)
+		printf("Dual ");
+	if (ldac->channel_mode & LDAC_CHANNEL_MODE_STEREO)
+		printf("Stereo ");
 
 	printf("\n");
 }
 
-static void print_vendor(a2dp_vendor_codec_t *vendor)
+static void print_vendor(a2dp_vendor_codec_t *vendor, uint8_t size)
 {
-	uint32_t vendor_id = btohl(vendor->vendor_id);
-	uint16_t codec_id = btohs(vendor->codec_id);
+	uint32_t vendor_id;
+	uint16_t codec_id;
+	int i;
+
+	if (size < sizeof(*vendor)) {
+		printf("\tMedia Codec: Vendor Specific A2DP Codec (broken)");
+		return;
+	}
+
+	vendor_id = A2DP_GET_VENDOR_ID(*vendor);
+	codec_id = A2DP_GET_CODEC_ID(*vendor);
 
 	printf("\tMedia Codec: Vendor Specific A2DP Codec");
 
 	printf("\n\t\tVendor ID 0x%08x", vendor_id);
 
-	printf("\n\t\tVendor Specific Codec ID 0x%04x\n", codec_id);
+	printf("\n\t\tVendor Specific Codec ID 0x%04x", codec_id);
+
+	printf("\n\t\tVendor Specific Data:");
+	for (i = 6; i < size; ++i)
+		printf(" 0x%.02x", ((unsigned char *)vendor)[i]);
+	printf("\n");
 
 	if (vendor_id == APTX_VENDOR_ID && codec_id == APTX_CODEC_ID)
-		print_aptx((void *) vendor);
+		print_aptx((void *) vendor, size);
+	else if (vendor_id == FASTSTREAM_VENDOR_ID &&
+			codec_id == FASTSTREAM_CODEC_ID)
+		print_faststream((void *) vendor, size);
+	else if (vendor_id == APTX_LL_VENDOR_ID && codec_id == APTX_LL_CODEC_ID)
+		print_aptx_ll((void *) vendor, size);
+	else if (vendor_id == APTX_HD_VENDOR_ID && codec_id == APTX_HD_CODEC_ID)
+		print_aptx_hd((void *) vendor, size);
 	else if (vendor_id == LDAC_VENDOR_ID && codec_id == LDAC_CODEC_ID)
-		print_ldac((void *) vendor);
+		print_ldac((void *) vendor, size);
 }
 
-static void print_mpeg24(a2dp_aac_t *aac)
+static void print_mpeg24(a2dp_aac_t *aac, uint8_t size)
 {
-	unsigned freq = AAC_GET_FREQUENCY(*aac);
-	unsigned bitrate = AAC_GET_BITRATE(*aac);
+	unsigned int freq, bitrate;
+
+	if (size < sizeof(*aac)) {
+		printf("\tMedia Codec: MPEG24 (broken)\n");
+		return;
+	}
+
+	freq = AAC_GET_FREQUENCY(*aac);
+	bitrate = AAC_GET_BITRATE(*aac);
 
 	printf("\tMedia Codec: MPEG24\n\t\tObject Types: ");
 
@@ -270,8 +420,17 @@ static void print_mpeg24(a2dp_aac_t *aac)
 	printf("\n\t\tVBR: %s", aac->vbr ? "Yes\n" : "No\n");
 }
 
-static void print_mpeg12(a2dp_mpeg_t *mpeg)
+static void print_mpeg12(a2dp_mpeg_t *mpeg, uint8_t size)
 {
+	uint16_t bitrate;
+
+	if (size < sizeof(*mpeg)) {
+		printf("\tMedia Codec: MPEG12 (broken)\n");
+		return;
+	}
+
+	bitrate = MPEG_GET_BITRATE(*mpeg);
+
 	printf("\tMedia Codec: MPEG12\n\t\tChannel Modes: ");
 
 	if (mpeg->channel_mode & MPEG_CHANNEL_MODE_MONO)
@@ -307,42 +466,105 @@ static void print_mpeg12(a2dp_mpeg_t *mpeg)
 	if (mpeg->layer & MPEG_LAYER_MP3)
 		printf("3 ");
 
-	printf("\n\t\tBit Rate: ");
-	if (mpeg->bitrate & MPEG_BIT_RATE_FREE)
-		printf("Free format");
-	else {
-		if (mpeg->bitrate & MPEG_BIT_RATE_32000)
-			printf("32kbps ");
-		if (mpeg->bitrate & MPEG_BIT_RATE_40000)
-			printf("40kbps ");
-		if (mpeg->bitrate & MPEG_BIT_RATE_48000)
-			printf("48kbps ");
-		if (mpeg->bitrate & MPEG_BIT_RATE_56000)
-			printf("56kbps ");
-		if (mpeg->bitrate & MPEG_BIT_RATE_64000)
-			printf("64kbps ");
-		if (mpeg->bitrate & MPEG_BIT_RATE_80000)
-			printf("80kbps ");
-		if (mpeg->bitrate & MPEG_BIT_RATE_96000)
-			printf("96kbps ");
-		if (mpeg->bitrate & MPEG_BIT_RATE_112000)
-			printf("112kbps ");
-		if (mpeg->bitrate & MPEG_BIT_RATE_128000)
-			printf("128kbps ");
-		if (mpeg->bitrate & MPEG_BIT_RATE_160000)
-			printf("160kbps ");
-		if (mpeg->bitrate & MPEG_BIT_RATE_192000)
-			printf("192kbps ");
-		if (mpeg->bitrate & MPEG_BIT_RATE_224000)
-			printf("224kbps ");
-		if (mpeg->bitrate & MPEG_BIT_RATE_256000)
-			printf("256kbps ");
-		if (mpeg->bitrate & MPEG_BIT_RATE_320000)
-			printf("320kbps ");
+	if (bitrate & MPEG_BIT_RATE_FREE) {
+		printf("\n\t\tBit Rate: Free format");
+	} else {
+		if (mpeg->layer & MPEG_LAYER_MP1) {
+			printf("\n\t\tLayer 1 Bit Rate: ");
+			if (bitrate & MPEG_MP1_BIT_RATE_32000)
+				printf("32kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_64000)
+				printf("64kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_96000)
+				printf("96kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_128000)
+				printf("128kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_160000)
+				printf("160kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_192000)
+				printf("192kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_224000)
+				printf("224kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_256000)
+				printf("256kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_320000)
+				printf("320kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_352000)
+				printf("352kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_384000)
+				printf("384kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_416000)
+				printf("416kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_448000)
+				printf("448kbps ");
+		}
+
+		if (mpeg->layer & MPEG_LAYER_MP2) {
+			printf("\n\t\tLayer 2 Bit Rate: ");
+			if (bitrate & MPEG_MP2_BIT_RATE_32000)
+				printf("32kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_48000)
+				printf("48kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_56000)
+				printf("56kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_64000)
+				printf("64kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_80000)
+				printf("80kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_96000)
+				printf("96kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_112000)
+				printf("112kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_128000)
+				printf("128kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_160000)
+				printf("160kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_192000)
+				printf("192kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_224000)
+				printf("224kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_256000)
+				printf("256kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_320000)
+				printf("320kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_384000)
+				printf("384kbps ");
+		}
+
+		if (mpeg->layer & MPEG_LAYER_MP3) {
+			printf("\n\t\tLayer 3 Bit Rate: ");
+			if (bitrate & MPEG_MP3_BIT_RATE_32000)
+				printf("32kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_40000)
+				printf("40kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_48000)
+				printf("48kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_56000)
+				printf("56kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_64000)
+				printf("64kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_80000)
+				printf("80kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_96000)
+				printf("96kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_112000)
+				printf("112kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_128000)
+				printf("128kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_160000)
+				printf("160kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_192000)
+				printf("192kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_224000)
+				printf("224kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_256000)
+				printf("256kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_320000)
+				printf("320kbps ");
+		}
 	}
 
-	printf("\n\t\tVBR: %s", mpeg->bitrate & MPEG_BIT_RATE_VBR ? "Yes" :
-		"No");
+	printf("\n\t\tVBR: %s", mpeg->vbr ? "Yes" : "No");
 
 	printf("\n\t\tPayload Format: ");
 	if (mpeg->mpf)
@@ -351,8 +573,13 @@ static void print_mpeg12(a2dp_mpeg_t *mpeg)
 		printf("RFC-2250\n");
 }
 
-static void print_sbc(a2dp_sbc_t *sbc)
+static void print_sbc(a2dp_sbc_t *sbc, uint8_t size)
 {
+	if (size < sizeof(*sbc)) {
+		printf("\tMedia Codec: SBC (broken)\n");
+		return;
+	}
+
 	printf("\tMedia Codec: SBC\n\t\tChannel Modes: ");
 
 	if (sbc->channel_mode & SBC_CHANNEL_MODE_MONO)
@@ -394,30 +621,49 @@ static void print_sbc(a2dp_sbc_t *sbc)
 				sbc->min_bitpool, sbc->max_bitpool);
 }
 
-static void print_media_codec(struct avdtp_media_codec_capability *cap)
+static void print_media_codec(
+			struct avdtp_media_codec_capability *cap,
+			uint8_t size)
 {
+	int i;
+
+	if (size < sizeof(*cap)) {
+		printf("\tMedia Codec: Unknown (broken)\n");
+		return;
+	}
+
 	switch (cap->media_codec_type) {
 	case A2DP_CODEC_SBC:
-		print_sbc((void *) cap->data);
+		print_sbc((void *) cap->data, size - 2);
 		break;
 	case A2DP_CODEC_MPEG12:
-		print_mpeg12((void *) cap->data);
+		print_mpeg12((void *) cap->data, size - 2);
 		break;
 	case A2DP_CODEC_MPEG24:
-		print_mpeg24((void *) cap->data);
+		print_mpeg24((void *) cap->data, size - 2);
 		break;
 	case A2DP_CODEC_VENDOR:
-		print_vendor((void *) cap->data);
+		print_vendor((void *) cap->data, size - 2);
 		break;
 	default:
 		printf("\tMedia Codec: Unknown\n");
+		printf("\t\tCodec Data:");
+		for (i = 0; i < size - 2; ++i)
+			printf(" 0x%.02x", ((unsigned char *)cap->data)[i]);
+		printf("\n");
 	}
 }
 
 static void print_content_protection(
-				struct avdtp_content_protection_capability *cap)
+				struct avdtp_content_protection_capability *cap,
+				uint8_t size)
 {
 	printf("\tContent Protection: ");
+
+	if (size < sizeof(*cap)) {
+		printf("Unknown (broken)\n");
+		return;
+	}
 
 	switch (btohs(cap->content_protection_type)) {
 	case AVDTP_CONTENT_PROTECTION_TYPE_DTCP:
@@ -436,6 +682,7 @@ static void print_content_protection(
 static void print_caps(void *data, int size)
 {
 	int processed;
+	int i;
 
 	for (processed = 0; processed + 2 < size;) {
 		struct avdtp_service_capability *cap;
@@ -454,11 +701,20 @@ static void print_caps(void *data, int size)
 		case AVDTP_MULTIPLEXING:
 			/* FIXME: Add proper functions */
 			break;
+		default:
+			printf("\tUnknown category: %d\n", cap->category);
+			printf("\t\tData:");
+			for (i = 0; i < cap->length; ++i)
+				printf(" 0x%.02x",
+					((unsigned char *)cap->data)[i]);
+			printf("\n");
+			break;
 		case AVDTP_MEDIA_CODEC:
-			print_media_codec((void *) cap->data);
+			print_media_codec((void *) cap->data, cap->length);
 			break;
 		case AVDTP_CONTENT_PROTECTION:
-			print_content_protection((void *) cap->data);
+			print_content_protection((void *) cap->data,
+						cap->length);
 			break;
 		}
 
@@ -543,7 +799,7 @@ static ssize_t avdtp_get_caps(int sk, int seid)
 		return -1;
 	}
 
-	print_caps(caps, ret);
+	print_caps(caps->caps, ret - sizeof(struct getcap_resp));
 
 	return 0;
 }

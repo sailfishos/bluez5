@@ -26,6 +26,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdlib.h>
 #include <stdbool.h>
 #include <errno.h>
@@ -91,6 +92,7 @@ struct input_device {
 
 static int idle_timeout = 0;
 static bool uhid_enabled = false;
+static bool classic_bonded_only = false;
 
 void input_set_idle_timeout(int timeout)
 {
@@ -100,6 +102,11 @@ void input_set_idle_timeout(int timeout)
 void input_enable_userspace_hid(bool state)
 {
 	uhid_enabled = state;
+}
+
+void input_set_classic_bonded_only(bool state)
+{
+	classic_bonded_only = state;
 }
 
 void input_autodetect_hidp(void)
@@ -866,8 +873,8 @@ static int uhid_connadd(struct input_device *idev, struct hidp_connadd_req *req)
 	memset(&ev, 0, sizeof(ev));
 	ev.type = UHID_CREATE;
 	strncpy((char *) ev.u.create.name, req->name, sizeof(ev.u.create.name));
-	ba2str(&idev->src, (char *) ev.u.create.phys);
-	ba2str(&idev->dst, (char *) ev.u.create.uniq);
+	ba2strlc(&idev->src, (char *) ev.u.create.phys);
+	ba2strlc(&idev->dst, (char *) ev.u.create.uniq);
 	ev.u.create.vendor = req->vendor;
 	ev.u.create.product = req->product;
 	ev.u.create.version = req->version;
@@ -981,8 +988,18 @@ static int hidp_add_connection(struct input_device *idev)
 	if (device_name_known(idev->device))
 		device_get_name(idev->device, req->name, sizeof(req->name));
 
+	/* Make sure the device is bonded if required */
+	if (classic_bonded_only && !device_is_bonded(idev->device,
+				btd_device_get_bdaddr_type(idev->device))) {
+		error("Rejected connection from !bonded device %s", dst_addr);
+		goto cleanup;
+	}
+
 	/* Encryption is mandatory for keyboards */
-	if (req->subclass & 0x40) {
+	/* Some platforms may choose to require encryption for all devices */
+	/* Note that this only matters for pre 2.1 devices as otherwise the */
+	/* device is encrypted by default by the lower layers */
+	if (classic_bonded_only || req->subclass & 0x40) {
 		if (!bt_io_set(idev->intr_io, &gerr,
 					BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_MEDIUM,
 					BT_IO_OPT_INVALID)) {
@@ -1217,6 +1234,11 @@ static void input_device_enter_reconnect_mode(struct input_device *idev)
 {
 	DBG("path=%s reconnect_mode=%s", idev->path,
 				reconnect_mode_to_string(idev->reconnect_mode));
+
+	/* Make sure the device is bonded if required */
+	if (classic_bonded_only && !device_is_bonded(idev->device,
+				btd_device_get_bdaddr_type(idev->device)))
+		return;
 
 	/* Only attempt an auto-reconnect when the device is required to
 	 * accept reconnections from the host.

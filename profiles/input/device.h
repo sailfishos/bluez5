@@ -29,6 +29,7 @@ struct input_conn;
 
 void input_set_idle_timeout(int timeout);
 void input_enable_userspace_hid(bool state);
+void input_set_classic_bonded_only(bool state);
 void input_autodetect_hidp(void);
 
 int input_device_register(struct btd_service *service);

@@ -2,7 +2,7 @@
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
- *  Copyright (C) 2017  Intel Corporation. All rights reserved.
+ *  Copyright (C) 2018-2019  Intel Corporation. All rights reserved.
  *
  *
  *  This library is free software; you can redistribute it and/or
@@ -15,111 +15,88 @@
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  *  Lesser General Public License for more details.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
- *
  */
 
+struct mesh_net;
 struct mesh_node;
+struct mesh_io;
+struct mesh_agent;
+struct mesh_config;
+struct mesh_config_node;
 
-#define ACTION_ADD		1
-#define ACTION_UPDATE		2
-#define ACTION_DELETE		3
+typedef void (*node_ready_func_t) (void *user_data, int status,
+							struct mesh_node *node);
 
-struct prov_svc_data {
-	uint16_t oob;
-	uint8_t dev_uuid[16];
-};
+typedef void (*node_join_ready_func_t) (struct mesh_node *node,
+						struct mesh_agent *agent);
 
-struct mesh_node_composition {
-	bool relay;
-	bool proxy;
-	bool lpn;
-	bool friend;
-	uint16_t cid;
-	uint16_t pid;
-	uint16_t vid;
-	uint16_t crpl;
-};
-
-struct mesh_publication {
-	uint16_t app_idx;
-	union {
-		uint16_t addr16;
-		uint8_t va_128[16];
-	} u;
-	uint8_t ttl;
-	uint8_t credential;
-	uint8_t period;
-	uint8_t retransmit;
-};
-
-typedef bool (*node_model_recv_callback)(uint16_t src, uint8_t *data,
-						uint16_t len, void *user_data);
-typedef int (*node_model_bind_callback)(uint16_t app_idx, int action);
-typedef void (*node_model_pub_callback)(struct mesh_publication *pub);
-typedef void (*node_model_sub_callback)(uint16_t sub_addr, int action);
-
-struct mesh_model_ops {
-	node_model_recv_callback recv;
-	node_model_bind_callback bind;
-	node_model_pub_callback pub;
-	node_model_sub_callback sub;
-};
-
+void node_remove(struct mesh_node *node);
+void node_join(const char *app_root, const char *sender, const uint8_t *uuid,
+						node_join_ready_func_t cb);
+uint8_t *node_uuid_get(struct mesh_node *node);
+struct mesh_net *node_get_net(struct mesh_node *node);
 struct mesh_node *node_find_by_addr(uint16_t addr);
 struct mesh_node *node_find_by_uuid(uint8_t uuid[16]);
-struct mesh_node *node_create_new(struct prov_svc_data *prov);
-struct mesh_node *node_new(void);
-void node_free(struct mesh_node *node);
+struct mesh_node *node_find_by_token(uint64_t token);
+bool node_is_provisioner(struct mesh_node *node);
 bool node_is_provisioned(struct mesh_node *node);
-void *node_get_prov(struct mesh_node *node);
-void node_set_prov(struct mesh_node *node, void *prov);
-bool node_app_key_add(struct mesh_node *node, uint16_t idx);
-bool node_net_key_add(struct mesh_node *node, uint16_t index);
-bool node_app_key_delete(struct mesh_node *node, uint16_t net_idx,
-				uint16_t idx);
-bool node_net_key_delete(struct mesh_node *node, uint16_t index);
-void node_set_primary(struct mesh_node *node, uint16_t unicast);
+void node_app_key_delete(struct mesh_node *node, uint16_t net_idx,
+							uint16_t app_idx);
 uint16_t node_get_primary(struct mesh_node *node);
 uint16_t node_get_primary_net_idx(struct mesh_node *node);
-void node_set_device_key(struct mesh_node *node, uint8_t *key);
-uint8_t *node_get_device_key(struct mesh_node *node);
+void node_set_token(struct mesh_node *node, uint8_t token[8]);
+const uint8_t *node_get_token(struct mesh_node *node);
+const uint8_t *node_get_device_key(struct mesh_node *node);
 void node_set_num_elements(struct mesh_node *node, uint8_t num_ele);
 uint8_t node_get_num_elements(struct mesh_node *node);
-bool node_parse_composition(struct mesh_node *node, uint8_t *buf, uint16_t len);
-GList *node_get_net_keys(struct mesh_node *node);
-GList *node_get_app_keys(struct mesh_node *node);
-void node_cleanup(void);
-
-bool node_set_local_node(struct mesh_node *node);
-struct mesh_node *node_get_local_node(void);
-void node_local_data_handler(uint16_t src, uint32_t dst,
-				uint32_t iv_index, uint32_t seq_num,
-				uint16_t app_idx, uint8_t *data, uint16_t len);
-
-bool node_local_model_register(uint8_t element_idx, uint16_t model_id,
-				struct mesh_model_ops *ops, void *user_data);
-bool node_local_vendor_model_register(uint8_t element_idx, uint32_t model_id,
-				struct mesh_model_ops *ops, void *user_data);
-
-bool node_set_element(struct mesh_node *node, uint8_t ele_idx);
-bool node_set_model(struct mesh_node *node, uint8_t ele_idx, uint32_t id);
-struct mesh_node_composition *node_get_composition(struct mesh_node *node);
-bool node_set_composition(struct mesh_node *node,
-				struct mesh_node_composition *comp);
 bool node_add_binding(struct mesh_node *node, uint8_t ele_idx,
 			uint32_t model_id, uint16_t app_idx);
-bool node_add_subscription(struct mesh_node *node, uint8_t ele_idx,
-			   uint32_t model_id, uint16_t addr);
-uint8_t node_get_default_ttl(struct mesh_node *node);
-bool node_set_default_ttl(struct mesh_node *node, uint8_t ttl);
+bool node_del_binding(struct mesh_node *node, uint8_t ele_idx,
+			uint32_t model_id, uint16_t app_idx);
+uint8_t node_default_ttl_get(struct mesh_node *node);
+bool node_default_ttl_set(struct mesh_node *node, uint8_t ttl);
 bool node_set_sequence_number(struct mesh_node *node, uint32_t seq);
 uint32_t node_get_sequence_number(struct mesh_node *node);
-bool node_set_iv_index(struct mesh_node *node, uint32_t iv_index);
-uint32_t node_get_iv_index(struct mesh_node *node);
-bool node_model_pub_set(struct mesh_node *node, uint8_t ele, uint32_t model_id,
-						struct mesh_publication *pub);
-struct mesh_publication *node_model_pub_get(struct mesh_node *node, uint8_t ele,
-							uint32_t model_id);
+int node_get_element_idx(struct mesh_node *node, uint16_t ele_addr);
+struct l_queue *node_get_element_models(struct mesh_node *node, uint8_t ele_idx,
+								int *status);
+uint16_t node_get_crpl(struct mesh_node *node);
+bool node_init_from_storage(struct mesh_node *node, const uint8_t uuid[16],
+					struct mesh_config_node *db_node);
+uint16_t node_generate_comp(struct mesh_node *node, uint8_t *buf, uint16_t sz);
+uint8_t node_lpn_mode_get(struct mesh_node *node);
+bool node_relay_mode_set(struct mesh_node *node, bool enable, uint8_t cnt,
+							uint16_t interval);
+uint8_t node_relay_mode_get(struct mesh_node *node, uint8_t *cnt,
+							uint16_t *interval);
+bool node_proxy_mode_set(struct mesh_node *node, bool enable);
+uint8_t node_proxy_mode_get(struct mesh_node *node);
+bool node_beacon_mode_set(struct mesh_node *node, bool enable);
+uint8_t node_beacon_mode_get(struct mesh_node *node);
+bool node_friend_mode_set(struct mesh_node *node, bool enable);
+uint8_t node_friend_mode_get(struct mesh_node *node);
+const char *node_get_element_path(struct mesh_node *node, uint8_t ele_idx);
+const char *node_get_owner(struct mesh_node *node);
+const char *node_get_app_path(struct mesh_node *node);
+bool node_add_pending_local(struct mesh_node *node, void *info);
+void node_attach_io_all(struct mesh_io *io);
+void node_attach_io(struct mesh_node *node, struct mesh_io *io);
+int node_attach(const char *app_root, const char *sender, uint64_t token,
+					node_ready_func_t cb, void *user_data);
+void node_build_attach_reply(struct mesh_node *node,
+						struct l_dbus_message *reply);
+void node_create(const char *app_root, const char *sender, const uint8_t *uuid,
+					node_ready_func_t cb, void *user_data);
+bool node_import(const char *app_root, const char *sender, const uint8_t *uuid,
+			const uint8_t dev_key[16], const uint8_t net_key[16],
+			uint16_t net_idx, bool kr, bool ivu,
+			uint32_t iv_index, uint16_t unicast,
+			node_ready_func_t cb, void *user_data);
+void node_id_set(struct mesh_node *node, uint16_t node_id);
+uint16_t node_id_get(struct mesh_node *node);
+bool node_dbus_init(struct l_dbus *bus);
+void node_cleanup_all(void);
+struct mesh_config *node_config_get(struct mesh_node *node);
+struct mesh_agent *node_get_agent(struct mesh_node *node);
+const char *node_get_storage_dir(struct mesh_node *node);
+bool node_load_from_storage(const char *storage_dir);

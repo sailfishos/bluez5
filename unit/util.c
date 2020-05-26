@@ -20,7 +20,7 @@
  */
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+#include <config.h>
 #endif
 
 #include <sys/types.h>
@@ -185,6 +185,11 @@ send:
 		g_print("io_cb count %u\n", d->count);
 		g_set_error(&d->err, TEST_ERROR, TEST_ERROR_UNEXPECTED,
 						"Unable to write to socket");
+		goto failed;
+	}
+
+	if (d->count >= TEST_BUF_MAX) {
+		g_print("io_cb count %u\n", d->count);
 		goto failed;
 	}
 

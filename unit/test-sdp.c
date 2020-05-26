@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 
 #include <glib.h>
 
@@ -45,7 +46,7 @@ struct sdp_pdu {
 	bool valid;
 	const void *raw_data;
 	size_t raw_size;
-	uint8_t cont_len;
+	uint16_t cont_len;
 };
 
 struct test_data {
@@ -59,14 +60,14 @@ struct test_data {
 #define raw_pdu(args...) \
 	{							\
 		.valid = true,					\
-		.raw_data = raw_data(args),			\
+		.raw_data = g_memdup(raw_data(args), sizeof(raw_data(args))), \
 		.raw_size = sizeof(raw_data(args)),		\
 	}
 
 #define raw_pdu_cont(cont, args...) \
 	{							\
 		.valid = true,					\
-		.raw_data = raw_data(args),			\
+		.raw_data = g_memdup(raw_data(args), sizeof(raw_data(args))), \
 		.raw_size = sizeof(raw_data(args)),		\
 		.cont_len = cont,				\
 	}
@@ -86,6 +87,7 @@ struct test_data {
 #define define_sa(name, args...) define_test("/TP/SERVER/SA/" name, 48, args)
 #define define_ssa(name, args...) define_test("/TP/SERVER/SSA/" name, 48, args)
 #define define_brw(name, args...) define_test("/TP/SERVER/BRW/" name, 672, args)
+#define define_rob(name, args...) define_test("/TP/SERVER/ROB/" name, 48, args)
 
 /* SDP Data Element (DE) tests */
 struct test_data_de {
@@ -103,7 +105,7 @@ struct test_data_de {
 #define define_test_de_attr(name, input, exp) \
 	do {								\
 		static struct test_data_de data;			\
-		data.input_data = input;				\
+		data.input_data = g_memdup(input, sizeof(input));	\
 		data.input_size = sizeof(input);			\
 		data.expected = exp;					\
 		tester_add("/sdp/DE/ATTR/" name, &data,	NULL,		\
@@ -119,13 +121,6 @@ struct context {
 	unsigned int pdu_offset;
 	const struct test_data *data;
 };
-
-static void sdp_debug(const char *str, void *user_data)
-{
-	const char *prefix = user_data;
-
-	tester_debug("%s%s\n", prefix, str);
-}
 
 static void destroy_context(struct context *context)
 {
@@ -186,7 +181,7 @@ static gboolean server_handler(GIOChannel *channel, GIOCondition cond,
 		return FALSE;
 	}
 
-	util_hexdump('<', buf, len, sdp_debug, "SDP: ");
+	tester_monitor('<', 0x0000, 0x0001, buf, len);
 
 	handle_internal_request(fd, context->data->mtu, buf, len);
 
@@ -197,27 +192,23 @@ static gboolean send_pdu(gpointer user_data)
 {
 	struct context *context = user_data;
 	const struct sdp_pdu *req_pdu;
-	uint16_t pdu_len;
-	unsigned char *buf;
+	struct iovec iov[2];
 	ssize_t len;
 
 	req_pdu = &context->data->pdu_list[context->pdu_offset];
 
-	pdu_len = req_pdu->raw_size + context->cont_size;
+	iov[0].iov_base = (void *) req_pdu->raw_data;
+	iov[0].iov_len = req_pdu->raw_size;
 
-	buf = g_malloc0(pdu_len);
+	iov[1].iov_base = context->cont_data;
+	iov[1].iov_len = context->cont_size;
 
-	memcpy(buf, req_pdu->raw_data, req_pdu->raw_size);
+	if (context->cont_size && context->cont_size != req_pdu->cont_len)
+		put_be16(req_pdu->cont_len, iov[1].iov_base + 4);
 
-	if (context->cont_size > 0)
-		memcpy(buf + req_pdu->raw_size, context->cont_data,
-							context->cont_size);
+	len = writev(context->fd, iov, 2);
 
-	len = write(context->fd, buf, pdu_len);
-
-	g_free(buf);
-
-	g_assert(len == pdu_len);
+	g_assert(len == (ssize_t) (iov[0].iov_len + iov[1].iov_len));
 
 	return FALSE;
 }
@@ -254,7 +245,7 @@ static gboolean client_handler(GIOChannel *channel, GIOCondition cond,
 	if (len < 0)
 		return FALSE;
 
-	util_hexdump('>', buf, len, sdp_debug, "SDP: ");
+	tester_monitor('>', 0x0000, 0x0001, buf, len);
 
 	g_assert(len > 0);
 	g_assert((size_t) len == rsp_pdu->raw_size + rsp_pdu->cont_len);
@@ -2809,6 +2800,29 @@ int main(int argc, char *argv[])
 				build_u128(0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
 						0x00, 0x00, 0x00, 0x00, 0x00,
 						0x00, 0x00, 0x00, 0x00, 0x00)));
+
+	/*
+	 * Service Attribute Request
+	 *
+	 * Verify the correct behaviour of the IUT when searching
+	 * for existing Attribute, using invalid continuation state.
+	 */
+	define_rob("BI-01-C",
+		raw_pdu(0x02, 0x00, 0x01, 0x00, 0x16, 0x35, 0x11, 0x1c,
+			0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00,
+			0x80, 0x00, 0x00, 0x80, 0x5f, 0x9b, 0x34, 0xfb,
+			0x00, 0x01, 0x00),
+		raw_pdu(0x03, 0x00, 0x01, 0x00, 0x09, 0x00, 0x01, 0x00,
+			0x01, 0x00, 0x01, 0x00, 0x00, 0x00),
+		raw_pdu(0x04, 0x00, 0x01, 0x00, 0x0f, 0x00, 0x01, 0x00,
+			0x00, 0x00, 0x07, 0x35, 0x06, 0x09, 0x00, 0x00,
+			0x09, 0x00, 0x01, 0x00),
+		raw_pdu_cont(8, 0x05, 0x00, 0x01, 0x00, 0x12, 0x00, 0x07, 0x35,
+				0x10, 0x09, 0x00, 0x00, 0x0a, 0x00, 0x08),
+		raw_pdu_cont(0xffff, 0x04, 0x00, 0x02, 0x00, 0x17, 0x00, 0x01,
+				0x00, 0x00, 0x00, 0x07, 0x35, 0x06, 0x09, 0x00,
+				0x00, 0x09, 0x00, 0x01, 0x08),
+		raw_pdu(0x01, 0x00, 0x02, 0x00, 0x02, 0x00, 0x05));
 
 	return tester_run();
 }

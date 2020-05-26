@@ -2,7 +2,7 @@
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
- *  Copyright (C) 2017  Intel Corporation. All rights reserved.
+ *  Copyright (C) 2018  Intel Corporation. All rights reserved.
  *
  *
  *  This library is free software; you can redistribute it and/or
@@ -15,15 +15,12 @@
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  *  Lesser General Public License for more details.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
- *
  */
 
-#define CONFIG_SERVER_MODEL_ID	0x0000
-#define CONFIG_CLIENT_MODEL_ID	0x0001
+#define CONFIG_SRV_MODEL	(VENDOR_ID_MASK | 0x0000)
+#define CONFIG_CLI_MODEL	(VENDOR_ID_MASK | 0x0001)
 
+/* New List */
 #define OP_APPKEY_ADD				0x00
 #define OP_APPKEY_DELETE			0x8000
 #define OP_APPKEY_GET				0x8001
@@ -71,6 +68,7 @@
 #define OP_CONFIG_VEND_MODEL_SUB_LIST		0x802C
 #define OP_CONFIG_POLL_TIMEOUT_LIST		0x802D
 #define OP_CONFIG_POLL_TIMEOUT_STATUS		0x802E
+/* Health opcodes in health-mod.h */
 #define OP_CONFIG_HEARTBEAT_PUB_GET		0x8038
 #define OP_CONFIG_HEARTBEAT_PUB_SET		0x8039
 #define OP_CONFIG_HEARTBEAT_PUB_STATUS		0x06
@@ -96,6 +94,4 @@
 #define OP_VEND_MODEL_APP_GET			0x804D
 #define OP_VEND_MODEL_APP_LIST			0x804E
 
-bool config_server_init(void);
-bool config_client_init(void);
-void config_client_get_composition(uint32_t dst);
+void cfgmod_server_init(struct mesh_node *node, uint8_t ele_idx);

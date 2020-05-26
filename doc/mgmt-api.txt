@@ -29,6 +29,8 @@ Linux kernel v4.5	Version 1.11
 Linux kernel v4.6	Version 1.12
 Linux kernel v4.8	Version 1.13
 Linux kernel v4.9	Version 1.14
+Linux kernel v5.5	Version 1.15
+Linux kernel v5.6	Version 1.16 (not yet released)
 
 Version 1.1 introduces Set Device ID command.
 
@@ -85,6 +87,12 @@ Version 1.14 introduces Read Extended Controller Information command and
 Extended Controller Information Changed event. It also adds Set Appearance
 command. The advertising flags Appearance and Local Name for adding scan
 response information are now supported.
+
+Version 1.15 introduces Get PHY Configuration, Set PHY Configuration and
+Load Blocked Keys commands.
+
+Version 1.16 introduces Wideband Speech setting and its corresponding
+Set Wideband Speech command.
 
 
 Example
@@ -307,6 +315,8 @@ Read Controller Information Command
 		13	Privacy
 		14	Controller Configuration
 		15	Static Address
+		16	PHY Configuration
+		17	Wideband Speech
 
 	This command generates a Command Complete event on success or
 	a Command Status event on failure.
@@ -2504,6 +2514,9 @@ Read Advertising Features Command
 		4	Add TX Power field to Adv_Data
 		5	Add Appearance field to Scan_Rsp
 		6	Add Local Name in Scan_Rsp
+		7	Secondary Channel with LE 1M
+		8	Secondary Channel with LE 2M
+		9	Secondary Channel with LE Coded
 
 	The Flags bit 0 indicates support for connectable advertising
 	and for switching to connectable advertising independent of the
@@ -2552,6 +2565,15 @@ Read Advertising Features Command
 	in the scan response data is available, it will be added. If the
 	space is limited a short version or no name information. The
 	Local Name will be added at the end of the scan response data.
+
+	The Flags bit 7 indicates support for advertising in secondary
+	channel in LE 1M PHY.
+
+	The Flags bit 8 indicates support for advertising in secondary
+	channel in LE 2M PHY. Primary channel would be on 1M.
+
+	The Flags bit 9 indicates support for advertising in secondary
+	channel in LE CODED PHY.
 
 	The valid range for Instance identifiers is 1-254. The value 0
 	is reserved for internal use and the value 255 is reserved for
@@ -2613,6 +2635,9 @@ Add Advertising Command
 		4	Add TX Power field to Adv_Data
 		5	Add Appearance field to Scan_Rsp
 		6	Add Local Name in Scan_Rsp
+		7	Secondary Channel with LE 1M
+		8	Secondary Channel with LE 2M
+		9	Secondary Channel with LE Coded
 
 	When the connectable flag is set, then the controller will use
 	undirected connectable advertising. The value of the connectable
@@ -2639,6 +2664,16 @@ Add Advertising Command
 	then scannable advertising is used. This small difference is
 	supported to provide less air traffic for devices implementing
 	broadcaster role.
+
+	Secondary channel flags can be used to advertise in secondary
+	channel with the corresponding PHYs. These flag bits are mutually
+	exclusive and setting multiple will result in Invalid Parameter
+	error. Choosing either LE 1M or LE 2M will result in using
+	extended advertising on the primary channel with LE 1M and the
+	respectively LE 1M or LE 2M on the secondary channel. Choosing
+	LE Coded will result in using extended advertising on the primary
+	and secondary channels with LE Coded. Choosing none of these flags
+	will result in legacy advertising.
 
 	The Duration parameter configures the length of an Instance. The
 	value is in seconds.
@@ -2871,6 +2906,8 @@ Read Extended Controller Information Command
 		13	Privacy
 		14	Controller Configuration
 		15	Static Address
+		16	PHY Configuration
+		17	Wideband Speech
 
 	The EIR_Data field contains information about class of device,
 	local name and other values. Not all of them might be present. For
@@ -2891,7 +2928,7 @@ Read Extended Controller Information Command
 Set Appearance Command
 ======================
 
-	Command Code:		0x0042
+	Command Code:		0x0043
 	Controller Index:	<controller id>
 	Command Parameters:	Appearance (2 Octets)
 	Return Parameters:
@@ -2913,6 +2950,146 @@ Set Appearance Command
 	It will return Not Supported otherwise.
 
 	Possible errors:	Not Supported
+				Invalid Parameters
+				Invalid Index
+
+
+Get PHY Configuration Command
+=============================
+
+	Command Code:		0x0044
+	Controller Index:	<controller id>
+	Command Parameters:
+	Return Parameters:	Supported_PHYs (4 Octet)
+				Configurable_PHYs (4 Octets)
+				Selected_PHYs (4 Octet)
+
+	The PHYs parameters are a bitmask with currently the
+	following available bits:
+
+		0	BR 1M 1-Slot
+		1	BR 1M 3-Slot
+		2	BR 1M 5-Slot
+		3	EDR 2M 1-Slot
+		4	EDR 2M 3-Slot
+		5	EDR 2M 5-Slot
+		6	EDR 3M 1-Slot
+		7	EDR 3M 3-Slot
+		8	EDR 3M 5-Slot
+		9	LE 1M TX
+		10	LE 1M RX
+		11	LE 2M TX
+		12	LE 2M RX
+		13	LE Coded TX
+		14	LE Coded RX
+
+	If BR/EDR is supported, then BR 1M 1-Slot is supported by
+	default and can also not be deselected. If LE is supported,
+	then LE 1M TX and LE 1M RX are supported by default.
+
+	Disabling BR/EDR completely or respectively LE has no impact
+	on the PHY configuration. It is remembered over power cycles.
+
+	This command generates a Command Complete event on success
+	or a Command Status event on failure.
+
+        Possible errors:	Invalid Parameters
+				Invalid Index
+
+
+Set PHY Configuration Command
+=============================
+
+	Command Code:		0x0045
+	Controller Index:	<controller id>
+	Command Parameters: 	Selected_PHYs (4 Octet)
+	Return Parameters:
+
+	This command is used to set the default PHY to the controller.
+
+	This will be stored and used for all the subsequent scanning
+	and connection initiation.
+
+	The list of supported PHYs can be retrieved via the
+	Get PHY Configuration command. Selecting unsupported or
+	deselecting default PHYs will result in an Invalid Parameter
+	error.
+
+	This can be called at any point to change the Selected PHYs.
+
+	Refer Get PHY Configuration command for PHYs parameter.
+
+	This command generates a Command Complete event on success
+	or a Command Status event on failure.
+
+	Possible errors:	Invalid Parameters
+				Invalid Index
+
+Load Blocked Keys Command
+===========================
+
+	Command Code:		0x0046
+	Controller Index:	<controller id>
+	Command Parameters:	Key_Count (2 Octets)
+				Key1 {
+					Key_Type (1 Octet)
+					Value (16 Octets)
+				}
+				Key2 { }
+				...
+	Return Parameters:
+
+	This command is used to feed the kernel a list of keys that
+	are known to be vulnerable.
+
+	If the pairing procedure produces any of these keys, they will be
+	silently dropped and any attempt to enable encryption rejected.
+
+	Currently defined Key_Type values are:
+
+			0x00	Link Key (BR/EDR)
+			0x01	Long Term Key (LE)
+			0x02	Identity Resolving Key (LE)
+
+	This command can be used when the controller is not powered.
+
+	This command generates a Command Complete event on success or
+	a Command Status event on failure.
+
+	Possible errors:	Invalid Parameters
+				Invalid Index
+
+
+Set Wideband Speech Command
+===========================
+
+	Command Code:		0x0047
+	Controller Index:	<controller id>
+	Command Parameters:	Wideband_Speech (1 Octet)
+	Return Parameters:	Current_Settings (4 Octets)
+
+	This command is used to enable/disable Wideband Speech
+	support for a controller. The allowed values for the
+	Wideband_Speech command parameter are 0x00 and 0x01.
+	All other values will return Invalid Parameters.
+
+	The value 0x00 disables Wideband Speech, the value 0x01
+	enables Wideband Speech.
+
+	This command is only available for BR/EDR capable controllers and
+	require controller specific support.
+
+	This command can be used when the controller is not powered and
+	all settings will be programmed once powered.
+
+	In case the controller does not support Wideband Speech
+	the command will fail regardless with Not Supported error.
+
+	This command generates a Command Complete event on success or
+	a Command Status event on failure.
+
+	Possible errors:	Busy
+				Not Supported
 				Invalid Parameters
 				Invalid Index
 
@@ -3782,3 +3959,20 @@ Extended Controller Information Changed Event
 
 	The event will only be sent to management sockets other than the
 	one through which the change was triggered.
+
+PHY Configuration Changed Event
+===============================
+
+	Event Code:		0x0026
+	Controller Index:	<controller id>
+	Event Parameters:	Selected_PHYs (4 Octets)
+
+	This event indicates that default PHYs have been updated.
+
+	This event will only be used after Set PHY Configuration
+	command has been used at least once.
+
+	The event will only be sent to management sockets other than the
+	one through which the change was triggered.
+
+	Refer Get PHY Configuration command for PHYs parameter.

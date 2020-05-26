@@ -20,6 +20,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -304,7 +305,7 @@ static bool hr_msrmt_cb(void *user_data)
 
 	bt_gatt_server_send_notification(server->gatt,
 						server->hr_msrmt_handle,
-						pdu, len);
+						pdu, len, false);
 
 
 	cur_ee = server->hr_energy_expended;
@@ -830,7 +831,7 @@ static void cmd_notify(struct server *server, char *cmd_str)
 							conf_cb, NULL, NULL))
 			printf("Failed to initiate indication\n");
 	} else if (!bt_gatt_server_send_notification(server->gatt, handle,
-								value, length))
+							value, length, false))
 		printf("Failed to initiate notification\n");
 
 done:
@@ -1139,7 +1140,6 @@ int main(int argc, char *argv[])
 	int sec = BT_SECURITY_LOW;
 	uint8_t src_type = BDADDR_LE_PUBLIC;
 	uint16_t mtu = 0;
-	sigset_t mask;
 	bool hr_visible = false;
 	struct server *server;
 
@@ -1250,15 +1250,9 @@ int main(int argc, char *argv[])
 
 	printf("Running GATT server\n");
 
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGINT);
-	sigaddset(&mask, SIGTERM);
-
-	mainloop_set_signal(&mask, signal_cb, NULL, NULL);
-
 	print_prompt();
 
-	mainloop_run();
+	mainloop_run_with_signal(signal_cb, NULL);
 
 	printf("\n\nShutting down...\n");
 

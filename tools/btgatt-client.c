@@ -24,6 +24,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -217,7 +218,7 @@ static struct client *client_create(int fd, uint16_t mtu)
 		return NULL;
 	}
 
-	cli->gatt = bt_gatt_client_new(cli->db, cli->att, mtu);
+	cli->gatt = bt_gatt_client_new(cli->db, cli->att, mtu, 0);
 	if (!cli->gatt) {
 		fprintf(stderr, "Failed to create GATT client\n");
 		gatt_db_unref(cli->db);
@@ -1518,7 +1519,6 @@ int main(int argc, char *argv[])
 	bdaddr_t src_addr, dst_addr;
 	int dev_id = -1;
 	int fd;
-	sigset_t mask;
 	struct client *cli;
 
 	while ((opt = getopt_long(argc, argv, "+hvs:m:t:d:i:",
@@ -1639,15 +1639,9 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGINT);
-	sigaddset(&mask, SIGTERM);
-
-	mainloop_set_signal(&mask, signal_cb, NULL, NULL);
-
 	print_prompt();
 
-	mainloop_run();
+	mainloop_run_with_signal(signal_cb, NULL);
 
 	printf("\n\nShutting down...\n");
 

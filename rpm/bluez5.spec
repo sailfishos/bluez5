@@ -1,9 +1,7 @@
 Name:       bluez5
 
-%define _system_groupadd() getent group %{1} >/dev/null || groupadd -g 1002 %{1}
-
 Summary:    Bluetooth daemon
-Version:    5.47
+Version:    5.54
 Release:    1
 License:    GPLv2+
 URL:        http://www.bluez.org/
@@ -12,7 +10,7 @@ Source1:    obexd-wrapper
 Source2:    obexd.conf
 Source3:    bluez.tracing
 Source4:    obexd.tracing
-Requires:   bluez5-libs = %{version}
+Requires:   %{name}-libs = %{version}-%{release}
 Requires:   dbus >= 0.60
 Requires:   hwdata >= 0.215
 Requires:   bluez5-configs
@@ -20,10 +18,8 @@ Requires:   systemd
 Requires:   oneshot
 # /etc/obexd.conf requires find
 Requires:   findutils
-Requires(pre): /usr/sbin/groupadd
-Requires(preun): systemd
-Requires(post): systemd
-Requires(postun): systemd
+# For bluetooth group
+Requires:   sailfish-setup
 BuildRequires:  pkgconfig(dbus-1)
 BuildRequires:  pkgconfig(libusb)
 BuildRequires:  pkgconfig(udev)
@@ -146,37 +142,34 @@ Will enable tracing for BlueZ 5 OBEX daemon
 autoreconf --force --install
 
 %configure \
-    --enable-option-checking \
-    --enable-library \
-    --enable-sixaxis \
-    --enable-test \
-    --with-systemdsystemunitdir=/lib/systemd/system \
-    --with-systemduserunitdir=/usr/lib/systemd/user \
+    --with-contentfilter=helperapp \
+    --with-phonebook=sailfish \
+    --with-systemdsystemunitdir=%{_unitdir} \
+    --with-systemduserunitdir=%{_userunitdir} \
+    --enable-deprecated \
+    --enable-jolla-blacklist \
     --enable-jolla-dbus-access \
     --enable-jolla-did \
+    --enable-library \
+    --enable-option-checking \
     --enable-sailfish-exclude \
-    --with-phonebook=sailfish \
-    --with-contentfilter=helperapp \
-    --enable-jolla-blacklist \
-    --disable-hostname \
-    --enable-deprecated \
-    --disable-autopair
+    --enable-sixaxis \
+    --enable-test \
+    --disable-autopair \
+    --disable-hostname
 
-make %{?jobs:-j%jobs}
+make %{?_smp_mflags}
 
 %check
-# run unit tests
-#make check
 
 %install
 rm -rf %{buildroot}
 %make_install
 
-
 # bluez systemd integration
-mkdir -p $RPM_BUILD_ROOT/%{_lib}/systemd/system/network.target.wants
-ln -s ../bluetooth.service $RPM_BUILD_ROOT/%{_lib}/systemd/system/network.target.wants/bluetooth.service
-(cd $RPM_BUILD_ROOT/%{_lib}/systemd/system && ln -s bluetooth.service dbus-org.bluez.service)
+mkdir -p $RPM_BUILD_ROOT/%{_unitdir}/network.target.wants
+ln -s ../bluetooth.service $RPM_BUILD_ROOT/%{_unitdir}/network.target.wants/bluetooth.service
+(cd $RPM_BUILD_ROOT/%{_unitdir} && ln -s bluetooth.service dbus-org.bluez.service)
 
 # bluez runtime files
 install -d -m 0755 $RPM_BUILD_ROOT/%{_localstatedir}/lib/bluetooth
@@ -191,7 +184,7 @@ mkdir -p %{buildroot}%{_sysconfdir}/tracing/bluez/
 cp -a %{SOURCE3} %{buildroot}%{_sysconfdir}/tracing/bluez/
 
 # obexd systemd/D-Bus integration
-(cd $RPM_BUILD_ROOT/%{_libdir}/systemd/user && ln -s obex.service dbus-org.bluez.obex.service)
+(cd $RPM_BUILD_ROOT/%{_userunitdir} && ln -s obex.service dbus-org.bluez.obex.service)
 
 # obexd wrapper
 install -m755 -D %{SOURCE1} ${RPM_BUILD_ROOT}/%{_libexecdir}/obexd-wrapper
@@ -199,7 +192,7 @@ install -m644 -D %{SOURCE2} ${RPM_BUILD_ROOT}/%{_sysconfdir}/obexd.conf
 sed -i 's,Exec=.*,Exec=/usr/libexec/obexd-wrapper,' \
     ${RPM_BUILD_ROOT}/%{_datadir}/dbus-1/services/org.bluez.obex.service
 sed -i 's,ExecStart=.*,ExecStart=/usr/libexec/obexd-wrapper,' \
-${RPM_BUILD_ROOT}/%{_libdir}/systemd/user/obex.service
+${RPM_BUILD_ROOT}/%{_userunitdir}/obex.service
 
 # obexd configuration
 mkdir -p ${RPM_BUILD_ROOT}/%{_sysconfdir}/obexd/{plugins,noplugins}
@@ -225,21 +218,11 @@ cp -a %{SOURCE4} %{buildroot}%{_sysconfdir}/tracing/obexd/
 # Rename pkg-config file to differentiate from BlueZ 4.x
 mv %{buildroot}%{_libdir}/pkgconfig/bluez.pc %{buildroot}%{_libdir}/pkgconfig/bluez5.pc
 
-%pre
-%_system_groupadd bluetooth
+# We don't need zsh stuff
+rm -rf %{buildroot}%{_datadir}/zsh
 
-%preun
-if [ "$1" -eq 0 ]; then
-systemctl stop bluetooth.service ||:
-fi
-
-%post
-%{_bindir}/groupadd-user bluetooth
-systemctl daemon-reload ||:
-systemctl reload-or-try-restart bluetooth.service ||:
-
-%postun
-systemctl daemon-reload ||:
+# there is no macro for /lib/udev afaict
+%define udevlibdir /lib/udev
 
 %post libs -p /sbin/ldconfig
 
@@ -250,9 +233,9 @@ systemctl daemon-reload ||:
 %{_libexecdir}/bluetooth/bluetoothd
 %{_libdir}/bluetooth/plugins/sixaxis.so
 %{_datadir}/dbus-1/system-services/org.bluez.service
-/%{_lib}/systemd/system/bluetooth.service
-/%{_lib}/systemd/system/network.target.wants/bluetooth.service
-/%{_lib}/systemd/system/dbus-org.bluez.service
+/%{_unitdir}/bluetooth.service
+/%{_unitdir}/network.target.wants/bluetooth.service
+/%{_unitdir}/dbus-org.bluez.service
 %config %{_sysconfdir}/dbus-1/system.d/bluetooth.conf
 %dir %{_localstatedir}/lib/bluetooth
 
@@ -275,6 +258,7 @@ systemctl daemon-reload ||:
 
 %files libs
 %defattr(-,root,root,-)
+%license COPYING
 %{_libdir}/libbluetooth.so.*
 
 %files libs-devel
@@ -308,8 +292,8 @@ systemctl daemon-reload ||:
 %{_bindir}/rctest
 %{_bindir}/rfcomm
 %{_bindir}/sdptool
-/%{_lib}/udev/hid2hci
-/%{_lib}/udev/rules.d/97-hid2hci.rules
+/%{udevlibdir}/hid2hci
+/%{_udevrulesdir}/97-hid2hci.rules
 
 %files tools-hciattach
 %defattr(-,root,root,-)
@@ -324,8 +308,8 @@ systemctl daemon-reload ||:
 %attr(2755,root,privileged) %{_libexecdir}/bluetooth/obexd
 %{_libexecdir}/obexd-wrapper
 %{_datadir}/dbus-1/services/org.bluez.obex.service
-%{_libdir}/systemd/user/obex.service
-%{_libdir}/systemd/user/dbus-org.bluez.obex.service
+%{_userunitdir}/obex.service
+%{_userunitdir}/dbus-org.bluez.obex.service
 
 %files obexd-tools
 %defattr(-,root,root,-)

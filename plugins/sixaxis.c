@@ -27,6 +27,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stddef.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -364,6 +365,7 @@ static bool setup_device(int fd, const char *sysfs_path,
 
 	btd_device_device_set_name(device, cp->name);
 	btd_device_set_pnpid(device, cp->source, cp->vid, cp->pid, cp->version);
+	btd_device_set_trusted(device, false);
 	btd_device_set_temporary(device, true);
 
 	closure = g_new0(struct authentication_closure, 1);
@@ -381,6 +383,12 @@ static bool setup_device(int fd, const char *sysfs_path,
 	closure->auth_id = btd_request_authorization_cable_configured(
 					adapter_bdaddr, &device_bdaddr,
 					HID_UUID, agent_auth_cb, closure);
+
+	if (closure->auth_id == 0) {
+		error("sixaxis: could not request cable authorization");
+		auth_closure_destroy(closure, true);
+		return false;
+	}
 
 	g_hash_table_insert(pending_auths, closure->sysfs_path, closure);
 

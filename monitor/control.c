@@ -26,8 +26,10 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <errno.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -39,6 +41,7 @@
 #include <sys/stat.h>
 #include <termios.h>
 #include <fcntl.h>
+#include <linux/filter.h>
 
 #include "lib/bluetooth.h"
 #include "lib/hci.h"
@@ -54,10 +57,12 @@
 #include "ellisys.h"
 #include "tty.h"
 #include "control.h"
+#include "jlink.h"
 
 static struct btsnoop *btsnoop_file = NULL;
 static bool hcidump_fallback = false;
 static bool decode_control = true;
+static uint16_t filter_index = HCI_DEV_NONE;
 
 struct control_data {
 	uint16_t channel;
@@ -1028,6 +1033,37 @@ static int open_socket(uint16_t channel)
 	return fd;
 }
 
+static void attach_index_filter(int fd, uint16_t index)
+{
+	struct sock_filter filters[] = {
+		/* Load MGMT index:
+		 * A <- MGMT index
+		 */
+		BPF_STMT(BPF_LD + BPF_B + BPF_ABS,
+					offsetof(struct mgmt_hdr, index)),
+		/* Accept if index is HCI_DEV_NONE:
+		 * A == HCI_DEV_NONE
+		 */
+		BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, HCI_DEV_NONE, 0, 1),
+		/* return */
+		BPF_STMT(BPF_RET|BPF_K, 0x0fffffff), /* pass */
+		/* Accept if index match:
+		 * A == index
+		 */
+		BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, index, 0, 1),
+		/* returns */
+		BPF_STMT(BPF_RET|BPF_K, 0x0fffffff), /* pass */
+		BPF_STMT(BPF_RET|BPF_K, 0), /* reject */
+	};
+	struct sock_fprog fprog = {
+		.len = sizeof(filters) / sizeof(filters[0]),
+		/* casting const away: */
+		.filter = filters,
+	};
+
+	setsockopt(fd, SOL_SOCKET, SO_ATTACH_FILTER, &fprog, sizeof(fprog));
+}
+
 static int open_channel(uint16_t channel)
 {
 	struct control_data *data;
@@ -1044,6 +1080,9 @@ static int open_channel(uint16_t channel)
 		free(data);
 		return -1;
 	}
+
+	if (filter_index != HCI_DEV_NONE)
+		attach_index_filter(data->fd, filter_index);
 
 	mainloop_add_fd(data->fd, EPOLLIN, data_callback, data, free_data);
 
@@ -1262,23 +1301,8 @@ static bool tty_parse_header(uint8_t *hdr, uint8_t len, struct timeval **tv,
 	return true;
 }
 
-static void tty_callback(int fd, uint32_t events, void *user_data)
+static void process_data(struct control_data *data)
 {
-	struct control_data *data = user_data;
-	ssize_t len;
-
-	if (events & (EPOLLERR | EPOLLHUP)) {
-		mainloop_remove_fd(data->fd);
-		return;
-	}
-
-	len = read(data->fd, data->buf + data->offset,
-					sizeof(data->buf) - data->offset);
-	if (len < 0)
-		return;
-
-	data->offset += len;
-
 	while (data->offset >= sizeof(struct tty_hdr)) {
 		struct tty_hdr *hdr = (struct tty_hdr *) data->buf;
 		uint16_t pktlen, opcode, data_len;
@@ -1307,6 +1331,8 @@ static void tty_callback(int fd, uint32_t events, void *user_data)
 
 		btsnoop_write_hci(btsnoop_file, tv, 0, opcode, drops,
 					hdr->ext_hdr + hdr->hdr_len, pktlen);
+		ellisys_inject_hci(tv, 0, opcode, hdr->ext_hdr + hdr->hdr_len,
+					pktlen);
 		packet_monitor(tv, NULL, 0, opcode,
 					hdr->ext_hdr + hdr->hdr_len, pktlen);
 
@@ -1316,6 +1342,26 @@ static void tty_callback(int fd, uint32_t events, void *user_data)
 			memmove(data->buf, data->buf + 2 + data_len,
 								data->offset);
 	}
+}
+
+static void tty_callback(int fd, uint32_t events, void *user_data)
+{
+	struct control_data *data = user_data;
+	ssize_t len;
+
+	if (events & (EPOLLERR | EPOLLHUP)) {
+		mainloop_remove_fd(data->fd);
+		return;
+	}
+
+	len = read(data->fd, data->buf + data->offset,
+					sizeof(data->buf) - data->offset);
+	if (len < 0)
+		return;
+
+	data->offset += len;
+
+	process_data(data);
 }
 
 int control_tty(const char *path, unsigned int speed)
@@ -1367,6 +1413,55 @@ int control_tty(const char *path, unsigned int speed)
 	data->fd = fd;
 
 	mainloop_add_fd(data->fd, EPOLLIN, tty_callback, data, free_data);
+
+	return 0;
+}
+
+static void rtt_callback(int id, void *user_data)
+{
+	struct control_data *data = user_data;
+	ssize_t len;
+
+	do {
+		len = jlink_rtt_read(data->buf + data->offset,
+					sizeof(data->buf) - data->offset);
+		data->offset += len;
+		process_data(data);
+	} while (len > 0);
+
+	if (mainloop_modify_timeout(id, 1) < 0)
+		mainloop_exit_failure();
+}
+
+int control_rtt(char *jlink, char *rtt)
+{
+	struct control_data *data;
+
+	if (jlink_init() < 0) {
+		fprintf(stderr, "Failed to initialize J-Link library\n");
+		return -EIO;
+	}
+
+	if (jlink_connect(jlink) < 0) {
+		fprintf(stderr, "Failed to connect to target device\n");
+		return -ENODEV;
+	}
+
+	if (jlink_start_rtt(rtt) < 0) {
+		fprintf(stderr, "Failed to initialize RTT\n");
+		return -ENODEV;
+	}
+
+	printf("--- RTT opened ---\n");
+
+	data = new0(struct control_data, 1);
+	data->channel = HCI_CHANNEL_MONITOR;
+	data->fd = -1;
+
+	if (mainloop_add_timeout(1, rtt_callback, data, free_data) < 0) {
+		free(data);
+		return -EIO;
+	}
 
 	return 0;
 }
@@ -1467,4 +1562,9 @@ int control_tracing(void)
 void control_disable_decoding(void)
 {
 	decode_control = false;
+}
+
+void control_filter_index(uint16_t index)
+{
+	filter_index = index;
 }

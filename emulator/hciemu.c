@@ -25,6 +25,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -330,6 +331,12 @@ struct hciemu *hciemu_new(enum hciemu_type type)
 		break;
 	case HCIEMU_TYPE_LEGACY:
 		hciemu->btdev_type = BTDEV_TYPE_BREDR20;
+		break;
+	case HCIEMU_TYPE_BREDRLE50:
+		hciemu->btdev_type = BTDEV_TYPE_BREDRLE50;
+		break;
+	case HCIEMU_TYPE_BREDRLE60:
+		hciemu->btdev_type = BTDEV_TYPE_BREDRLE60;
 		break;
 	default:
 		return NULL;

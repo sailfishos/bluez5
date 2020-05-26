@@ -24,5 +24,9 @@ fi
 		--enable-sixaxis \
 		--enable-midi \
 		--enable-mesh \
+		--enable-btpclient \
 		--enable-logger \
+		--enable-pie \
+		--enable-cups \
+		--enable-library \
 		--disable-datafiles $*

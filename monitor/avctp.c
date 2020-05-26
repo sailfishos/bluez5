@@ -26,6 +26,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2319,9 +2320,9 @@ static bool avrcp_get_folder_items(struct avctp_frame *avctp_frame)
 						count, count);
 
 	for (; count > 0; count--) {
-		uint16_t attr;
+		uint32_t attr;
 
-		if (!l2cap_frame_get_be16(frame, &attr))
+		if (!l2cap_frame_get_be32(frame, &attr))
 			return false;
 
 		print_field("%*cAttributeID: 0x%08x (%s)", indent, ' ',

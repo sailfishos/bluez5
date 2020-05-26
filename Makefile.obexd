@@ -1,8 +1,8 @@
 if SYSTEMD
-systemduserunitdir = @SYSTEMD_USERUNITDIR@
+systemduserunitdir = $(SYSTEMD_USERUNITDIR)
 systemduserunit_DATA = obexd/src/obex.service
 
-dbussessionbusdir = @DBUS_SESSIONBUSDIR@
+dbussessionbusdir = $(DBUS_SESSIONBUSDIR)
 dbussessionbus_DATA = obexd/src/org.bluez.obex.service
 endif
 
@@ -61,7 +61,7 @@ obexd_builtin_modules += jolla_blacklist
 obexd_builtin_sources += obexd/plugins/jolla-blacklist.c
 endif
 
-libexec_PROGRAMS += obexd/src/obexd
+pkglibexec_PROGRAMS += obexd/src/obexd
 
 obexd_src_obexd_SOURCES = $(btio_sources) $(gobex_sources) \
 			$(obexd_builtin_sources) \
@@ -89,16 +89,17 @@ obexd_src_obexd_SOURCES = $(btio_sources) $(gobex_sources) \
 			obexd/src/map_ap.h
 obexd_src_obexd_LDADD = lib/libbluetooth-internal.la \
 			gdbus/libgdbus-internal.la \
-			@ICAL_LIBS@ @DBUS_LIBS@ @GLIB_LIBS@ -ldl
+			$(ICAL_LIBS) $(DBUS_LIBS) $(GLIB_LIBS) -ldl
 
-obexd_src_obexd_LDFLAGS = -Wl,--export-dynamic
+obexd_src_obexd_LDFLAGS = $(AM_LDFLAGS) -Wl,--export-dynamic
 
-obexd_src_obexd_CFLAGS = $(AM_CFLAGS) @GLIB_CFLAGS@ @DBUS_CFLAGS@ \
-				@ICAL_CFLAGS@ -DOBEX_PLUGIN_BUILTIN \
+obexd_src_obexd_CPPFLAGS = $(AM_CPPFLAGS) $(GLIB_CFLAGS) $(DBUS_CFLAGS) \
+				$(ICAL_CFLAGS) -DOBEX_PLUGIN_BUILTIN \
 				-DPLUGINDIR=\""$(obex_plugindir)"\" \
-				-fPIC -D_FILE_OFFSET_BITS=64
+				-D_FILE_OFFSET_BITS=64 \
+				-I$(builddir)/lib -I$(builddir)/obexd/src
 
-obexd_src_obexd_CPPFLAGS = -I$(builddir)/lib -I$(builddir)/obexd/src
+obexd_src_obexd_CFLAGS = $(AM_CFLAGS) -fPIC
 
 endif
 
@@ -113,6 +114,7 @@ BUILT_SOURCES += obexd/src/builtin.h
 obexd/src/plugin.$(OBJEXT): obexd/src/builtin.h
 
 obexd/src/builtin.h: obexd/src/genbuiltin $(obexd_builtin_sources)
+	$(AM_V_at)$(MKDIR_P) $(dir $@)
 	$(AM_V_GEN)$(srcdir)/obexd/src/genbuiltin $(obexd_builtin_modules) > $@
 
 CLEANFILES += obexd/src/builtin.h $(builtin_files) obexd/src/obex.service

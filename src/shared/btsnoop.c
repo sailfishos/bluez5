@@ -25,6 +25,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <endian.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -431,6 +432,14 @@ static bool pklg_read_hci(struct btsnoop *btsnoop, struct timeval *tv,
 	case 0x03:
 		*index = 0x0000;
 		*opcode = BTSNOOP_OPCODE_ACL_RX_PKT;
+		break;
+	case 0x08:
+		*index = 0x0000;
+		*opcode = BTSNOOP_OPCODE_SCO_TX_PKT;
+		break;
+	case 0x09:
+		*index = 0x0000;
+		*opcode = BTSNOOP_OPCODE_SCO_RX_PKT;
 		break;
 	case 0x0b:
 		*index = 0x0000;

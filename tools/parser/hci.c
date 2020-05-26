@@ -26,6 +26,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <errno.h>
 #include <ctype.h>
@@ -4106,6 +4107,9 @@ void hci_dump(int level, struct frame *frm)
 	uint8_t type = *(uint8_t *)frm->ptr;
 
 	frm->ptr++; frm->len--;
+
+	if (frm->len == 0)
+		return;
 
 	switch (type) {
 	case HCI_COMMAND_PKT:

@@ -25,6 +25,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
@@ -1074,7 +1075,7 @@ static void hf_call_prefix_handler(struct hfp_hf *hfp, const char *data)
 	struct hfp_context context;
 	enum hfp_result result;
 	enum hfp_error cme_err;
-	char lookup_prefix[18];
+	char lookup_prefix[18] = {};
 	uint8_t pref_len = 0;
 	const char *prefix;
 	int i;

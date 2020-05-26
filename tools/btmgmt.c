@@ -23,6 +23,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdarg.h>
 #include <errno.h>
@@ -1036,7 +1037,6 @@ static void commands_rsp(uint8_t status, uint16_t len, const void *param,
 {
 	const struct mgmt_rp_read_commands *rp = param;
 	uint16_t num_commands, num_events;
-	const uint16_t *opcode;
 	size_t expected_len;
 	int i;
 
@@ -1063,17 +1063,15 @@ static void commands_rsp(uint8_t status, uint16_t len, const void *param,
 		goto done;
 	}
 
-	opcode = rp->opcodes;
-
 	print("%u commands:", num_commands);
 	for (i = 0; i < num_commands; i++) {
-		uint16_t op = get_le16(opcode++);
+		uint16_t op = get_le16(rp->opcodes + i);
 		print("\t%s (0x%04x)", mgmt_opstr(op), op);
 	}
 
 	print("%u events:", num_events);
 	for (i = 0; i < num_events; i++) {
-		uint16_t ev = get_le16(opcode++);
+		uint16_t ev = get_le16(rp->opcodes + num_commands + i);
 		print("\t%s (0x%04x)", mgmt_evstr(ev), ev);
 	}
 
@@ -3629,6 +3627,9 @@ static const char *adv_flags_str[] = {
 				"tx-power",
 				"scan-rsp-appearance",
 				"scan-rsp-local-name",
+				"Secondary-channel-1M",
+				"Secondary-channel-2M",
+				"Secondary-channel-CODED",
 };
 
 static const char *adv_flags2str(uint32_t flags)
@@ -3846,6 +3847,7 @@ static void add_adv_usage(void)
 		"\t -s, --scan-rsp <data>     Scan Response Data bytes\n"
 		"\t -t, --timeout <timeout>   Timeout in seconds\n"
 		"\t -D, --duration <duration> Duration in seconds\n"
+		"\t -P, --phy <phy>           Phy type, Specify 1M/2M/CODED\n"
 		"\t -c, --connectable         \"connectable\" flag\n"
 		"\t -g, --general-discov      \"general-discoverable\" flag\n"
 		"\t -l, --limited-discov      \"limited-discoverable\" flag\n"
@@ -3864,6 +3866,7 @@ static struct option add_adv_options[] = {
 	{ "scan-rsp",		1, 0, 's' },
 	{ "timeout",		1, 0, 't' },
 	{ "duration",		1, 0, 'D' },
+	{ "phy",		1, 0, 'P' },
 	{ "connectable",	0, 0, 'c' },
 	{ "general-discov",	0, 0, 'g' },
 	{ "limited-discov",	0, 0, 'l' },
@@ -3932,7 +3935,7 @@ static void cmd_add_adv(int argc, char **argv)
 	uint32_t flags = 0;
 	uint16_t index;
 
-	while ((opt = getopt_long(argc, argv, "+u:d:s:t:D:cglmphna",
+	while ((opt = getopt_long(argc, argv, "+u:d:s:t:D:P:cglmphna",
 						add_adv_options, NULL)) != -1) {
 		switch (opt) {
 		case 'u':
@@ -4016,6 +4019,16 @@ static void cmd_add_adv(int argc, char **argv)
 			break;
 		case 'a':
 			flags |= MGMT_ADV_FLAG_APPEARANCE;
+			break;
+		case 'P':
+			if (strcasecmp(optarg, "1M") == 0)
+				flags |= MGMT_ADV_FLAG_SEC_1M;
+			else if (strcasecmp(optarg, "2M") == 0)
+				flags |= MGMT_ADV_FLAG_SEC_2M;
+			else if (strcasecmp(optarg, "CODED") == 0)
+				flags |= MGMT_ADV_FLAG_SEC_CODED;
+			else
+				goto done;
 			break;
 		case 'h':
 			success = true;
@@ -4161,6 +4174,144 @@ static void cmd_appearance(int argc, char **argv)
 	if (mgmt_send(mgmt, MGMT_OP_SET_APPEARANCE, index, sizeof(cp), &cp,
 					appearance_rsp, NULL, NULL) == 0) {
 		error("Unable to send appearance cmd");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+}
+
+static const char *phys_str[] = {
+	"BR1M1SLOT",
+	"BR1M3SLOT",
+	"BR1M5SLOT",
+	"EDR2M1SLOT",
+	"EDR2M3SLOT",
+	"EDR2M5SLOT",
+	"EDR3M1SLOT",
+	"EDR3M3SLOT",
+	"EDR3M5SLOT",
+	"LE1MTX",
+	"LE1MRX",
+	"LE2MTX",
+	"LE2MRX",
+	"LECODEDTX",
+	"LECODEDRX",
+};
+
+static const char *phys2str(uint32_t phys)
+{
+	static char str[256];
+	unsigned int i;
+	int off;
+
+	off = 0;
+	str[0] = '\0';
+
+	for (i = 0; i < NELEM(phys_str); i++) {
+		if ((phys & (1 << i)) != 0)
+			off += snprintf(str + off, sizeof(str) - off, "%s ",
+							phys_str[i]);
+	}
+
+	return str;
+}
+
+static bool str2phy(const char *phy_str, uint32_t *phy_val)
+{
+	unsigned int i;
+
+	for (i = 0; i < NELEM(phys_str); i++) {
+		if (strcasecmp(phys_str[i], phy_str) == 0) {
+			*phy_val = (1 << i);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void get_phy_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	const struct mgmt_rp_get_phy_confguration *rp = param;
+	uint32_t supported_phys, selected_phys, configurable_phys;
+
+	if (status != 0) {
+		error("Get PHY Configuration failed with status 0x%02x (%s)",
+						status, mgmt_errstr(status));
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	if (len < sizeof(*rp)) {
+		error("Too small get-phy reply (%u bytes)", len);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	supported_phys = get_le32(&rp->supported_phys);
+	configurable_phys = get_le32(&rp->configurable_phys);
+	selected_phys = get_le32(&rp->selected_phys);
+
+	print("Supported phys: %s", phys2str(supported_phys));
+	print("Configurable phys: %s", phys2str(configurable_phys));
+	print("Selected phys: %s", phys2str(selected_phys));
+
+	bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static void get_phy(void)
+{
+	uint16_t index;
+
+	index = mgmt_index;
+	if (index == MGMT_INDEX_NONE)
+		index = 0;
+
+	if (mgmt_send(mgmt, MGMT_OP_GET_PHY_CONFIGURATION, index, 0, NULL,
+					get_phy_rsp, NULL, NULL) == 0) {
+		error("Unable to send Get PHY cmd");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+}
+
+static void set_phy_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	if (status != 0) {
+		error("Could not set PHY Configuration with status 0x%02x (%s)",
+						status, mgmt_errstr(status));
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	print("PHY Configuration successfully set");
+
+	bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static void cmd_phy(int argc, char **argv)
+{
+	struct mgmt_cp_set_phy_confguration cp;
+	int i;
+	uint32_t phys = 0;
+	uint16_t index;
+
+	if (argc < 2)
+		return get_phy();
+
+	for (i = 1; i < argc; i++) {
+		uint32_t phy_val;
+
+		if (str2phy(argv[i], &phy_val))
+			phys |= phy_val;
+	}
+
+	cp.selected_phys = cpu_to_le32(phys);
+
+	index = mgmt_index;
+	if (index == MGMT_INDEX_NONE)
+		index = 0;
+
+	if (mgmt_send(mgmt, MGMT_OP_SET_PHY_CONFIGURATION, index, sizeof(cp),
+					&cp, set_phy_rsp, NULL, NULL) == 0) {
+		error("Unable to send %s cmd",
+				mgmt_opstr(MGMT_OP_GET_PHY_CONFIGURATION));
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 	}
 }
@@ -4360,6 +4511,12 @@ static const struct bt_shell_menu main_menu = {
 		cmd_clr_adv,		"Clear advertising instances"	},
 	{ "appearance",		"<appearance>",
 		cmd_appearance,		"Set appearance"		},
+	{ "phy",		"[LE1MTX] [LE1MRX] [LE2MTX] [LE2MRX] "
+				"[LECODEDTX] [LECODEDRX] "
+				"[BR1M1SLOT] [BR1M3SLOT] [BR1M5SLOT]"
+				"[EDR2M1SLOT] [EDR2M3SLOT] [EDR2M5SLOT]"
+				"[EDR3M1SLOT] [EDR3M3SLOT] [EDR3M5SLOT]",
+		cmd_phy,		"Get/Set PHY Configuration"	},
 	{} },
 };
 

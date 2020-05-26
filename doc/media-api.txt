@@ -66,7 +66,27 @@ Methods		void RegisterEndpoint(object endpoint, dict properties)
 
 			Unregister sender media player.
 
+		void RegisterApplication(object root, dict options)
 
+			Register endpoints an player objects within root
+			object which must implement ObjectManager.
+
+			The application object path together with the D-Bus
+			system bus connection ID define the identification of
+			the application.
+
+			Possible errors: org.bluez.Error.InvalidArguments
+					 org.bluez.Error.AlreadyExists
+
+		void UnregisterApplication(object application)
+
+			This unregisters the services that has been
+			previously registered. The object path parameter
+			must match the same value that has been used
+			on registration.
+
+			Possible errors: org.bluez.Error.InvalidArguments
+					 org.bluez.Error.DoesNotExist
 Media Control hierarchy
 =======================
 
@@ -500,13 +520,22 @@ Properties	object Player [readonly]
 MediaEndpoint1 hierarchy
 ========================
 
-Service		unique name
+Service		unique name (Server role)
+		org.bluez (Client role)
 Interface	org.bluez.MediaEndpoint1
-Object path	freely definable
+Object path	freely definable (Server role)
+		[variable prefix]/{hci0,hci1,...}/dev_XX_XX_XX_XX_XX_XX/sepX
+		(Client role)
 
 Methods		void SetConfiguration(object transport, dict properties)
 
 			Set configuration for the transport.
+
+			For client role transport must be set with a server
+			endpoint oject which will be configured and the
+			properties must contain the following properties:
+
+				array{byte} Capabilities
 
 		array{byte} SelectConfiguration(array{byte} capabilities)
 
@@ -532,6 +561,24 @@ Methods		void SetConfiguration(object transport, dict properties)
 			endpoint, because when this method gets called it has
 			already been unregistered.
 
+Properties	string UUID [readonly, optional]:
+
+			UUID of the profile which the endpoint is for.
+
+		byte Codec [readonly, optional]:
+
+			Assigned number of codec that the endpoint implements.
+			The values should match the profile specification which
+			is indicated by the UUID.
+
+		array{byte} Capabilities [readonly, optional]:
+
+			Capabilities blob, it is used as it is so the size and
+			byte order must match.
+
+		object Device [readonly, optional]:
+
+			Device object which the endpoint is belongs to.
 
 MediaTransport1 hierarchy
 =========================
@@ -604,3 +651,8 @@ Properties	object Device [readonly]
 			acquired by the sender.
 
 			Possible Values: 0-127
+
+		object Endpoint [readonly, optional, experimental]
+
+			Endpoint object which the transport is associated
+			with.

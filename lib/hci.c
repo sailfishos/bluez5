@@ -27,6 +27,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -658,6 +659,8 @@ static hci_map ver_map[] = {
 	{ "4.1",	0x07 },
 	{ "4.2",	0x08 },
 	{ "5.0",	0x09 },
+	{ "5.1",	0x0a },
+	{ "5.2",	0x0b },
 	{ NULL }
 };
 

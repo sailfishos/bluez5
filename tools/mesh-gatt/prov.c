@@ -41,14 +41,16 @@
 #include "src/shared/shell.h"
 
 #include "gdbus/gdbus.h"
-#include "mesh/node.h"
-#include "mesh/gatt.h"
-#include "mesh/crypto.h"
-#include "mesh/mesh-net.h"
-#include "mesh/util.h"
-#include "mesh/agent.h"
-#include "mesh/prov.h"
-#include "mesh/net.h"
+
+#include "tools/mesh/agent.h"
+
+#include "tools/mesh-gatt/node.h"
+#include "tools/mesh-gatt/gatt.h"
+#include "tools/mesh-gatt/crypto.h"
+#include "tools/mesh-gatt/mesh-net.h"
+#include "tools/mesh-gatt/util.h"
+#include "tools/mesh-gatt/prov.h"
+#include "tools/mesh-gatt/net.h"
 
 /* Provisioning Security Levels */
 #define MESH_PROV_SEC_HIGH	2
@@ -331,18 +333,18 @@ static void prov_calc_ecdh(DBusMessage *message, void *node)
 
 		case 1: /* Static OOB */
 			agent_input_request(HEXADECIMAL,
-					16,
+					16, NULL,
 					prov_out_oob_done, node);
 			break;
 
 		case 2: /* Output OOB */
 			if (action <= 3)
 				agent_input_request(DECIMAL,
-						size,
+						size, NULL,
 						prov_out_oob_done, node);
 			else
 				agent_input_request(ASCII,
-						size,
+						size, NULL,
 						prov_out_oob_done, node);
 			break;
 
@@ -419,7 +421,8 @@ static void prov_start_cmplt(DBusMessage *message, void *node)
 	if (prov == NULL) return;
 
 	if (prov->conf_in.start.pub_key)
-		agent_input_request(HEXADECIMAL, 64, prov_oob_pub_key, node);
+		agent_input_request(HEXADECIMAL, 64, NULL, prov_oob_pub_key,
+									node);
 	else
 		prov_send_pub_key(node);
 }

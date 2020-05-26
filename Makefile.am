@@ -1,5 +1,6 @@
 
 AM_MAKEFLAGS = --no-print-directory
+AM_CPPFLAGS =
 
 lib_LTLIBRARIES =
 
@@ -19,19 +20,19 @@ CLEANFILES =
 
 EXTRA_DIST =
 
-libexecdir = @libexecdir@/bluetooth
+pkglibexecdir = $(libexecdir)/bluetooth
 
-libexec_PROGRAMS =
+pkglibexec_PROGRAMS =
 
-includedir = @includedir@/bluetooth
+pkgincludedir = $(includedir)/bluetooth
 
-include_HEADERS =
+pkginclude_HEADERS =
 
-AM_CFLAGS = $(WARNING_CFLAGS) $(MISC_CFLAGS)
+AM_CFLAGS = $(WARNING_CFLAGS) $(MISC_CFLAGS) $(UDEV_CFLAGS) $(ell_cflags)
 AM_LDFLAGS = $(MISC_LDFLAGS)
 
 if DATAFILES
-dbusdir = @DBUS_CONFDIR@/dbus-1/system.d
+dbusdir = $(DBUS_CONFDIR)/dbus-1/system.d
 dbus_DATA = src/bluetooth.conf
 
 confdir = $(sysconfdir)/bluetooth
@@ -42,10 +43,10 @@ state_DATA =
 endif
 
 if SYSTEMD
-systemdsystemunitdir = @SYSTEMD_SYSTEMUNITDIR@
+systemdsystemunitdir = $(SYSTEMD_SYSTEMUNITDIR)
 systemdsystemunit_DATA = src/bluetooth.service
 
-dbussystembusdir = @DBUS_SYSTEMBUSDIR@
+dbussystembusdir = $(DBUS_SYSTEMBUSDIR)
 dbussystembus_DATA = src/org.bluez.service
 endif
 
@@ -72,15 +73,15 @@ extra_sources = lib/uuid.c
 
 local_headers = $(foreach file,$(lib_headers), lib/bluetooth/$(notdir $(file)))
 
-BUILT_SOURCES = $(local_headers) src/builtin.h
+BUILT_SOURCES = $(local_headers) $(ell_built_sources) src/builtin.h
 
 if LIBRARY
-include_HEADERS += $(lib_headers)
+pkginclude_HEADERS += $(lib_headers)
 
 lib_LTLIBRARIES += lib/libbluetooth.la
 
 lib_libbluetooth_la_SOURCES = $(lib_headers) $(lib_sources)
-lib_libbluetooth_la_LDFLAGS = $(AM_LDFLAGS) -version-info 21:16:18
+lib_libbluetooth_la_LDFLAGS = $(AM_LDFLAGS) -version-info 22:2:19
 lib_libbluetooth_la_DEPENDENCIES = $(local_headers)
 endif
 
@@ -95,7 +96,93 @@ gdbus_libgdbus_internal_la_SOURCES = gdbus/gdbus.h \
 				gdbus/mainloop.c gdbus/watch.c \
 				gdbus/object.c gdbus/client.c gdbus/polkit.c
 
+if EXTERNAL_ELL
+ell_cflags = @ELL_CFLAGS@
+ell_ldadd = @ELL_LIBS@
+ell_dependencies =
+ell_built_sources =
+else
+ell_cflags =
+ell_ldadd = ell/libell-internal.la
+ell_dependencies = $(ell_ldadd)
+ell_built_sources = ell/internal ell/ell.h
+
+noinst_LTLIBRARIES += ell/libell-internal.la
+
+ell_headers = ell/util.h \
+			ell/log.h \
+			ell/queue.h \
+			ell/hashmap.h \
+			ell/random.h \
+			ell/signal.h \
+			ell/timeout.h \
+			ell/cipher.h \
+			ell/checksum.h \
+			ell/io.h \
+			ell/idle.h \
+			ell/main.h \
+			ell/settings.h \
+			ell/strv.h \
+			ell/string.h \
+			ell/utf8.h \
+			ell/dbus.h \
+			ell/dbus-service.h \
+			ell/dbus-client.h \
+			ell/key.h \
+			ell/cert.h \
+			ell/pem.h \
+			ell/base64.h \
+			ell/pkcs5.h \
+			ell/asn1-private.h \
+			ell/pkcs5-private.h \
+			ell/cert-private.h \
+			ell/pem-private.h
+
+ell_sources = ell/private.h ell/missing.h \
+			ell/util.c \
+			ell/log.c \
+			ell/queue.c \
+			ell/hashmap.c \
+			ell/random.c \
+			ell/signal.c \
+			ell/timeout.c \
+			ell/io.c \
+			ell/idle.c \
+			ell/main.c \
+			ell/settings.c \
+			ell/strv.c \
+			ell/string.c \
+			ell/cipher.c \
+			ell/checksum.c \
+			ell/pem.c \
+			ell/cert.c \
+			ell/key.c \
+			ell/pkcs5.c \
+			ell/base64.c \
+			ell/utf8.c \
+			ell/dbus-private.h \
+			ell/dbus.c \
+			ell/dbus-message.c \
+			ell/dbus-util.c \
+			ell/dbus-service.c \
+			ell/dbus-client.c \
+			ell/dbus-name-cache.c \
+			ell/dbus-filter.c \
+			ell/gvariant-private.h \
+			ell/gvariant-util.c \
+			ell/siphash-private.h \
+			ell/siphash.c
+
+ell_libell_internal_la_SOURCES = $(ell_headers) $(ell_sources)
+endif
+
+CLEANFILES += $(ell_built_sources)
+
 noinst_LTLIBRARIES += src/libshared-glib.la src/libshared-mainloop.la
+
+if LIBSHARED_ELL
+noinst_LTLIBRARIES += src/libshared-ell.la
+endif
 
 shared_sources = src/shared/io.h src/shared/timeout.h \
 			src/shared/queue.h src/shared/queue.c \
@@ -119,6 +206,7 @@ shared_sources = src/shared/io.h src/shared/timeout.h \
 			src/shared/gatt-server.h src/shared/gatt-server.c \
 			src/shared/gatt-db.h src/shared/gatt-db.c \
 			src/shared/gap.h src/shared/gap.c \
+			src/shared/log.h src/shared/log.c \
 			src/shared/tty.h
 
 if READLINE
@@ -128,17 +216,23 @@ endif
 src_libshared_glib_la_SOURCES = $(shared_sources) \
 				src/shared/io-glib.c \
 				src/shared/timeout-glib.c \
-				src/shared/mainloop-glib.c
+				src/shared/mainloop-glib.c \
+				src/shared/mainloop-notify.h \
+				src/shared/mainloop-notify.c
 
 src_libshared_mainloop_la_SOURCES = $(shared_sources) \
 				src/shared/io-mainloop.c \
 				src/shared/timeout-mainloop.c \
-				src/shared/mainloop.h src/shared/mainloop.c
+				src/shared/mainloop.h src/shared/mainloop.c \
+				src/shared/mainloop-notify.h \
+				src/shared/mainloop-notify.c
 
-if ELL
+if LIBSHARED_ELL
 src_libshared_ell_la_SOURCES = $(shared_sources) \
-				src/shared/io-ell.c
-noinst_LTLIBRARIES += src/libshared-ell.la
+				src/shared/io-ell.c \
+				src/shared/timeout-ell.c \
+				src/shared/mainloop.h \
+				src/shared/mainloop-ell.c
 endif
 
 attrib_sources = attrib/att.h attrib/att-database.h attrib/att.c \
@@ -157,6 +251,7 @@ gobex_sources = gobex/gobex.h gobex/gobex.c \
 
 builtin_modules =
 builtin_sources =
+builtin_cppflags =
 builtin_nodist =
 builtin_ldadd =
 
@@ -185,14 +280,13 @@ plugins_external_dummy_la_LDFLAGS = $(AM_LDFLAGS) -module -avoid-version \
 plugins_external_dummy_la_CFLAGS = $(AM_CFLAGS) -fvisibility=hidden
 endif
 
-libexec_PROGRAMS += src/bluetoothd
+pkglibexec_PROGRAMS += src/bluetoothd
 
 src_bluetoothd_SOURCES = $(builtin_sources) \
 			$(attrib_sources) $(btio_sources) \
 			src/bluetooth.ver \
 			src/main.c src/log.h src/log.c \
 			src/backtrace.h src/backtrace.c \
-			src/systemd.h src/systemd.c \
 			src/rfkill.c src/hcid.h src/sdpd.h \
 			src/sdpd-server.c src/sdpd-request.c \
 			src/sdpd-service.c src/sdpd-database.c \
@@ -218,7 +312,7 @@ src_bluetoothd_SOURCES = $(builtin_sources) \
 src_bluetoothd_LDADD = lib/libbluetooth-internal.la \
 			gdbus/libgdbus-internal.la \
 			src/libshared-glib.la \
-			@BACKTRACE_LIBS@ @GLIB_LIBS@ @DBUS_LIBS@ -ldl -lrt \
+			$(BACKTRACE_LIBS) $(GLIB_LIBS) $(DBUS_LIBS) -ldl -lrt \
 			$(builtin_ldadd)
 src_bluetoothd_LDFLAGS = $(AM_LDFLAGS) -Wl,--export-dynamic \
 				-Wl,--version-script=$(srcdir)/src/bluetooth.ver
@@ -228,8 +322,9 @@ src_bluetoothd_DEPENDENCIES = lib/libbluetooth-internal.la \
 				src/libshared-glib.la \
 				src/bluetooth.service
 
-src_bluetoothd_CFLAGS = $(AM_CFLAGS) -DBLUETOOTH_PLUGIN_BUILTIN \
-					-DPLUGINDIR=\""$(build_plugindir)"\"
+src_bluetoothd_CPPFLAGS = $(AM_CPPFLAGS) -DBLUETOOTH_PLUGIN_BUILTIN \
+					-DPLUGINDIR=\""$(build_plugindir)"\" \
+					$(BACKTRACE_CFLAGS) $(builtin_cppflags)
 src_bluetoothd_SHORTNAME = bluetoothd
 
 builtin_files = src/builtin.h $(builtin_nodist)
@@ -250,9 +345,10 @@ unit_tests =
 include Makefile.tools
 include Makefile.obexd
 include android/Makefile.am
+include Makefile.mesh
 
 if HID2HCI
-rulesdir = @UDEV_DIR@/rules.d
+rulesdir = $(UDEV_DIR)/rules.d
 
 rules_DATA = tools/97-hid2hci.rules
 
@@ -291,60 +387,58 @@ EXTRA_DIST += doc/btsnoop.txt
 
 EXTRA_DIST += tools/magic.btsnoop
 
-AM_CFLAGS += @DBUS_CFLAGS@ @GLIB_CFLAGS@
-
-AM_CPPFLAGS = -I$(builddir)/lib
+AM_CPPFLAGS += $(DBUS_CFLAGS) $(GLIB_CFLAGS) -I$(builddir)/lib
 
 
 unit_tests += unit/test-eir
 
 unit_test_eir_SOURCES = unit/test-eir.c src/eir.c src/uuid-helper.c
 unit_test_eir_LDADD = src/libshared-glib.la lib/libbluetooth-internal.la \
-								@GLIB_LIBS@
+								$(GLIB_LIBS)
 
 unit_tests += unit/test-uuid
 
 unit_test_uuid_SOURCES = unit/test-uuid.c
 unit_test_uuid_LDADD = src/libshared-glib.la lib/libbluetooth-internal.la \
-								@GLIB_LIBS@
+								$(GLIB_LIBS)
 
 unit_tests += unit/test-textfile
 
 unit_test_textfile_SOURCES = unit/test-textfile.c src/textfile.h src/textfile.c
-unit_test_textfile_LDADD = src/libshared-glib.la @GLIB_LIBS@
+unit_test_textfile_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_tests += unit/test-crc
 
 unit_test_crc_SOURCES = unit/test-crc.c monitor/crc.h monitor/crc.c
-unit_test_crc_LDADD = src/libshared-glib.la @GLIB_LIBS@
+unit_test_crc_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_tests += unit/test-crypto
 
 unit_test_crypto_SOURCES = unit/test-crypto.c
-unit_test_crypto_LDADD = src/libshared-glib.la @GLIB_LIBS@
+unit_test_crypto_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_tests += unit/test-ecc
 
 unit_test_ecc_SOURCES = unit/test-ecc.c
-unit_test_ecc_LDADD = src/libshared-glib.la @GLIB_LIBS@
+unit_test_ecc_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_tests += unit/test-ringbuf unit/test-queue
 
 unit_test_ringbuf_SOURCES = unit/test-ringbuf.c
-unit_test_ringbuf_LDADD = src/libshared-glib.la @GLIB_LIBS@
+unit_test_ringbuf_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_test_queue_SOURCES = unit/test-queue.c
-unit_test_queue_LDADD = src/libshared-glib.la @GLIB_LIBS@
+unit_test_queue_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_tests += unit/test-mgmt
 
 unit_test_mgmt_SOURCES = unit/test-mgmt.c
-unit_test_mgmt_LDADD = src/libshared-glib.la @GLIB_LIBS@
+unit_test_mgmt_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_tests += unit/test-uhid
 
 unit_test_uhid_SOURCES = unit/test-uhid.c
-unit_test_uhid_LDADD = src/libshared-glib.la @GLIB_LIBS@
+unit_test_uhid_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_tests += unit/test-sdp
 
@@ -353,21 +447,21 @@ unit_test_sdp_SOURCES = unit/test-sdp.c \
 				src/log.h src/log.c \
 				src/sdpd-service.c src/sdpd-request.c
 unit_test_sdp_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la @GLIB_LIBS@
+				src/libshared-glib.la $(GLIB_LIBS)
 
 unit_tests += unit/test-avdtp
 
 unit_test_avdtp_SOURCES = unit/test-avdtp.c \
 				src/log.h src/log.c \
 				android/avdtp.c android/avdtp.h
-unit_test_avdtp_LDADD = src/libshared-glib.la @GLIB_LIBS@
+unit_test_avdtp_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_tests += unit/test-avctp
 
 unit_test_avctp_SOURCES = unit/test-avctp.c \
 				src/log.h src/log.c \
 				android/avctp.c android/avctp.h
-unit_test_avctp_LDADD = src/libshared-glib.la @GLIB_LIBS@
+unit_test_avctp_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_tests += unit/test-avrcp
 
@@ -376,53 +470,53 @@ unit_test_avrcp_SOURCES = unit/test-avrcp.c \
 				android/avctp.c android/avctp.h \
 				android/avrcp-lib.c android/avrcp-lib.h
 unit_test_avrcp_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la @GLIB_LIBS@
+				src/libshared-glib.la $(GLIB_LIBS)
 
 unit_tests += unit/test-hfp
 
 unit_test_hfp_SOURCES = unit/test-hfp.c
-unit_test_hfp_LDADD = src/libshared-glib.la @GLIB_LIBS@
+unit_test_hfp_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_tests += unit/test-gdbus-client
 
 unit_test_gdbus_client_SOURCES = unit/test-gdbus-client.c
 unit_test_gdbus_client_LDADD = gdbus/libgdbus-internal.la \
-				src/libshared-glib.la @GLIB_LIBS@ @DBUS_LIBS@
+				src/libshared-glib.la $(GLIB_LIBS) $(DBUS_LIBS)
 
 unit_tests += unit/test-gobex-header unit/test-gobex-packet unit/test-gobex \
 			unit/test-gobex-transfer unit/test-gobex-apparam
 
 unit_test_gobex_SOURCES = $(gobex_sources) unit/util.c unit/util.h \
 						unit/test-gobex.c
-unit_test_gobex_LDADD = @GLIB_LIBS@
+unit_test_gobex_LDADD = $(GLIB_LIBS)
 
 unit_test_gobex_packet_SOURCES = $(gobex_sources) unit/util.c unit/util.h \
 						unit/test-gobex-packet.c
-unit_test_gobex_packet_LDADD = @GLIB_LIBS@
+unit_test_gobex_packet_LDADD = $(GLIB_LIBS)
 
 unit_test_gobex_header_SOURCES = $(gobex_sources) unit/util.c unit/util.h \
 						unit/test-gobex-header.c
-unit_test_gobex_header_LDADD = @GLIB_LIBS@
+unit_test_gobex_header_LDADD = $(GLIB_LIBS)
 
 unit_test_gobex_transfer_SOURCES = $(gobex_sources) unit/util.c unit/util.h \
 						unit/test-gobex-transfer.c
-unit_test_gobex_transfer_LDADD = @GLIB_LIBS@
+unit_test_gobex_transfer_LDADD = $(GLIB_LIBS)
 
 unit_test_gobex_apparam_SOURCES = $(gobex_sources) unit/util.c unit/util.h \
 						unit/test-gobex-apparam.c
-unit_test_gobex_apparam_LDADD = @GLIB_LIBS@
+unit_test_gobex_apparam_LDADD = $(GLIB_LIBS)
 
 unit_tests += unit/test-lib
 
 unit_test_lib_SOURCES = unit/test-lib.c
 unit_test_lib_LDADD = src/libshared-glib.la \
-				lib/libbluetooth-internal.la @GLIB_LIBS@
+				lib/libbluetooth-internal.la $(GLIB_LIBS)
 
 unit_tests += unit/test-gatt
 
 unit_test_gatt_SOURCES = unit/test-gatt.c
 unit_test_gatt_LDADD = src/libshared-glib.la \
-				lib/libbluetooth-internal.la @GLIB_LIBS@
+				lib/libbluetooth-internal.la $(GLIB_LIBS)
 
 unit_tests += unit/test-hog
 
@@ -437,7 +531,7 @@ unit_test_hog_SOURCES = unit/test-hog.c \
 			attrib/gatt.h attrib/gatt.c \
 			attrib/gattrib.h attrib/gattrib.c
 unit_test_hog_LDADD = src/libshared-glib.la \
-				lib/libbluetooth-internal.la @GLIB_LIBS@
+				lib/libbluetooth-internal.la $(GLIB_LIBS)
 
 unit_tests += unit/test-gattrib
 
@@ -445,7 +539,7 @@ unit_test_gattrib_SOURCES = unit/test-gattrib.c attrib/gattrib.c \
 					$(btio_sources) src/log.h src/log.c
 unit_test_gattrib_LDADD = lib/libbluetooth-internal.la \
 			src/libshared-glib.la \
-			@GLIB_LIBS@ @DBUS_LIBS@ -ldl -lrt
+			$(GLIB_LIBS) $(DBUS_LIBS) -ldl -lrt
 
 unit_tests += unit/test-jolla-blacklist
 
@@ -455,12 +549,20 @@ unit_test_jolla_blacklist_LDADD = @GLIB_LIBS@
 
 if MIDI
 unit_tests += unit/test-midi
-unit_test_midi_CFLAGS = $(AM_CFLAGS) @ALSA_CFLAGS@ -DMIDI_TEST
+unit_test_midi_CPPFLAGS = $(AM_CPPFLAGS) $(ALSA_CFLAGS) -DMIDI_TEST
 unit_test_midi_SOURCES = unit/test-midi.c \
 			profiles/midi/libmidi.h \
 			profiles/midi/libmidi.c
 unit_test_midi_LDADD = src/libshared-glib.la \
-			@GLIB_LIBS@ @ALSA_LIBS@
+			$(GLIB_LIBS) $(ALSA_LIBS)
+endif
+
+if MESH
+unit_tests += unit/test-mesh-crypto
+unit_test_mesh_crypto_CPPFLAGS = $(ell_cflags)
+unit_test_mesh_crypto_SOURCES = unit/test-mesh-crypto.c \
+				mesh/crypto.h ell/internal ell/ell.h
+unit_test_mesh_crypto_LDADD = $(ell_ldadd)
 endif
 
 if MAINTAINER_MODE
@@ -499,6 +601,8 @@ DISTCHECK_CONFIGURE_FLAGS = --disable-datafiles --enable-library \
 						--enable-midi \
 						--enable-manpages \
 						--enable-android \
+						--enable-mesh \
+						--enable-btpclient \
 						--disable-systemd \
 						--disable-udev
 
@@ -509,7 +613,7 @@ MAINTAINERCLEANFILES = Makefile.in \
 	ltmain.sh depcomp compile missing install-sh mkinstalldirs test-driver
 
 SED_PROCESS = $(AM_V_GEN)$(MKDIR_P) $(dir $@) && \
-		$(SED) -e 's,@libexecdir\@,$(libexecdir),g' \
+		$(SED) -e 's,@pkglibexecdir\@,$(pkglibexecdir),g' \
 		< $< > $@
 
 %.service: %.service.in Makefile
@@ -522,6 +626,7 @@ src/builtin.h: src/genbuiltin $(builtin_sources)
 	$(AM_V_GEN)$(srcdir)/src/genbuiltin $(builtin_modules) > $@
 
 tools/%.rules:
+	$(AM_V_at)$(MKDIR_P) tools
 	$(AM_V_GEN)cp $(srcdir)/$(subst 97-,,$@) $@
 
 $(lib_libbluetooth_la_OBJECTS): $(local_headers)
@@ -529,6 +634,23 @@ $(lib_libbluetooth_la_OBJECTS): $(local_headers)
 lib/bluetooth/%.h: lib/%.h
 	$(AM_V_at)$(MKDIR_P) lib/bluetooth
 	$(AM_V_GEN)$(LN_S) -f $(abspath $<) $@
+
+ell/internal: Makefile
+	$(AM_V_at)$(MKDIR_P) ell
+	$(AM_V_GEN)for f in $(ell_headers) $(ell_sources) ; do \
+		if [ ! -f $$f ] ; then \
+			$(LN_S) -t ell -f $(abs_srcdir)/../ell/$$f ; \
+		fi \
+	done > $@
+
+ell/ell.h: Makefile
+	$(AM_V_at)echo -n > $@
+	$(AM_V_GEN)for f in $(ell_headers) ; do \
+		echo "#include <$$f>" >> $@ ; \
+	done
+
+maintainer-clean-local:
+	-rm -rf ell
 
 if COVERAGE
 clean-coverage:

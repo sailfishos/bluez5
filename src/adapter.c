@@ -26,6 +26,7 @@
 #include <config.h>
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <inttypes.h>
 #include <errno.h>
@@ -98,9 +99,26 @@
 #define DISTANCE_VAL_INVALID	0x7FFF
 #define PATHLOSS_MAX		137
 
+/*
+ * These are known security keys that have been compromised.
+ * If this grows or there are needs to be platform specific, it is
+ * conceivable that these could be read from a config file.
+ */
+static const struct mgmt_blocked_key_info blocked_keys[] = {
+	/* Google Titan Security Keys */
+	{ HCI_BLOCKED_KEY_TYPE_LTK,
+		{0xbf, 0x01, 0xfb, 0x9d, 0x4e, 0xf3, 0xbc, 0x36,
+		 0xd8, 0x74, 0xf5, 0x39, 0x41, 0x38, 0x68, 0x4c}},
+	{ HCI_BLOCKED_KEY_TYPE_IRK,
+		{0xa5, 0x99, 0xba, 0xe4, 0xe1, 0x7c, 0xa6, 0x18,
+		 0x22, 0x8e, 0x07, 0x56, 0xb4, 0xe8, 0x5f, 0x01}},
+};
+
 static DBusConnection *dbus_conn = NULL;
 
 static bool kernel_conn_control = false;
+
+static bool kernel_blocked_keys_supported = false;
 
 static GList *adapter_list = NULL;
 static unsigned int adapter_remaining = 0;
@@ -123,6 +141,7 @@ struct link_key_info {
 	unsigned char key[16];
 	uint8_t type;
 	uint8_t pin_len;
+	bool is_blocked;
 };
 
 struct smp_ltk_info {
@@ -134,12 +153,14 @@ struct smp_ltk_info {
 	uint16_t ediv;
 	uint64_t rand;
 	uint8_t val[16];
+	bool is_blocked;
 };
 
 struct irk_info {
 	bdaddr_t bdaddr;
 	uint8_t bdaddr_type;
 	uint8_t val[16];
+	bool is_blocked;
 };
 
 struct conn_param {
@@ -153,10 +174,12 @@ struct conn_param {
 
 struct discovery_filter {
 	uint8_t type;
+	char *pattern;
 	uint16_t pathloss;
 	int16_t rssi;
 	GSList *uuids;
 	bool duplicate;
+	bool discoverable;
 };
 
 struct watch_client {
@@ -196,6 +219,7 @@ struct btd_adapter {
 	char *name;			/* controller device name */
 	char *short_name;		/* controller short name */
 	uint32_t supported_settings;	/* controller supported settings */
+	uint32_t pending_settings;	/* pending controller settings */
 	uint32_t current_settings;	/* current controller settings */
 
 	char *path;			/* adapter object path */
@@ -218,6 +242,7 @@ struct btd_adapter {
 	uint8_t discovery_type;		/* current active discovery type */
 	uint8_t discovery_enable;	/* discovery enabled/disabled */
 	bool discovery_suspended;	/* discovery has been suspended */
+	bool discovery_discoverable;	/* discoverable while discovering */
 	GSList *discovery_list;		/* list of discovery clients */
 	GSList *set_filter_list;	/* list of clients that specified
 					 * filter, but don't scan yet
@@ -509,8 +534,10 @@ static void settings_changed(struct btd_adapter *adapter, uint32_t settings)
 	changed_mask = adapter->current_settings ^ settings;
 
 	adapter->current_settings = settings;
+	adapter->pending_settings &= ~changed_mask;
 
 	DBG("Changed settings: 0x%08x", changed_mask);
+	DBG("Pending settings: 0x%08x", adapter->pending_settings);
 
 	if (changed_mask & MGMT_SETTING_POWERED) {
 	        g_dbus_emit_property_changed(dbus_conn, adapter->path,
@@ -596,9 +623,30 @@ static bool set_mode(struct btd_adapter *adapter, uint16_t opcode,
 							uint8_t mode)
 {
 	struct mgmt_mode cp;
+	uint32_t setting = 0;
 
 	memset(&cp, 0, sizeof(cp));
 	cp.val = mode;
+
+	switch (mode) {
+	case MGMT_OP_SET_POWERED:
+		setting = MGMT_SETTING_POWERED;
+		break;
+	case MGMT_OP_SET_CONNECTABLE:
+		setting = MGMT_SETTING_CONNECTABLE;
+		break;
+	case MGMT_OP_SET_FAST_CONNECTABLE:
+		setting = MGMT_SETTING_FAST_CONNECTABLE;
+		break;
+	case MGMT_OP_SET_DISCOVERABLE:
+		setting = MGMT_SETTING_DISCOVERABLE;
+		break;
+	case MGMT_OP_SET_BONDABLE:
+		setting = MGMT_SETTING_DISCOVERABLE;
+		break;
+	}
+
+	adapter->pending_settings |= setting;
 
 	DBG("sending set mode command for index %u", adapter->dev_id);
 
@@ -1575,10 +1623,12 @@ static gboolean start_discovery_timeout(gpointer user_data)
 	sd_cp = adapter->current_discovery_filter;
 
 	DBG("sending MGMT_OP_START_SERVICE_DISCOVERY %d, %d, %d",
-				sd_cp->rssi, sd_cp->type, sd_cp->uuid_count);
+				sd_cp->rssi, sd_cp->type,
+				btohs(sd_cp->uuid_count));
 
 	mgmt_send(adapter->mgmt, MGMT_OP_START_SERVICE_DISCOVERY,
-		  adapter->dev_id, sizeof(*sd_cp) + sd_cp->uuid_count * 16,
+		  adapter->dev_id, sizeof(*sd_cp) +
+		  btohs(sd_cp->uuid_count) * 16,
 		  sd_cp, start_discovery_complete, adapter, NULL);
 
 	return FALSE;
@@ -1818,7 +1868,21 @@ static void discovery_free(void *user_data)
 	g_free(client);
 }
 
-static void discovery_remove(struct watch_client *client)
+static bool set_discovery_discoverable(struct btd_adapter *adapter, bool enable)
+{
+	if (adapter->discovery_discoverable == enable)
+		return true;
+
+	/* Reset discoverable filter if already set */
+	if (enable && (adapter->current_settings & MGMT_OP_SET_DISCOVERABLE))
+		return true;
+
+	adapter->discovery_discoverable = enable;
+
+	return set_discoverable(adapter, enable, 0);
+}
+
+static void discovery_remove(struct watch_client *client, bool exit)
 {
 	struct btd_adapter *adapter = client->adapter;
 
@@ -1830,7 +1894,11 @@ static void discovery_remove(struct watch_client *client)
 	adapter->discovery_list = g_slist_remove(adapter->discovery_list,
 								client);
 
-	discovery_free(client);
+	if (!exit && client->discovery_filter)
+		adapter->set_filter_list = g_slist_prepend(
+					adapter->set_filter_list, client);
+	else
+		discovery_free(client);
 
 	/*
 	 * If there are other client discoveries in progress, then leave
@@ -1859,8 +1927,11 @@ static void stop_discovery_complete(uint8_t status, uint16_t length,
 		goto done;
 	}
 
-	if (client->msg)
+	if (client->msg) {
 		g_dbus_send_reply(dbus_conn, client->msg, DBUS_TYPE_INVALID);
+		dbus_message_unref(client->msg);
+		client->msg = NULL;
+	}
 
 	adapter->discovery_type = 0x00;
 	adapter->discovery_enable = 0x00;
@@ -1873,7 +1944,7 @@ static void stop_discovery_complete(uint8_t status, uint16_t length,
 	trigger_passive_scanning(adapter);
 
 done:
-	discovery_remove(client);
+	discovery_remove(client, false);
 }
 
 static int compare_sender(gconstpointer a, gconstpointer b)
@@ -2028,7 +2099,7 @@ static int discovery_filter_to_mgmt_cp(struct btd_adapter *adapter,
 
 	cp->type = discovery_type;
 	cp->rssi = rssi;
-	cp->uuid_count = uuid_count;
+	cp->uuid_count = htobs(uuid_count);
 	populate_mgmt_filter_uuids(cp->uuids, uuids);
 
 	g_slist_free(uuids);
@@ -2066,6 +2137,8 @@ static bool filters_equal(struct mgmt_cp_start_service_discovery *a,
 static int update_discovery_filter(struct btd_adapter *adapter)
 {
 	struct mgmt_cp_start_service_discovery *sd_cp;
+	GSList *l;
+
 
 	DBG("");
 
@@ -2074,6 +2147,18 @@ static int update_discovery_filter(struct btd_adapter *adapter)
 				"discovery_filter_to_mgmt_cp returned error");
 		return -ENOMEM;
 	}
+
+	for (l = adapter->discovery_list; l; l = g_slist_next(l)) {
+		struct watch_client *client = l->data;
+
+		if (!client->discovery_filter)
+			continue;
+
+		if (client->discovery_filter->discoverable)
+			break;
+	}
+
+	set_discovery_discoverable(adapter, l ? true : false);
 
 	/*
 	 * If filters are equal, then don't update scan, except for when
@@ -2094,24 +2179,27 @@ static int update_discovery_filter(struct btd_adapter *adapter)
 	return -EINPROGRESS;
 }
 
-static int discovery_stop(struct watch_client *client)
+static int discovery_stop(struct watch_client *client, bool exit)
 {
 	struct btd_adapter *adapter = client->adapter;
 	struct mgmt_cp_stop_discovery cp;
 
 	/* Check if there are more client discovering */
 	if (g_slist_next(adapter->discovery_list)) {
-		discovery_remove(client);
+		discovery_remove(client, exit);
 		update_discovery_filter(adapter);
 		return 0;
 	}
+
+	if (adapter->discovery_discoverable)
+		set_discovery_discoverable(adapter, false);
 
 	/*
 	 * In the idle phase of a discovery, there is no need to stop it
 	 * and so it is enough to send out the signal and just return.
 	 */
 	if (adapter->discovery_enable == 0x00) {
-		discovery_remove(client);
+		discovery_remove(client, exit);
 		adapter->discovering = false;
 		g_dbus_emit_property_changed(dbus_conn, adapter->path,
 					ADAPTER_INTERFACE, "Discovering");
@@ -2136,7 +2224,7 @@ static void discovery_disconnect(DBusConnection *conn, void *user_data)
 
 	DBG("owner %s", client->owner);
 
-	discovery_stop(client);
+	discovery_stop(client, true);
 }
 
 /*
@@ -2200,6 +2288,7 @@ static DBusMessage *start_discovery(DBusConnection *conn,
 					     adapter->set_filter_list, client);
 		adapter->discovery_list = g_slist_prepend(
 					      adapter->discovery_list, client);
+
 		goto done;
 	}
 
@@ -2324,6 +2413,33 @@ static bool parse_duplicate_data(DBusMessageIter *value,
 	return true;
 }
 
+static bool parse_discoverable(DBusMessageIter *value,
+					struct discovery_filter *filter)
+{
+	if (dbus_message_iter_get_arg_type(value) != DBUS_TYPE_BOOLEAN)
+		return false;
+
+	dbus_message_iter_get_basic(value, &filter->discoverable);
+
+	return true;
+}
+
+static bool parse_pattern(DBusMessageIter *value,
+					struct discovery_filter *filter)
+{
+	const char *pattern;
+
+	if (dbus_message_iter_get_arg_type(value) != DBUS_TYPE_STRING)
+		return false;
+
+	dbus_message_iter_get_basic(value, &pattern);
+
+	free(filter->pattern);
+	filter->pattern = strdup(pattern);
+
+	return true;
+}
+
 struct filter_parser {
 	const char *name;
 	bool (*func)(DBusMessageIter *iter, struct discovery_filter *filter);
@@ -2333,6 +2449,8 @@ struct filter_parser {
 	{ "Pathloss", parse_pathloss },
 	{ "Transport", parse_transport },
 	{ "DuplicateData", parse_duplicate_data },
+	{ "Discoverable", parse_discoverable },
+	{ "Pattern", parse_pattern },
 	{ }
 };
 
@@ -2372,6 +2490,8 @@ static bool parse_discovery_filter_dict(struct btd_adapter *adapter,
 	(*filter)->rssi = DISTANCE_VAL_INVALID;
 	(*filter)->type = get_scan_type(adapter);
 	(*filter)->duplicate = false;
+	(*filter)->discoverable = false;
+	(*filter)->pattern = NULL;
 
 	dbus_message_iter_init(msg, &iter);
 	if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_ARRAY ||
@@ -2417,8 +2537,11 @@ static bool parse_discovery_filter_dict(struct btd_adapter *adapter,
 		goto invalid_args;
 
 	DBG("filtered discovery params: transport: %d rssi: %d pathloss: %d "
-		" duplicate data: %s ", (*filter)->type, (*filter)->rssi,
-		(*filter)->pathloss, (*filter)->duplicate ? "true" : "false");
+		" duplicate data: %s discoverable %s pattern %s",
+		(*filter)->type, (*filter)->rssi, (*filter)->pathloss,
+		(*filter)->duplicate ? "true" : "false",
+		(*filter)->discoverable ? "true" : "false",
+		(*filter)->pattern);
 
 	return true;
 
@@ -2510,7 +2633,7 @@ static DBusMessage *stop_discovery(DBusConnection *conn,
 	if (client->msg)
 		return btd_error_busy(msg);
 
-	err = discovery_stop(client);
+	err = discovery_stop(client, false);
 	switch (err) {
 	case 0:
 		return dbus_message_new_method_return(msg);
@@ -2739,12 +2862,14 @@ static void property_set_mode(struct btd_adapter *adapter, uint32_t setting,
 	else
 		current_enable = FALSE;
 
-	if (enable == current_enable) {
+	if (enable == current_enable || adapter->pending_settings & setting) {
 		g_dbus_pending_property_success(id);
 		return;
 	}
 
 	mode = (enable == TRUE) ? 0x01 : 0x00;
+
+	adapter->pending_settings |= setting;
 
 	switch (setting) {
 	case MGMT_SETTING_POWERED:
@@ -2798,7 +2923,7 @@ static void property_set_mode(struct btd_adapter *adapter, uint32_t setting,
 	data->id = id;
 
 	if (mgmt_send(adapter->mgmt, opcode, adapter->dev_id, len, param,
-				property_set_mode_complete, data, g_free) > 0)
+			property_set_mode_complete, data, g_free) > 0)
 		return;
 
 	g_free(data);
@@ -2854,6 +2979,9 @@ static void property_set_discoverable(const GDBusPropertyTable *property,
 		return;
 	}
 
+	/* Reset discovery_discoverable as Discoverable takes precedence */
+	adapter->discovery_discoverable = false;
+
 	property_set_mode(adapter, MGMT_SETTING_DISCOVERABLE, iter, id);
 }
 
@@ -2875,6 +3003,7 @@ static void property_set_discoverable_timeout(
 				GDBusPendingPropertySet id, void *user_data)
 {
 	struct btd_adapter *adapter = user_data;
+	bool enabled;
 	dbus_uint32_t value;
 
 	dbus_message_iter_get_basic(iter, &value);
@@ -2888,8 +3017,19 @@ static void property_set_discoverable_timeout(
 	g_dbus_emit_property_changed(dbus_conn, adapter->path,
 				ADAPTER_INTERFACE, "DiscoverableTimeout");
 
+	if (adapter->pending_settings & MGMT_SETTING_DISCOVERABLE) {
+		if (adapter->current_settings & MGMT_SETTING_DISCOVERABLE)
+			enabled = false;
+		else
+			enabled = true;
+	} else {
+		if (adapter->current_settings & MGMT_SETTING_DISCOVERABLE)
+			enabled = true;
+		else
+			enabled = false;
+	}
 
-	if (adapter->current_settings & MGMT_SETTING_DISCOVERABLE)
+	if (enabled)
 		set_discoverable(adapter, 0x01, adapter->discoverable_timeout);
 }
 
@@ -3340,6 +3480,20 @@ static int str2buf(const char *str, uint8_t *buf, size_t blen)
 	return 0;
 }
 
+static bool is_blocked_key(uint8_t key_type, uint8_t *key_value)
+{
+	uint32_t i = 0;
+
+	for (i = 0; i < ARRAY_SIZE(blocked_keys); ++i) {
+		if (key_type == blocked_keys[i].type &&
+				!memcmp(blocked_keys[i].val, key_value,
+						sizeof(blocked_keys[i].val)))
+			return true;
+	}
+
+	return false;
+}
+
 static struct link_key_info *get_key_info(GKeyFile *key_file, const char *peer)
 {
 	struct link_key_info *info = NULL;
@@ -3361,6 +3515,9 @@ static struct link_key_info *get_key_info(GKeyFile *key_file, const char *peer)
 	info->type = g_key_file_get_integer(key_file, "LinkKey", "Type", NULL);
 	info->pin_len = g_key_file_get_integer(key_file, "LinkKey", "PINLength",
 						NULL);
+
+	info->is_blocked = is_blocked_key(HCI_BLOCKED_KEY_TYPE_LINKKEY,
+								info->key);
 
 failed:
 	g_free(str);
@@ -3435,6 +3592,9 @@ static struct smp_ltk_info *get_ltk(GKeyFile *key_file, const char *peer,
 	else
 		ltk->master = master;
 
+	ltk->is_blocked = is_blocked_key(HCI_BLOCKED_KEY_TYPE_LTK,
+								ltk->val);
+
 failed:
 	g_free(key);
 	g_free(rand);
@@ -3484,6 +3644,9 @@ static struct irk_info *get_irk_info(GKeyFile *key_file, const char *peer,
 		str2buf(&str[2], irk->val, sizeof(irk->val));
 	else
 		str2buf(&str[0], irk->val, sizeof(irk->val));
+
+	irk->is_blocked = is_blocked_key(HCI_BLOCKED_KEY_TYPE_LINKKEY,
+								irk->val);
 
 failed:
 	g_free(str);
@@ -4043,21 +4206,55 @@ static void load_devices(struct btd_adapter *adapter)
 		g_key_file_load_from_file(key_file, filename, 0, NULL);
 
 		key_info = get_key_info(key_file, entry->d_name);
-		if (key_info)
-			keys = g_slist_append(keys, key_info);
 
 		bdaddr_type = get_le_addr_type(key_file);
 
 		ltk_info = get_ltk_info(key_file, entry->d_name, bdaddr_type);
-		if (ltk_info)
-			ltks = g_slist_append(ltks, ltk_info);
 
 		slave_ltk_info = get_slave_ltk_info(key_file, entry->d_name,
 								bdaddr_type);
+
+		irk_info = get_irk_info(key_file, entry->d_name, bdaddr_type);
+
+		// If any key for the device is blocked, we discard all.
+		if ((key_info && key_info->is_blocked) ||
+				(ltk_info && ltk_info->is_blocked) ||
+				(slave_ltk_info &&
+					slave_ltk_info->is_blocked) ||
+				(irk_info && irk_info->is_blocked)) {
+
+			if (key_info) {
+				g_free(key_info);
+				key_info = NULL;
+			}
+
+			if (ltk_info) {
+				g_free(ltk_info);
+				ltk_info = NULL;
+			}
+
+			if (slave_ltk_info) {
+				g_free(slave_ltk_info);
+				slave_ltk_info = NULL;
+			}
+
+			if (irk_info) {
+				g_free(irk_info);
+				irk_info = NULL;
+			}
+
+			goto free;
+		}
+
+		if (key_info)
+			keys = g_slist_append(keys, key_info);
+
+		if (ltk_info)
+			ltks = g_slist_append(ltks, ltk_info);
+
 		if (slave_ltk_info)
 			ltks = g_slist_append(ltks, slave_ltk_info);
 
-		irk_info = get_irk_info(key_file, entry->d_name, bdaddr_type);
 		if (irk_info)
 			irks = g_slist_append(irks, irk_info);
 
@@ -5970,6 +6167,52 @@ static void filter_duplicate_data(void *data, void *user_data)
 	*duplicate = client->discovery_filter->duplicate;
 }
 
+static bool device_is_discoverable(struct btd_adapter *adapter,
+					struct eir_data *eir, const char *addr,
+					uint8_t bdaddr_type)
+{
+	GSList *l;
+	bool discoverable;
+
+	if (bdaddr_type == BDADDR_BREDR || adapter->filtered_discovery)
+		discoverable = true;
+	else
+		discoverable = eir->flags & (EIR_LIM_DISC | EIR_GEN_DISC);
+
+	/*
+	 * Mark as not discoverable if no client has requested discovery and
+	 * report has not set any discoverable flags.
+	 */
+	if (!adapter->discovery_list && !discoverable)
+		return false;
+
+	/* Do a prefix match for both address and name if pattern is set */
+	for (l = adapter->discovery_list; l; l = g_slist_next(l)) {
+		struct watch_client *client = l->data;
+		struct discovery_filter *filter = client->discovery_filter;
+		size_t pattern_len;
+
+		if (!filter || !filter->pattern)
+			continue;
+
+		/* Reset discoverable if a client has a pattern filter */
+		discoverable = false;
+
+		pattern_len = strlen(filter->pattern);
+		if (!pattern_len)
+			return true;
+
+		if (!strncmp(filter->pattern, addr, pattern_len))
+			return true;
+
+		if (eir->name && !strncmp(filter->pattern, eir->name,
+							pattern_len))
+			return true;
+	}
+
+	return discoverable;
+}
+
 static void update_found_devices(struct btd_adapter *adapter,
 					const bdaddr_t *bdaddr,
 					uint8_t bdaddr_type, int8_t rssi,
@@ -5986,21 +6229,14 @@ static void update_found_devices(struct btd_adapter *adapter,
 	memset(&eir_data, 0, sizeof(eir_data));
 	eir_parse(&eir_data, data, data_len);
 
-	if (bdaddr_type == BDADDR_BREDR || adapter->filtered_discovery)
-		discoverable = true;
-	else
-		discoverable = eir_data.flags & (EIR_LIM_DISC | EIR_GEN_DISC);
-
 	ba2str(bdaddr, addr);
+
+	discoverable = device_is_discoverable(adapter, &eir_data, addr,
+							bdaddr_type);
 
 	dev = btd_adapter_find_device(adapter, bdaddr, bdaddr_type);
 	if (!dev) {
-		/*
-		 * If no client has requested discovery or the device is
-		 * not marked as discoverable, then do not create new
-		 * device objects.
-		 */
-		if (!adapter->discovery_list || !discoverable) {
+		if (!discoverable) {
 			eir_data_free(&eir_data);
 			return;
 		}
@@ -6043,8 +6279,9 @@ static void update_found_devices(struct btd_adapter *adapter,
 		return;
 	}
 
-	if (adapter->filtered_discovery &&
-	    !is_filter_match(adapter->discovery_list, &eir_data, rssi)) {
+	/* Don't continue if not discoverable or if filter don't match */
+	if (!discoverable || (adapter->filtered_discovery &&
+	    !is_filter_match(adapter->discovery_list, &eir_data, rssi))) {
 		eir_data_free(&eir_data);
 		return;
 	}
@@ -6357,7 +6594,6 @@ static gboolean process_auth_queue(gpointer user_data)
 	while (!g_queue_is_empty(adapter->auths)) {
 		struct service_auth *auth = adapter->auths->head->data;
 		struct btd_device *device = auth->device;
-		const char *dev_path;
 
 		/* Wait services to be resolved before asking authorization */
 		if (auth->svc_id > 0)
@@ -6380,9 +6616,7 @@ static gboolean process_auth_queue(gpointer user_data)
 			goto next;
 		}
 
-		dev_path = device_get_path(device);
-
-		if (agent_authorize_service(auth->agent, dev_path, auth->uuid,
+		if (agent_authorize_service(auth->agent, device, auth->uuid,
 					agent_auth_cb, adapter, NULL) < 0) {
 			auth->cb(&err, auth->user_data);
 			goto next;
@@ -7769,6 +8003,19 @@ int adapter_set_io_capability(struct btd_adapter *adapter, uint8_t io_cap)
 {
 	struct mgmt_cp_set_io_capability cp;
 
+	if (!main_opts.pairable) {
+		if (io_cap == IO_CAPABILITY_INVALID) {
+			if (adapter->current_settings & MGMT_SETTING_BONDABLE)
+				set_mode(adapter, MGMT_OP_SET_BONDABLE, 0x00);
+
+			return 0;
+		}
+
+		if (!(adapter->current_settings & MGMT_SETTING_BONDABLE))
+			set_mode(adapter, MGMT_OP_SET_BONDABLE, 0x01);
+	} else if (io_cap == IO_CAPABILITY_INVALID)
+		io_cap = IO_CAPABILITY_NOINPUTNOOUTPUT;
+
 	memset(&cp, 0, sizeof(cp));
 	cp.io_capability = io_cap;
 
@@ -8471,6 +8718,42 @@ static bool set_static_addr(struct btd_adapter *adapter)
 	return false;
 }
 
+static void set_blocked_keys_complete(uint8_t status, uint16_t length,
+					const void *param, void *user_data)
+{
+	struct btd_adapter *adapter = user_data;
+
+	if (status != MGMT_STATUS_SUCCESS) {
+		btd_error(adapter->dev_id,
+				"Failed to set blocked keys: %s (0x%02x)",
+				mgmt_errstr(status), status);
+		return;
+	}
+
+	DBG("Successfully set blocked keys for index %u", adapter->dev_id);
+}
+
+static bool set_blocked_keys(struct btd_adapter *adapter)
+{
+	uint8_t buffer[sizeof(struct mgmt_cp_set_blocked_keys) +
+					sizeof(blocked_keys)] = { 0 };
+	struct mgmt_cp_set_blocked_keys *cp =
+				(struct mgmt_cp_set_blocked_keys *)buffer;
+	int i;
+
+	cp->key_count = ARRAY_SIZE(blocked_keys);
+	for (i = 0; i < cp->key_count; ++i) {
+		cp->keys[i].type = blocked_keys[i].type;
+		memcpy(cp->keys[i].val, blocked_keys[i].val,
+						sizeof(cp->keys[i].val));
+	}
+
+	return mgmt_send(mgmt_master, MGMT_OP_SET_BLOCKED_KEYS, adapter->dev_id,
+						sizeof(buffer),	buffer,
+						set_blocked_keys_complete,
+						adapter, NULL);
+}
+
 static void read_info_complete(uint8_t status, uint16_t length,
 					const void *param, void *user_data)
 {
@@ -8698,7 +8981,15 @@ static void read_info_complete(uint8_t status, uint16_t length,
 
 	set_name(adapter, btd_adapter_get_name(adapter));
 
-	if (!(adapter->current_settings & MGMT_SETTING_BONDABLE))
+	if (kernel_blocked_keys_supported && !set_blocked_keys(adapter)) {
+		btd_error(adapter->dev_id,
+				"Failed to set blocked keys for index %u",
+				adapter->dev_id);
+		goto failed;
+	}
+
+	if (main_opts.pairable &&
+			!(adapter->current_settings & MGMT_SETTING_BONDABLE))
 		set_mode(adapter, MGMT_OP_SET_BONDABLE, 0x01);
 
 	if (!kernel_conn_control)
@@ -8842,7 +9133,6 @@ static void read_commands_complete(uint8_t status, uint16_t length,
 {
 	const struct mgmt_rp_read_commands *rp = param;
 	uint16_t num_commands, num_events;
-	const uint16_t *opcode;
 	size_t expected_len;
 	int i;
 
@@ -8872,14 +9162,20 @@ static void read_commands_complete(uint8_t status, uint16_t length,
 		return;
 	}
 
-	opcode = rp->opcodes;
-
 	for (i = 0; i < num_commands; i++) {
-		uint16_t op = get_le16(opcode++);
+		uint16_t op = get_le16(rp->opcodes + i);
 
-		if (op == MGMT_OP_ADD_DEVICE) {
+		switch (op) {
+		case MGMT_OP_ADD_DEVICE:
 			DBG("enabling kernel-side connection control");
 			kernel_conn_control = true;
+			break;
+		case MGMT_OP_SET_BLOCKED_KEYS:
+			DBG("kernel supports the set_blocked_keys op");
+			kernel_blocked_keys_supported = true;
+			break;
+		default:
+			break;
 		}
 	}
 }

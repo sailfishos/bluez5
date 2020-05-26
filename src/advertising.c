@@ -17,6 +17,11 @@
  *
  */
 
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
+
+#define _GNU_SOURCE
 #include <stdint.h>
 #include <stdbool.h>
 #include <errno.h>
@@ -68,6 +73,7 @@ struct btd_adv_client {
 	uint16_t discoverable_to;
 	unsigned int to_id;
 	unsigned int disc_to_id;
+	unsigned int add_adv_id;
 	GDBusClient *client;
 	GDBusProxy *proxy;
 	DBusMessage *reg;
@@ -111,6 +117,15 @@ static void client_free(void *data)
 		g_dbus_client_set_disconnect_watch(client->client, NULL, NULL);
 		g_dbus_client_unref(client->client);
 	}
+
+	if (client->reg) {
+		g_dbus_send_message(btd_get_dbus_connection(),
+				dbus_message_new_method_return(client->reg));
+		dbus_message_unref(client->reg);
+	}
+
+	if (client->add_adv_id)
+		mgmt_cancel(client->manager->mgmt, client->add_adv_id);
 
 	if (client->instance)
 		util_clear_uid(&client->manager->instance_bitmap,
@@ -175,6 +190,8 @@ static void client_remove(void *data)
 	struct btd_adv_client *client = data;
 	struct mgmt_cp_remove_advertising cp;
 
+	g_dbus_client_set_proxy_handlers(client->client, NULL, NULL, NULL,
+									client);
 	g_dbus_client_set_disconnect_watch(client->client, NULL, NULL);
 
 	cp.instance = client->instance;
@@ -582,8 +599,9 @@ static bool parse_timeout(DBusMessageIter *iter,
 	if (client->to_id)
 		g_source_remove(client->to_id);
 
-	client->to_id = g_timeout_add_seconds(client->timeout, client_timeout,
-								client);
+	if (client->timeout > 0)
+		client->to_id = g_timeout_add_seconds(client->timeout,
+							client_timeout, client);
 
 	return true;
 }
@@ -759,7 +777,8 @@ static uint8_t *generate_scan_rsp(struct btd_adv_client *client,
 	return bt_ad_generate(client->scan, len);
 }
 
-static int refresh_adv(struct btd_adv_client *client, mgmt_request_func_t func)
+static int refresh_adv(struct btd_adv_client *client, mgmt_request_func_t func,
+						unsigned int *mgmt_id)
 {
 	struct mgmt_cp_add_advertising *cp;
 	uint8_t param_len;
@@ -768,6 +787,7 @@ static int refresh_adv(struct btd_adv_client *client, mgmt_request_func_t func)
 	uint8_t *scan_rsp;
 	size_t scan_rsp_len = -1;
 	uint32_t flags = 0;
+	unsigned int mgmt_ret;
 
 	DBG("Refreshing advertisement: %s", client->path);
 
@@ -816,13 +836,17 @@ static int refresh_adv(struct btd_adv_client *client, mgmt_request_func_t func)
 	free(adv_data);
 	free(scan_rsp);
 
-	if (!mgmt_send(client->manager->mgmt, MGMT_OP_ADD_ADVERTISING,
-				client->manager->mgmt_index, param_len, cp,
-				func, client, NULL)) {
+	mgmt_ret = mgmt_send(client->manager->mgmt, MGMT_OP_ADD_ADVERTISING,
+			client->manager->mgmt_index, param_len, cp,
+			func, client, NULL);
+
+	if (!mgmt_ret) {
 		error("Failed to add Advertising Data");
 		free(cp);
 		return -EINVAL;
 	}
+	if (mgmt_id)
+		*mgmt_id = mgmt_ret;
 
 	free(cp);
 
@@ -839,7 +863,7 @@ static gboolean client_discoverable_timeout(void *user_data)
 
 	bt_ad_clear_flags(client->data);
 
-	refresh_adv(client, NULL);
+	refresh_adv(client, NULL, NULL);
 
 	return FALSE;
 }
@@ -869,6 +893,47 @@ static bool parse_discoverable_timeout(DBusMessageIter *iter,
 	return true;
 }
 
+static struct adv_secondary {
+	int flag;
+	const char *name;
+} secondary[] = {
+	{ MGMT_ADV_FLAG_SEC_1M, "1M" },
+	{ MGMT_ADV_FLAG_SEC_2M, "2M" },
+	{ MGMT_ADV_FLAG_SEC_CODED, "Coded" },
+	{ },
+};
+
+static bool parse_secondary(DBusMessageIter *iter,
+					struct btd_adv_client *client)
+{
+	const char *str;
+	struct adv_secondary *sec;
+
+	if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_STRING)
+		return false;
+
+	/* Reset secondary channels before parsing */
+	client->flags &= 0xfe00;
+
+	dbus_message_iter_get_basic(iter, &str);
+
+	for (sec = secondary; sec && sec->name; sec++) {
+		if (strcmp(str, sec->name))
+			continue;
+
+		if (!(client->manager->supported_flags & sec->flag))
+			return false;
+
+		DBG("Secondary Channel: %s", str);
+
+		client->flags |= sec->flag;
+
+		return true;
+	}
+
+	return false;
+}
+
 static struct adv_parser {
 	const char *name;
 	bool (*func)(DBusMessageIter *iter, struct btd_adv_client *client);
@@ -886,6 +951,7 @@ static struct adv_parser {
 	{ "Data", parse_data },
 	{ "Discoverable", parse_discoverable },
 	{ "DiscoverableTimeout", parse_discoverable_timeout },
+	{ "SecondaryChannel", parse_secondary },
 	{ },
 };
 
@@ -900,7 +966,7 @@ static void properties_changed(GDBusProxy *proxy, const char *name,
 			continue;
 
 		if (parser->func(iter, client)) {
-			refresh_adv(client, NULL);
+			refresh_adv(client, NULL, NULL);
 			break;
 		}
 	}
@@ -931,6 +997,8 @@ static void add_adv_callback(uint8_t status, uint16_t length,
 {
 	struct btd_adv_client *client = user_data;
 	const struct mgmt_rp_add_advertising *rp = param;
+
+	client->add_adv_id = 0;
 
 	if (status)
 		goto done;
@@ -1011,7 +1079,7 @@ static DBusMessage *parse_advertisement(struct btd_adv_client *client)
 		goto fail;
 	}
 
-	err = refresh_adv(client, add_adv_callback);
+	err = refresh_adv(client, add_adv_callback, &client->add_adv_id);
 	if (!err)
 		return NULL;
 
@@ -1229,10 +1297,48 @@ static gboolean get_supported_includes(const GDBusPropertyTable *property,
 	return TRUE;
 }
 
+static void append_secondary(struct btd_adv_manager *manager,
+						DBusMessageIter *iter)
+{
+	struct adv_secondary *sec;
+
+	for (sec = secondary; sec && sec->name; sec++) {
+		if (manager->supported_flags & sec->flag)
+			dbus_message_iter_append_basic(iter, DBUS_TYPE_STRING,
+								&sec->name);
+	}
+}
+
+static gboolean secondary_exits(const GDBusPropertyTable *property, void *data)
+{
+	struct btd_adv_manager *manager = data;
+
+	/* 1M PHY shall always be supported if ext_adv is supported */
+	return manager->supported_flags & MGMT_ADV_FLAG_SEC_1M;
+}
+
+static gboolean get_supported_secondary(const GDBusPropertyTable *property,
+					DBusMessageIter *iter, void *data)
+{
+	struct btd_adv_manager *manager = data;
+	DBusMessageIter entry;
+
+	dbus_message_iter_open_container(iter, DBUS_TYPE_ARRAY,
+					DBUS_TYPE_STRING_AS_STRING, &entry);
+
+	append_secondary(manager, &entry);
+
+	dbus_message_iter_close_container(iter, &entry);
+
+	return TRUE;
+}
+
 static const GDBusPropertyTable properties[] = {
 	{ "ActiveInstances", "y", get_active_instances, NULL, NULL },
 	{ "SupportedInstances", "y", get_instances, NULL, NULL },
 	{ "SupportedIncludes", "as", get_supported_includes, NULL, NULL },
+	{ "SupportedSecondaryChannels", "as", get_supported_secondary, NULL,
+							secondary_exits },
 	{ }
 };
 
@@ -1363,7 +1469,7 @@ void btd_adv_manager_destroy(struct btd_adv_manager *manager)
 
 static void manager_refresh(void *data, void *user_data)
 {
-	refresh_adv(data, user_data);
+	refresh_adv(data, user_data, NULL);
 }
 
 void btd_adv_manager_refresh(struct btd_adv_manager *manager)
