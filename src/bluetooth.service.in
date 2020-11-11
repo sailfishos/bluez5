@@ -2,7 +2,7 @@
 Description=Bluetooth service
 Documentation=man:bluetoothd(8)
 ConditionPathIsDirectory=/sys/class/bluetooth
-After=connman.service
+After=dbus.service
 ConditionPathExists=!/run/systemd/boot-status/ACT_DEAD
 
 [Service]
