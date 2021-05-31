@@ -1,23 +1,10 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2014  Google Inc.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -141,6 +128,14 @@ struct bt_att_pdu_error_rsp {
 #define BT_ATT_PERM_READ_SECURE		0x0100
 #define BT_ATT_PERM_WRITE_SECURE	0x0200
 #define BT_ATT_PERM_SECURE		(BT_ATT_PERM_READ_SECURE | \
+					BT_ATT_PERM_WRITE_SECURE)
+#define BT_ATT_PERM_READ_MASK		(BT_ATT_PERM_READ | \
+					BT_ATT_PERM_READ_AUTHEN | \
+					BT_ATT_PERM_READ_ENCRYPT | \
+					BT_ATT_PERM_READ_SECURE)
+#define BT_ATT_PERM_WRITE_MASK		(BT_ATT_PERM_WRITE | \
+					BT_ATT_PERM_WRITE_AUTHEN | \
+					BT_ATT_PERM_WRITE_ENCRYPT | \
 					BT_ATT_PERM_WRITE_SECURE)
 
 /* GATT Characteristic Properties Bitfield values */

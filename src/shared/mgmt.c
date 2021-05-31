@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2012-2014  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -79,6 +66,11 @@ struct mgmt_notify {
 	mgmt_notify_func_t callback;
 	mgmt_destroy_func_t destroy;
 	void *user_data;
+};
+
+struct mgmt_tlv_list {
+	struct queue *tlv_queue;
+	uint16_t size;
 };
 
 static void destroy_request(void *data)
@@ -569,6 +561,133 @@ static struct mgmt_request *create_request(uint16_t opcode, uint16_t index,
 	request->user_data = user_data;
 
 	return request;
+}
+
+struct mgmt_tlv_list *mgmt_tlv_list_new(void)
+{
+	struct mgmt_tlv_list *tlv_list = new0(struct mgmt_tlv_list, 1);
+
+	tlv_list->tlv_queue = queue_new();
+	tlv_list->size = 0;
+
+	return tlv_list;
+}
+
+static struct mgmt_tlv *mgmt_tlv_new(uint16_t type, uint8_t length,
+								void *value)
+{
+	struct mgmt_tlv *entry = malloc(sizeof(*entry) + length);
+
+	if (!entry)
+		return NULL;
+
+	entry->type = htobs(type);
+	entry->length = length;
+	memcpy(entry->value, value, length);
+
+	return entry;
+}
+
+static void mgmt_tlv_free(struct mgmt_tlv *entry)
+{
+	free(entry);
+}
+
+void mgmt_tlv_list_free(struct mgmt_tlv_list *tlv_list)
+{
+	queue_destroy(tlv_list->tlv_queue, free);
+	free(tlv_list);
+}
+
+bool mgmt_tlv_add(struct mgmt_tlv_list *tlv_list, uint16_t type, uint8_t length,
+								void *value)
+{
+	struct mgmt_tlv *entry = mgmt_tlv_new(type, length, value);
+
+	if (!entry)
+		return false;
+
+	if (!queue_push_tail(tlv_list->tlv_queue, entry)) {
+		mgmt_tlv_free(entry);
+		return false;
+	}
+
+	tlv_list->size += sizeof(*entry) + entry->length;
+	return true;
+}
+
+static void mgmt_tlv_to_buf(void *data, void *user_data)
+{
+	struct mgmt_tlv *entry = data;
+	uint8_t **buf_ptr = user_data;
+	size_t entry_size = sizeof(*entry) + entry->length;
+
+	memcpy(*buf_ptr, entry, entry_size);
+	*buf_ptr += entry_size;
+}
+
+struct mgmt_tlv_list *mgmt_tlv_list_load_from_buf(const uint8_t *buf,
+								uint16_t len)
+{
+	struct mgmt_tlv_list *tlv_list;
+	const uint8_t *cur = buf;
+
+	if (!len || !buf)
+		return NULL;
+
+	tlv_list = mgmt_tlv_list_new();
+
+	while (cur < buf + len) {
+		struct mgmt_tlv *entry = (struct mgmt_tlv *)cur;
+
+		cur += sizeof(*entry) + entry->length;
+		if (cur > buf + len)
+			goto failed;
+
+		if (!mgmt_tlv_add(tlv_list, entry->type, entry->length,
+								entry->value)) {
+			goto failed;
+		}
+	}
+
+	return tlv_list;
+failed:
+	mgmt_tlv_list_free(tlv_list);
+
+	return NULL;
+}
+
+void mgmt_tlv_list_foreach(struct mgmt_tlv_list *tlv_list,
+				mgmt_tlv_list_foreach_func_t callback,
+				void *user_data)
+{
+	queue_foreach(tlv_list->tlv_queue, callback, user_data);
+}
+
+unsigned int mgmt_send_tlv(struct mgmt *mgmt, uint16_t opcode, uint16_t index,
+				struct mgmt_tlv_list *tlv_list,
+				mgmt_request_func_t callback,
+				void *user_data, mgmt_destroy_func_t destroy)
+{
+	uint8_t *buf, *buf_ptr;
+	unsigned int ret;
+
+	if (!tlv_list)
+		return 0;
+
+	buf = malloc(tlv_list->size);
+
+	if (!buf)
+		return 0;
+
+	buf_ptr = buf;
+
+	queue_foreach(tlv_list->tlv_queue, mgmt_tlv_to_buf, &buf_ptr);
+
+	ret = mgmt_send(mgmt, opcode, index, tlv_list->size, (void *)buf,
+						callback, user_data, destroy);
+	free(buf);
+	return ret;
 }
 
 unsigned int mgmt_send(struct mgmt *mgmt, uint16_t opcode, uint16_t index,

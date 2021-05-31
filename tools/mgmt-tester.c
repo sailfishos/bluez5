@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2012  Intel Corporation. All rights reserved.
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -70,11 +57,28 @@ struct test_data {
 	int sk;
 };
 
-static void mgmt_debug(const char *str, void *user_data)
+static void print_debug(const char *str, void *user_data)
 {
 	const char *prefix = user_data;
 
 	tester_print("%s%s", prefix, str);
+}
+
+static void test_post_teardown(const void *test_data)
+{
+	struct test_data *data = tester_get_data();
+
+	if (data->sk >= 0)
+		close(data->sk);
+
+	hciemu_unref(data->hciemu);
+	data->hciemu = NULL;
+}
+
+static void test_pre_setup_failed(void)
+{
+	test_post_teardown(NULL);
+	tester_pre_setup_failed();
 }
 
 static void read_version_callback(uint8_t status, uint16_t length,
@@ -87,7 +91,7 @@ static void read_version_callback(uint8_t status, uint16_t length,
 	tester_print("  Status: %s (0x%02x)", mgmt_errstr(status), status);
 
 	if (status || !param) {
-		tester_pre_setup_failed();
+		test_pre_setup_failed();
 		return;
 	}
 
@@ -105,9 +109,29 @@ static void read_commands_callback(uint8_t status, uint16_t length,
 	tester_print("  Status: %s (0x%02x)", mgmt_errstr(status), status);
 
 	if (status || !param) {
-		tester_pre_setup_failed();
+		test_pre_setup_failed();
 		return;
 	}
+}
+
+static bool check_settings(uint32_t supported, uint32_t expected)
+{
+	int i;
+
+	if (supported == expected)
+		return true;
+
+	for (i = 0; i < 17; i++) {
+		if (supported & BIT(i))
+			continue;
+
+		if (expected & BIT(i)) {
+			tester_warn("Expected bit %u not supported", i);
+			return false;
+		}
+	}
+
+	return true;
 }
 
 static void read_info_callback(uint8_t status, uint16_t length,
@@ -124,7 +148,7 @@ static void read_info_callback(uint8_t status, uint16_t length,
 	tester_print("  Status: %s (0x%02x)", mgmt_errstr(status), status);
 
 	if (status || !param) {
-		tester_pre_setup_failed();
+		test_pre_setup_failed();
 		return;
 	}
 
@@ -144,33 +168,43 @@ static void read_info_callback(uint8_t status, uint16_t length,
 	tester_print("  Short name: %s", rp->short_name);
 
 	if (strcmp(hciemu_get_address(data->hciemu), addr)) {
-		tester_pre_setup_failed();
+		test_pre_setup_failed();
 		return;
 	}
 
 	if (rp->version != data->expected_version) {
-		tester_pre_setup_failed();
+		tester_warn("Expected version: 0x%02x != 0x%02x",
+				rp->version, data->expected_version);
+		test_pre_setup_failed();
 		return;
 	}
 
 	if (manufacturer != data->expected_manufacturer) {
-		tester_pre_setup_failed();
+		tester_warn("Expected manufacturer: 0x%04x != 0x%04x",
+				manufacturer, data->expected_manufacturer);
+		test_pre_setup_failed();
 		return;
 	}
 
-	if (supported_settings != data->expected_supported_settings) {
-		tester_pre_setup_failed();
+	if (!check_settings(supported_settings,
+				data->expected_supported_settings)) {
+		tester_warn("Expected supported settings: 0x%08x != 0x%08x",
+				supported_settings,
+				data->expected_supported_settings);
+		test_pre_setup_failed();
 		return;
 	}
 
-	if (current_settings != data->initial_settings) {
-		tester_pre_setup_failed();
+	if (!check_settings(current_settings, data->initial_settings)) {
+		tester_warn("Initial settings: 0x%08x != 0x%08x",
+				current_settings, data->initial_settings);
+		test_pre_setup_failed();
 		return;
 	}
 
 	if (rp->dev_class[0] != 0x00 || rp->dev_class[1] != 0x00 ||
 						rp->dev_class[2] != 0x00) {
-		tester_pre_setup_failed();
+		test_pre_setup_failed();
 		return;
 	}
 
@@ -282,7 +316,7 @@ static void read_index_list_callback(uint8_t status, uint16_t length,
 	tester_print("  Status: %s (0x%02x)", mgmt_errstr(status), status);
 
 	if (status || !param) {
-		tester_pre_setup_failed();
+		test_pre_setup_failed();
 		return;
 	}
 
@@ -295,8 +329,11 @@ static void read_index_list_callback(uint8_t status, uint16_t length,
 	data->hciemu = hciemu_new(data->hciemu_type);
 	if (!data->hciemu) {
 		tester_warn("Failed to setup HCI emulation");
-		tester_pre_setup_failed();
+		test_pre_setup_failed();
 	}
+
+	if (tester_use_debug())
+		hciemu_set_debug(data->hciemu, print_debug, "hciemu: ", NULL);
 
 	if (test && test->setup_le_states)
 		hciemu_set_master_le_states(data->hciemu, test->le_states);
@@ -309,14 +346,14 @@ static void test_pre_setup(const void *test_data)
 	data->mgmt = mgmt_new_default();
 	if (!data->mgmt) {
 		tester_warn("Failed to setup management interface");
-		tester_pre_setup_failed();
+		test_pre_setup_failed();
 		return;
 	}
 
 	data->mgmt_alt = mgmt_new_default();
 	if (!data->mgmt_alt) {
 		tester_warn("Failed to setup alternate management interface");
-		tester_pre_setup_failed();
+		test_pre_setup_failed();
 
 		mgmt_unref(data->mgmt);
 		data->mgmt = NULL;
@@ -324,8 +361,8 @@ static void test_pre_setup(const void *test_data)
 	}
 
 	if (tester_use_debug()) {
-		mgmt_set_debug(data->mgmt, mgmt_debug, "mgmt: ", NULL);
-		mgmt_set_debug(data->mgmt_alt, mgmt_debug, "mgmt-alt: ", NULL);
+		mgmt_set_debug(data->mgmt, print_debug, "mgmt: ", NULL);
+		mgmt_set_debug(data->mgmt_alt, print_debug, "mgmt-alt: ", NULL);
 	}
 
 	mgmt_send(data->mgmt, MGMT_OP_READ_VERSION, MGMT_INDEX_NONE, 0, NULL,
@@ -338,17 +375,6 @@ static void test_pre_setup(const void *test_data)
 					read_index_list_callback, NULL, NULL);
 
 	data->sk = -1;
-}
-
-static void test_post_teardown(const void *test_data)
-{
-	struct test_data *data = tester_get_data();
-
-	if (data->sk >= 0)
-		close(data->sk);
-
-	hciemu_unref(data->hciemu);
-	data->hciemu = NULL;
 }
 
 static void test_add_condition(struct test_data *data)
@@ -392,94 +418,58 @@ static void test_condition_complete(struct test_data *data)
 	tester_test_passed();
 }
 
-#define test_bredrle_full(name, data, setup, func, timeout) \
+#define test_full(name, data, setup, func, timeout, type, version, \
+			expected_settings, settings) \
 	do { \
 		struct test_data *user; \
 		user = new0(struct test_data, 1); \
-		user->hciemu_type = HCIEMU_TYPE_BREDRLE; \
+		user->hciemu_type = type; \
 		user->test_setup = setup; \
 		user->test_data = data; \
-		user->expected_version = 0x09; \
+		user->expected_version = version; \
 		user->expected_manufacturer = 0x003f; \
-		user->expected_supported_settings = 0x0001bfff; \
-		user->initial_settings = 0x00000080; \
+		user->expected_supported_settings = expected_settings; \
+		user->initial_settings = settings; \
 		tester_add_full(name, data, \
 				test_pre_setup, test_setup, func, NULL, \
 				test_post_teardown, timeout, user, free); \
 	} while (0)
+
+#define test_bredrle_full(name, data, setup, func, timeout) \
+	test_full(name, data, setup, func, timeout, HCIEMU_TYPE_BREDRLE, \
+					0x09, 0x0001beff, 0x00000080)
 
 #define test_bredrle(name, data, setup, func) \
 	test_bredrle_full(name, data, setup, func, 2)
 
 #define test_bredr20(name, data, setup, func) \
-	do { \
-		struct test_data *user; \
-		user = new0(struct test_data, 1); \
-		user->hciemu_type = HCIEMU_TYPE_LEGACY; \
-		user->test_setup = setup; \
-		user->test_data = data; \
-		user->expected_version = 0x03; \
-		user->expected_manufacturer = 0x003f; \
-		user->expected_supported_settings = 0x000110bf; \
-		user->initial_settings = 0x00000080; \
-		tester_add_full(name, data, \
-				test_pre_setup, test_setup, func, NULL, \
-				test_post_teardown, 2, user, free); \
-	} while (0)
+	test_full(name, data, setup, func, 2, HCIEMU_TYPE_LEGACY, \
+					0x03, 0x000110bf, 0x00000080)
 
 #define test_bredr(name, data, setup, func) \
-	do { \
-		struct test_data *user; \
-		user = new0(struct test_data, 1); \
-		user->hciemu_type = HCIEMU_TYPE_BREDR; \
-		user->test_setup = setup; \
-		user->test_data = data; \
-		user->expected_version = 0x05; \
-		user->expected_manufacturer = 0x003f; \
-		user->expected_supported_settings = 0x000111ff; \
-		user->initial_settings = 0x00000080; \
-		tester_add_full(name, data, \
-				test_pre_setup, test_setup, func, NULL, \
-				test_post_teardown, 2, user, free); \
-	} while (0)
+	test_full(name, data, setup, func, 2, HCIEMU_TYPE_BREDR, \
+					0x05, 0x000110ff, 0x00000080)
 
 #define test_le_full(name, data, setup, func, timeout) \
-	do { \
-		struct test_data *user; \
-		user = new0(struct test_data, 1); \
-		user->hciemu_type = HCIEMU_TYPE_LE; \
-		user->test_setup = setup; \
-		user->test_data = data; \
-		user->expected_version = 0x09; \
-		user->expected_manufacturer = 0x003f; \
-		user->expected_supported_settings = 0x0001be1b; \
-		user->initial_settings = 0x00000200; \
-		tester_add_full(name, data, \
-				test_pre_setup, test_setup, func, NULL, \
-				test_post_teardown, timeout, user, free); \
-	} while (0)
+	test_full(name, data, setup, func, timeout, HCIEMU_TYPE_LE, \
+					0x09, 0x0001be1b, 0x00000200)
 
 #define test_le(name, data, setup, func) \
 	test_le_full(name, data, setup, func, 2)
 
 #define test_bredrle50_full(name, data, setup, func, timeout) \
-	do { \
-		struct test_data *user; \
-		user = new0(struct test_data, 1); \
-		user->hciemu_type = HCIEMU_TYPE_BREDRLE50; \
-		user->test_setup = setup; \
-		user->test_data = data; \
-		user->expected_version = 0x09; \
-		user->expected_manufacturer = 0x003f; \
-		user->expected_supported_settings = 0x0001bfff; \
-		user->initial_settings = 0x00000080; \
-		tester_add_full(name, data, \
-				test_pre_setup, test_setup, func, NULL, \
-				test_post_teardown, timeout, user, free); \
-	} while (0)
+	test_full(name, data, setup, func, timeout, HCIEMU_TYPE_BREDRLE50, \
+					0x09, 0x0001beff, 0x00000080)
 
 #define test_bredrle50(name, data, setup, func) \
-			test_bredrle50_full(name, data, setup, func, 2)
+	test_bredrle50_full(name, data, setup, func, 2)
+
+#define test_hs_full(name, data, setup, func, timeout) \
+	test_full(name, data, setup, func, timeout, HCIEMU_TYPE_BREDRLE, \
+					0x09, 0x0001bfff, 0x00000080)
+
+#define test_hs(name, data, setup, func) \
+	test_hs_full(name, data, setup, func, 2)
 
 static void controller_setup(const void *test_data)
 {
@@ -908,10 +898,10 @@ static uint16_t settings_powered_le_connectable_advertising[] = {
 					MGMT_OP_SET_ADVERTISING,
 					MGMT_OP_SET_POWERED, 0 };
 
-static uint8_t set_connectable_off_adv_param[] = {
-		0x00, 0x08,				/* min_interval */
-		0x00, 0x08,				/* max_interval */
-		0x03,					/* type */
+static uint8_t set_connectable_off_scan_adv_param[] = {
+		0x64, 0x00,				/* min_interval */
+		0x96, 0x00,				/* max_interval */
+		0x02,					/* type */
 		0x01,					/* own_addr_type */
 		0x00,					/* direct_addr_type */
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* direct_addr */
@@ -929,8 +919,8 @@ static const struct generic_data set_connectable_off_le_test_2 = {
 	.expect_len = sizeof(set_connectable_off_le_settings_2),
 	.expect_settings_unset = MGMT_SETTING_CONNECTABLE,
 	.expect_hci_command = BT_HCI_CMD_LE_SET_ADV_PARAMETERS,
-	.expect_hci_param = set_connectable_off_adv_param,
-	.expect_hci_len = sizeof(set_connectable_off_adv_param),
+	.expect_hci_param = set_connectable_off_scan_adv_param,
+	.expect_hci_len = sizeof(set_connectable_off_scan_adv_param),
 };
 
 static uint16_t settings_powered_le_discoverable[] = {
@@ -956,8 +946,8 @@ static const struct generic_data set_connectable_off_le_test_3 = {
 	.expect_len = sizeof(set_connectable_off_le_settings_2),
 	.expect_settings_unset = MGMT_SETTING_CONNECTABLE,
 	.expect_hci_command = BT_HCI_CMD_LE_SET_ADV_PARAMETERS,
-	.expect_hci_param = set_connectable_off_adv_param,
-	.expect_hci_len = sizeof(set_connectable_off_adv_param),
+	.expect_hci_param = set_connectable_off_scan_adv_param,
+	.expect_hci_len = sizeof(set_connectable_off_scan_adv_param),
 };
 
 static const struct generic_data set_connectable_off_le_test_4 = {
@@ -971,8 +961,8 @@ static const struct generic_data set_connectable_off_le_test_4 = {
 	.expect_len = sizeof(set_connectable_off_le_settings_2),
 	.expect_settings_unset = MGMT_SETTING_CONNECTABLE,
 	.expect_hci_command = BT_HCI_CMD_LE_SET_ADV_PARAMETERS,
-	.expect_hci_param = set_connectable_off_adv_param,
-	.expect_hci_len = sizeof(set_connectable_off_adv_param),
+	.expect_hci_param = set_connectable_off_scan_adv_param,
+	.expect_hci_len = sizeof(set_connectable_off_scan_adv_param),
 };
 
 static const char set_fast_conn_on_param[] = { 0x01 };
@@ -4172,7 +4162,7 @@ static const struct generic_data read_adv_features_invalid_index_test = {
 };
 
 static const uint8_t read_adv_features_rsp_1[] =  {
-	0x7f, 0x00, 0x00, 0x00,	/* supported flags */
+	0x7f, 0xf0, 0x01, 0x00,	/* supported flags */
 	0x1f,			/* max_adv_data_len */
 	0x1f,			/* max_scan_rsp_len */
 	0x05,			/* max_instances */
@@ -4187,7 +4177,7 @@ static const struct generic_data read_adv_features_success_1 = {
 };
 
 static const uint8_t read_adv_features_rsp_2[] =  {
-	0x7f, 0x00, 0x00, 0x00,	/* supported flags */
+	0x7f, 0xf0, 0x01, 0x00,	/* supported flags */
 	0x1f,			/* max_adv_data_len */
 	0x1f,			/* max_scan_rsp_len */
 	0x05,			/* max_instances */
@@ -4748,17 +4738,6 @@ static uint16_t settings_powered_le_connectable[] = {
 						MGMT_OP_SET_LE,
 						MGMT_OP_SET_CONNECTABLE, 0 };
 
-static uint8_t set_connectable_off_scan_adv_param[] = {
-		0x00, 0x08,				/* min_interval */
-		0x00, 0x08,				/* max_interval */
-		0x02,					/* type */
-		0x01,					/* own_addr_type */
-		0x00,					/* direct_addr_type */
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* direct_addr */
-		0x07,					/* channel_map */
-		0x00,					/* filter_policy */
-};
-
 static const struct generic_data add_advertising_success_13 = {
 	.setup_settings = settings_powered_le,
 	.send_opcode = MGMT_OP_ADD_ADVERTISING,
@@ -4770,6 +4749,17 @@ static const struct generic_data add_advertising_success_13 = {
 	.expect_hci_command = BT_HCI_CMD_LE_SET_ADV_PARAMETERS,
 	.expect_hci_param = set_connectable_off_scan_adv_param,
 	.expect_hci_len = sizeof(set_connectable_off_scan_adv_param),
+};
+
+static uint8_t set_connectable_off_adv_param[] = {
+		0x64, 0x00,				/* min_interval */
+		0x96, 0x00,				/* max_interval */
+		0x03,					/* type */
+		0x01,					/* own_addr_type */
+		0x00,					/* direct_addr_type */
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* direct_addr */
+		0x07,					/* channel_map */
+		0x00,					/* filter_policy */
 };
 
 static const struct generic_data add_advertising_success_14 = {
@@ -5079,7 +5069,7 @@ static const char ext_ctrl_info1[] = {
 	0x00, 0x00, 0x00, 0x01, 0xaa, 0x00, /* btaddr */
 	0x09, /* version */
 	0x3f, 0x00, /* manufacturer */
-	0xff, 0xbf, 0x01, 0x00, /* supported settings */
+	0xff, 0xbe, 0x01, 0x00, /* supported settings */
 	0x80, 0x00, 0x00, 0x00, /* current settings */
 	0x09, 0x00, /* eir length */
 	0x04, /* dev class length */
@@ -5124,7 +5114,7 @@ static const char ext_ctrl_info2[] = {
 	0x00, 0x00, 0x00, 0x01, 0xaa, 0x00, /* btaddr */
 	0x09, /* version */
 	0x3f, 0x00, /* manufacturer */
-	0xff, 0xbf, 0x01, 0x00, /* supported settings */
+	0xff, 0xbe, 0x01, 0x00, /* supported settings */
 	0x81, 0x02, 0x00, 0x00, /* current settings */
 	0x0D, 0x00, /* eir length */
 	0x04, /* dev class length */
@@ -5155,7 +5145,7 @@ static const char ext_ctrl_info3[] = {
 	0x00, 0x00, 0x00, 0x01, 0xaa, 0x00, /* btaddr */
 	0x09, /* version */
 	0x3f, 0x00, /* manufacturer */
-	0xff, 0xbf, 0x01, 0x00, /* supported settings */
+	0xff, 0xbe, 0x01, 0x00, /* supported settings */
 	0x80, 0x02, 0x00, 0x00, /* current settings */
 	0x16, 0x00, /* eir length */
 	0x04, /* dev class length */
@@ -5190,7 +5180,7 @@ static const char ext_ctrl_info4[] = {
 	0x00, 0x00, 0x00, 0x01, 0xaa, 0x00, /* btaddr */
 	0x09, /* version */
 	0x3f, 0x00, /* manufacturer */
-	0xff, 0xbf, 0x01, 0x00, /* supported settings */
+	0xff, 0xbe, 0x01, 0x00, /* supported settings */
 	0x80, 0x02, 0x00, 0x00, /* current settings */
 	0x1a, 0x00, /* eir length */
 	0x04, /* dev class length */
@@ -5249,7 +5239,7 @@ static const char ext_ctrl_info5[] = {
 	0x00, 0x00, 0x00, 0x01, 0xaa, 0x00, /* btaddr */
 	0x09, /* version */
 	0x3f, 0x00, /* manufacturer */
-	0xff, 0xbf, 0x01, 0x00, /* supported settings */
+	0xff, 0xbe, 0x01, 0x00, /* supported settings */
 	0x81, 0x02, 0x00, 0x00, /* current settings */
 	0x1a, 0x00, /* eir len */
 	0x04, /* dev class len */
@@ -5277,6 +5267,208 @@ static const struct generic_data read_ext_ctrl_info5 = {
 	.expect_status = MGMT_STATUS_SUCCESS,
 	.expect_param = ext_ctrl_info5,
 	.expect_len = sizeof(ext_ctrl_info5),
+};
+
+static const struct generic_data read_controller_cap_invalid_param_test = {
+	.send_opcode = MGMT_OP_READ_CONTROLLER_CAP,
+	.send_param = dummy_data,
+	.send_len = sizeof(dummy_data),
+	.expect_status = MGMT_STATUS_INVALID_PARAMS,
+};
+
+static const struct generic_data read_controller_cap_success = {
+	.send_opcode = MGMT_OP_READ_CONTROLLER_CAP,
+	.expect_ignore_param = true,
+	.expect_status = MGMT_STATUS_SUCCESS,
+};
+
+static const char ext_adv_params_valid[] = {
+	0x01, /* instance */
+	0x00, 0xC0, 0x00, 0x00, /* flags, use tx power and intervals */
+	0x00, 0x00, /* duration */
+	0x00, 0x00, /* timeout */
+	0xA0, 0x00, 0x00, 0x00, /* min_interval */
+	0xA0, 0x00, 0x00, 0x00, /* max_interval */
+	0x7f, /* tx_power */
+};
+
+static const char ext_adv_hci_params_valid[] = {
+	0x01, /* handle */
+	0x10, 0x00, /* evt_properties */
+	0xA0, 0x00, 0x00, /* min_interval */
+	0xA0, 0x00, 0x00, /* max_interval */
+	0x07, /* channel_map */
+	0x01, /* own_addr_type */
+	0x00, /* peer_addr_type */
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* peer_addr */
+	0x00, /* filter_policy */
+	0x7f, /* tx_power */
+	0x01, /* primary_phy */
+	0x00, /* secondary_max_skip */
+	0x01, /* secondary_phy */
+	0x00, /* sid */
+	0x00, /* notif_enable */
+};
+
+static const char ext_adv_params_mgmt_rsp_valid_50[] = {
+	0x01, /* instance */
+	0x00, /* tx_power defaults to 0 on BT5 platform*/
+	0x1f, /* max_adv_data_len */
+	0x1f, /* max_scan_rsp_len */
+};
+
+static const char ext_adv_params_mgmt_rsp_valid[] = {
+	0x01, /* instance */
+	0x7f, /* tx_power */
+	0x1f, /* max_adv_data_len */
+	0x1f, /* max_scan_rsp_len */
+};
+
+static const char ext_adv_data_mgmt_rsp_valid[] = {
+	0x01, /* instance */
+};
+
+static const uint8_t ext_adv_data_valid[] = {
+	0x01, /* instance */
+	0x04, /* Ad data len */
+	0x06, /* Scan response data len */
+	0x03, /* Section length */
+	0x19, /* GAP Appearance */
+	0x01,
+	0x23,
+	0x05, /* Section length */
+	0x08, /* ad type Short Name */
+	't',
+	'e',
+	's',
+	't',
+};
+
+static const char ext_adv_hci_ad_data_valid[] = {
+	0x01, /* handle */
+	0x03, /* operation */
+	0x01, /* minimize fragmentation */
+	0x04, /* data length */
+	0x03, /* Section length */
+	0x19, /* GAP Appearance */
+	0x01,
+	0x23,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static const char ext_adv_hci_scan_rsp_data_valid[] = {
+	0x01, /* handle */
+	0x03, /* operation */
+	0x01, /* minimize fragmentation */
+	0x06,
+	0x05, /* Section length */
+	0x08, /* ad type Short Name */
+	't',
+	'e',
+	's',
+	't',
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+static const uint8_t ext_adv_data_invalid[] = {
+	0x01, /* instance */
+	0x04, /* Ad data len */
+	0x06, /* Scan response data len */
+	0x03, /* Section length */
+	0x19, /* GAP Appearance */
+	0x01,
+	0x23,
+	0x07, /* Section length purposefully two octets too long */
+	0x08, /* ad type Short Name */
+	't',
+	'e',
+	's',
+	't',
+};
+
+static const struct generic_data adv_params_fail_unpowered = {
+	.setup_settings = settings_le, /* Unpowered */
+	.send_opcode = MGMT_OP_ADD_EXT_ADV_PARAMS,
+	.send_param = ext_adv_params_valid,
+	.send_len = sizeof(ext_adv_params_valid),
+	.expect_status = MGMT_STATUS_REJECTED,
+};
+
+static const struct generic_data adv_params_fail_invalid_params = {
+	.setup_settings = settings_powered_le,
+	.send_opcode = MGMT_OP_ADD_EXT_ADV_PARAMS,
+	.send_param = dummy_data,
+	.send_len = sizeof(dummy_data),
+	.expect_status = MGMT_STATUS_INVALID_PARAMS,
+};
+
+static const struct generic_data adv_params_success = {
+	.setup_settings = settings_powered_le,
+	.send_opcode = MGMT_OP_ADD_EXT_ADV_PARAMS,
+	.send_param = ext_adv_params_valid,
+	.send_len = sizeof(ext_adv_params_valid),
+	.expect_param = ext_adv_params_mgmt_rsp_valid,
+	.expect_len = sizeof(ext_adv_params_mgmt_rsp_valid),
+	.expect_status = MGMT_STATUS_SUCCESS,
+};
+
+static const struct generic_data adv_params_success_50 = {
+	.setup_settings = settings_powered_le,
+	.send_opcode = MGMT_OP_ADD_EXT_ADV_PARAMS,
+	.send_param = ext_adv_params_valid,
+	.send_len = sizeof(ext_adv_params_valid),
+	.expect_status = MGMT_STATUS_SUCCESS,
+	.expect_param = ext_adv_params_mgmt_rsp_valid_50,
+	.expect_len = sizeof(ext_adv_params_mgmt_rsp_valid_50),
+	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_ADV_PARAMS,
+	.expect_hci_param = ext_adv_hci_params_valid,
+	.expect_hci_len = sizeof(ext_adv_hci_params_valid),
+};
+
+static const struct generic_data adv_data_fail_no_params = {
+	.setup_settings = settings_powered_le,
+	.send_opcode = MGMT_OP_ADD_EXT_ADV_DATA,
+	.send_param = ext_adv_data_valid,
+	.send_len = sizeof(ext_adv_data_valid),
+	.expect_status = MGMT_STATUS_INVALID_PARAMS,
+};
+
+static const struct generic_data adv_data_success = {
+	.setup_settings = settings_powered_le,
+	.send_opcode = MGMT_OP_ADD_EXT_ADV_DATA,
+	.send_param = ext_adv_data_valid,
+	.send_len = sizeof(ext_adv_data_valid),
+	.expect_status = MGMT_STATUS_SUCCESS,
+	.expect_param = ext_adv_data_mgmt_rsp_valid,
+	.expect_len = sizeof(ext_adv_data_mgmt_rsp_valid),
+	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_ADV_DATA,
+	.expect_hci_param = ext_adv_hci_ad_data_valid,
+	.expect_hci_len = sizeof(ext_adv_hci_ad_data_valid),
+};
+
+static const struct generic_data adv_scan_rsp_success = {
+	.setup_settings = settings_powered_le,
+	.send_opcode = MGMT_OP_ADD_EXT_ADV_DATA,
+	.send_param = ext_adv_data_valid,
+	.send_len = sizeof(ext_adv_data_valid),
+	.expect_status = MGMT_STATUS_SUCCESS,
+	.expect_param = ext_adv_data_mgmt_rsp_valid,
+	.expect_len = sizeof(ext_adv_data_mgmt_rsp_valid),
+	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_SCAN_RSP_DATA,
+	.expect_hci_param = ext_adv_hci_scan_rsp_data_valid,
+	.expect_hci_len = sizeof(ext_adv_hci_scan_rsp_data_valid),
+};
+
+static const struct generic_data adv_data_invalid_params = {
+	.setup_settings = settings_powered_le,
+	.send_opcode = MGMT_OP_ADD_EXT_ADV_DATA,
+	.send_param = ext_adv_data_invalid,
+	.send_len = sizeof(ext_adv_data_invalid),
+	.expect_status = MGMT_STATUS_INVALID_PARAMS,
 };
 
 static void client_cmd_complete(uint16_t opcode, uint8_t status,
@@ -6024,6 +6216,74 @@ static void setup_complete(uint8_t status, uint16_t length,
 		setup_bthost();
 }
 
+static void setup_set_unpowered_callback(uint8_t status, uint16_t length,
+					const void *param, void *user_data)
+{
+	if (status != MGMT_STATUS_SUCCESS) {
+		tester_setup_failed();
+		return;
+	}
+
+	setup_bthost();
+}
+
+static void setup_set_le_callback(uint8_t status, uint16_t length,
+					const void *param, void *user_data)
+{
+	struct test_data *data = tester_get_data();
+	unsigned char power_param[] = { 0x00 };
+
+	if (status != MGMT_STATUS_SUCCESS) {
+		tester_setup_failed();
+		return;
+	}
+
+	tester_print("Disabling power");
+
+	mgmt_send(data->mgmt, MGMT_OP_SET_POWERED, data->mgmt_index,
+						sizeof(power_param),
+						&power_param,
+						setup_set_unpowered_callback,
+						NULL, NULL);
+}
+
+static void setup_ext_adv_not_powered(const void *test_data)
+{
+	struct test_data *data = tester_get_data();
+	unsigned char param[] = { 0x01 };
+
+	tester_print("Enabling LE");
+
+	mgmt_send(data->mgmt, MGMT_OP_SET_LE, data->mgmt_index,
+						sizeof(param), &param,
+						setup_set_le_callback,
+						NULL, NULL);
+}
+
+static void setup_set_ext_adv_params_callback(uint8_t status, uint16_t length,
+					const void *param, void *user_data)
+{
+	if (status != MGMT_STATUS_SUCCESS) {
+		tester_setup_failed();
+		return;
+	}
+
+	setup_bthost();
+}
+
+static void setup_ext_adv_params(const void *test_data)
+{
+	struct test_data *data = tester_get_data();
+
+	tester_print("Setting Extended Adv Params");
+
+	mgmt_send(data->mgmt, MGMT_OP_ADD_EXT_ADV_PARAMS, data->mgmt_index,
+					sizeof(ext_adv_params_valid),
+					&ext_adv_params_valid,
+					setup_set_ext_adv_params_callback,
+					NULL, NULL);
+}
+
 static void pin_code_request_callback(uint16_t index, uint16_t length,
 					const void *param, void *user_data)
 {
@@ -6060,12 +6320,6 @@ static void user_confirm_request_callback(uint16_t index, uint16_t length,
 	const struct generic_data *test = data->test_data;
 	struct mgmt_cp_user_confirm_reply cp;
 	uint16_t opcode;
-
-	if (test->just_works) {
-		tester_warn("User Confirmation received for just-works case");
-		tester_test_failed();
-		return;
-	}
 
 	memset(&cp, 0, sizeof(cp));
 	memcpy(&cp.addr, &ev->addr, sizeof(cp.addr));
@@ -6314,7 +6568,7 @@ static void command_generic_callback(uint8_t status, uint16_t length,
 			test->send_opcode, mgmt_errstr(status), status);
 
 	if (status != test->expect_status) {
-		tester_test_failed();
+		tester_test_abort();
 		return;
 	}
 
@@ -6331,6 +6585,9 @@ static void command_generic_callback(uint8_t status, uint16_t length,
 		if (expect_param && expect_len > 0 &&
 					memcmp(param, expect_param, length)) {
 			tester_warn("Unexpected cmd response parameter value");
+			util_hexdump('>', param, length, print_debug, "");
+			util_hexdump('!', expect_param, length, print_debug,
+								"");
 			tester_test_failed();
 			return;
 		}
@@ -6391,7 +6648,9 @@ static void command_hci_callback(uint16_t opcode, const void *param,
 	}
 
 	if (memcmp(param, expect_hci_param, length) != 0) {
-		tester_warn("Unexpected HCI command parameter value");
+		tester_warn("Unexpected HCI command parameter value:");
+		util_hexdump('>', param, length, print_debug, "");
+		util_hexdump('!', expect_hci_param, length, print_debug, "");
 		tester_test_failed();
 		return;
 	}
@@ -6878,10 +7137,10 @@ static const struct generic_data set_appearance_success = {
 };
 
 static const uint8_t read_adv_features_rsp_3[] =  {
-	0xff, 0x03, 0x00, 0x00,	/* supported flags */
+	0xff, 0xff, 0x01, 0x00,	/* supported flags */
 	0x1f,			/* max_adv_data_len */
 	0x1f,			/* max_scan_rsp_len */
-	0x05,			/* max_instances */
+	0x01,			/* max_instances */
 	0x00,			/* num_instances */
 };
 
@@ -6958,7 +7217,7 @@ static const struct generic_data add_ext_advertising_fail_4 = {
 
 static const uint8_t set_ext_adv_data_uuid[] = {
 	/* handle */
-	0x00,
+	0x01,
 	/* complete data */
 	0x03,
 	/* controller should not fragment */
@@ -6990,7 +7249,7 @@ static const struct generic_data add_ext_advertising_success_1 = {
 };
 
 static const uint8_t set_ext_adv_data_test1[] = {
-	0x00,				/* handle */
+	0x01,				/* handle */
 	0x03,				/* complete data */
 	0x01,				/* controller should not fragment */
 	0x07,				/* adv data len */
@@ -7018,7 +7277,7 @@ static const struct generic_data add_ext_advertising_success_pwron_data = {
 static const char set_ext_adv_on_set_adv_enable_param[] = {
 	0x01,		/* Enable */
 	0x01,		/* No of sets */
-	0x00,		/* Handle */
+	0x01,		/* Handle */
 	0x00, 0x00,		/* Duration */
 	0x00,		/* Max events */
 };
@@ -7090,7 +7349,7 @@ static const struct generic_data add_ext_advertising_success_6 = {
 };
 
 static const uint8_t set_ext_scan_rsp_uuid[] = {
-	0x00,				/* handle */
+	0x01,				/* handle */
 	0x03,				/* complete data */
 	0x01,				/* controller should not fragment */
 	0x0a,			/* scan rsp data len */
@@ -7123,7 +7382,7 @@ static const struct generic_data add_ext_advertising_success_7 = {
 };
 
 static uint8_t set_connectable_on_ext_adv_param[] = {
-	0x00,					/* Handle */
+	0x01,					/* Handle */
 	0x13, 0x00, 			/* Event type */
 	0x00, 0x08, 0x00,		/* min_interval */
 	0x00, 0x08, 0x00,		/* max_interval */
@@ -7154,7 +7413,7 @@ static const struct generic_data add_ext_advertising_success_8 = {
 };
 
 static const uint8_t set_ext_adv_data_general_discov[] = {
-	0x00,				/* handle */
+	0x01,				/* handle */
 	0x03,				/* complete data */
 	0x01,				/* controller should not fragment */
 	0x0c,			/* adv data len */
@@ -7173,7 +7432,7 @@ static const uint8_t set_ext_adv_data_general_discov[] = {
 };
 
 static const uint8_t set_ext_adv_data_limited_discov[] = {
-	0x00,				/* handle */
+	0x01,				/* handle */
 	0x03,				/* complete data */
 	0x01,				/* controller should not fragment */
 	0x0c,			/* adv data len */
@@ -7188,7 +7447,7 @@ static const uint8_t set_ext_adv_data_limited_discov[] = {
 };
 
 static const uint8_t set_ext_adv_data_uuid_txpwr[] = {
-	0x00,				/* handle */
+	0x01,				/* handle */
 	0x03,				/* complete data */
 	0x01,				/* controller should not fragment */
 	0x0c,			/* adv data len */
@@ -7259,7 +7518,7 @@ static const struct generic_data add_ext_advertising_success_12 = {
 };
 
 static uint8_t set_connectable_off_scan_ext_adv_param[] = {
-	0x00,					/* Handle */
+	0x01,					/* Handle */
 	0x12, 0x00,				/* Event type */
 	0x00, 0x08, 0x00,		/* min_interval */
 	0x00, 0x08,	0x00,		/* max_interval */
@@ -7290,7 +7549,7 @@ static const struct generic_data add_ext_advertising_success_13 = {
 };
 
 static uint8_t set_connectable_off_ext_adv_param[] = {
-	0x00,					/* Handle */
+	0x01,					/* Handle */
 	0x10, 0x00, 			/* Event type */
 	0x00, 0x08, 0x00,		/* min_interval */
 	0x00, 0x08, 0x00,		/* max_interval */
@@ -7333,6 +7592,24 @@ static const struct generic_data add_ext_advertising_success_15 = {
 	.expect_hci_len = sizeof(set_connectable_on_ext_adv_param),
 };
 
+static uint8_t preset_connectable_on_ext_adv_param[] = {
+	0x01,					/* Handle */
+	0x13, 0x00,				/* Event type */
+	0x00, 0x08, 0x00,			/* min_interval */
+	0x00, 0x08, 0x00,			/* max_interval */
+	0x07,					/* channel_map */
+	0x00,					/* own_addr_type */
+	0x00,					/* peer_addr_type */
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* peer_addr */
+	0x00,					/* filter_policy */
+	0x00,					/* Tx power */
+	0x01,					/* Primary PHY */
+	0x00,					/* primary adv max skip */
+	0x01,					/* Secondary PHY */
+	0x00,					/* adv sid*/
+	0x00,					/* Scan req notification */
+};
+
 static const struct generic_data add_ext_advertising_success_16 = {
 	.send_opcode = MGMT_OP_SET_CONNECTABLE,
 	.send_param = set_connectable_on_param,
@@ -7341,8 +7618,26 @@ static const struct generic_data add_ext_advertising_success_16 = {
 	.expect_param = set_connectable_settings_param_3,
 	.expect_len = sizeof(set_connectable_settings_param_3),
 	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_ADV_PARAMS,
-	.expect_hci_param = set_connectable_on_ext_adv_param,
-	.expect_hci_len = sizeof(set_connectable_on_ext_adv_param),
+	.expect_hci_param = preset_connectable_on_ext_adv_param,
+	.expect_hci_len = sizeof(preset_connectable_on_ext_adv_param),
+};
+
+static uint8_t preset_connectable_off_ext_adv_param[] = {
+	0x01,					/* Handle */
+	0x10, 0x00,				/* Event type */
+	0x00, 0x08, 0x00,			/* min_interval */
+	0x00, 0x08, 0x00,			/* max_interval */
+	0x07,					/* channel_map */
+	0x01,					/* own_addr_type */
+	0x00,					/* peer_addr_type */
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* peer_addr */
+	0x00,					/* filter_policy */
+	0x00,					/* Tx power */
+	0x01,					/* Primary PHY */
+	0x00,					/* primary adv max skip */
+	0x01,					/* Secondary PHY */
+	0x00,					/* adv sid*/
+	0x00,					/* Scan req notification */
 };
 
 static const struct generic_data add_ext_advertising_success_17 = {
@@ -7353,8 +7648,8 @@ static const struct generic_data add_ext_advertising_success_17 = {
 	.expect_param = set_le_settings_param_2,
 	.expect_len = sizeof(set_le_settings_param_2),
 	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_ADV_PARAMS,
-	.expect_hci_param = set_connectable_off_ext_adv_param,
-	.expect_hci_len = sizeof(set_connectable_off_ext_adv_param),
+	.expect_hci_param = preset_connectable_off_ext_adv_param,
+	.expect_hci_len = sizeof(preset_connectable_off_ext_adv_param),
 };
 
 static const struct generic_data add_ext_advertising_le_off = {
@@ -7432,7 +7727,7 @@ static const struct generic_data remove_ext_advertising_success_2 = {
 };
 
 static const uint8_t set_ext_adv_data_test2[] = {
-	0x00,				/* handle */
+	0x01,				/* handle */
 	0x03,				/* complete data */
 	0x01,				/* controller should not fragment */
 	0x07,				/* adv data len */
@@ -7539,7 +7834,7 @@ static const struct generic_data add_ext_advertising_scrsp_appear_null = {
 };
 
 static const uint8_t ext_scan_rsp_data_empty[] = {
-	0x00,				/* handle */
+	0x01,				/* handle */
 	0x03,				/* complete data */
 	0x01,				/* controller should not fragment */
 	0x01, /* scan rsp data len */
@@ -7564,7 +7859,7 @@ static const struct generic_data add_ext_advertising_no_name_set = {
 };
 
 static const uint8_t set_ext_scan_rsp_data_name_fits_in_scrsp[] = {
-	0x00,				/* handle */
+	0x01,				/* handle */
 	0x03,				/* complete data */
 	0x01,				/* controller should not fragment */
 	0x0c, /* Scan rsp data len */
@@ -7593,7 +7888,7 @@ static const struct generic_data add_ext_advertising_name_fits_in_scrsp = {
 };
 
 static const uint8_t set_ext_scan_rsp_data_shortened_name_fits[] = {
-	0x00,				/* handle */
+	0x01,				/* handle */
 	0x03,				/* complete data */
 	0x01,				/* controller should not fragment */
 	0x0d, /* Scan rsp data len */
@@ -7623,7 +7918,7 @@ static const struct generic_data add_ext_advertising_shortened_name_in_scrsp = {
 };
 
 static const uint8_t set_ext_scan_rsp_data_param_name_data_ok[] = {
-	0x00,				/* handle */
+	0x01,				/* handle */
 	0x03,				/* complete data */
 	0x01,				/* controller should not fragment */
 	0x1e, /* Scan rsp data len */
@@ -7668,7 +7963,7 @@ static const struct generic_data add_ext_advertising_name_data_inv = {
 };
 
 static const uint8_t set_ext_scan_rsp_data_name_data_appear[] = {
-	0x00,				/* handle */
+	0x01,				/* handle */
 	0x03,				/* complete data */
 	0x01,				/* controller should not fragment */
 	0x1e, /* Scan rsp data len */
@@ -7718,7 +8013,7 @@ static const uint8_t add_advertising_1m_param_uuid[] = {
 };
 
 static uint8_t set_connectable_off_ext_1m_adv_param[] = {
-	0x00,					/* Handle */
+	0x01,					/* Handle */
 	0x00, 0x00, 			/* Event type */
 	0x00, 0x08, 0x00,		/* min_interval */
 	0x00, 0x08, 0x00,		/* max_interval */
@@ -7766,7 +8061,7 @@ static const uint8_t add_advertising_2m_param_uuid[] = {
 };
 
 static uint8_t set_connectable_off_ext_2m_adv_param[] = {
-	0x00,					/* Handle */
+	0x01,					/* Handle */
 	0x00, 0x00, 			/* Event type */
 	0x00, 0x08, 0x00,		/* min_interval */
 	0x00, 0x08, 0x00,		/* max_interval */
@@ -7814,7 +8109,7 @@ static const uint8_t add_advertising_coded_param_uuid[] = {
 };
 
 static uint8_t set_connectable_off_ext_coded_adv_param[] = {
-	0x00,					/* Handle */
+	0x01,					/* Handle */
 	0x00, 0x00, 			/* Event type */
 	0x00, 0x08, 0x00,		/* min_interval */
 	0x00, 0x08, 0x00,		/* max_interval */
@@ -7865,7 +8160,7 @@ static const uint8_t add_advertising_param_scanrsp_1m[] = {
 };
 
 static uint8_t set_connectable_off_scan_ext_pdu_adv_param[] = {
-	0x00,					/* Handle */
+	0x01,					/* Handle */
 	0x02, 0x00,				/* Event type */
 	0x00, 0x08, 0x00,		/* min_interval */
 	0x00, 0x08,	0x00,		/* max_interval */
@@ -7896,7 +8191,7 @@ static const struct generic_data add_ext_advertising_success_scannable = {
 };
 
 static uint8_t set_connectable_on_ext_pdu_adv_param[] = {
-	0x00,					/* Handle */
+	0x01,					/* Handle */
 	0x01, 0x00,				/* Event type */
 	0x00, 0x08, 0x00,		/* min_interval */
 	0x00, 0x08,	0x00,		/* max_interval */
@@ -7981,6 +8276,24 @@ static void setup_add_advertising_1m(const void *test_data)
 						NULL, NULL);
 }
 
+static uint8_t preset_connectable_on_ext_pdu_adv_param[] = {
+	0x01,					/* Handle */
+	0x01, 0x00,				/* Event type */
+	0x00, 0x08, 0x00,			/* min_interval */
+	0x00, 0x08, 0x00,			/* max_interval */
+	0x07,					/* channel_map */
+	0x00,					/* own_addr_type */
+	0x00,					/* peer_addr_type */
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* peer_addr */
+	0x00,					/* filter_policy */
+	0x00,					/* Tx power */
+	0x01,					/* Primary PHY */
+	0x00,					/* primary adv max skip */
+	0x01,					/* Secondary PHY */
+	0x00,					/* adv sid*/
+	0x00,					/* Scan req notification */
+};
+
 static const struct generic_data add_ext_advertising_conn_on_1m = {
 	.send_opcode = MGMT_OP_SET_CONNECTABLE,
 	.send_param = set_connectable_on_param,
@@ -7989,8 +8302,8 @@ static const struct generic_data add_ext_advertising_conn_on_1m = {
 	.expect_param = set_connectable_settings_param_3,
 	.expect_len = sizeof(set_connectable_settings_param_3),
 	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_ADV_PARAMS,
-	.expect_hci_param = set_connectable_on_ext_pdu_adv_param,
-	.expect_hci_len = sizeof(set_connectable_on_ext_pdu_adv_param),
+	.expect_hci_param = preset_connectable_on_ext_pdu_adv_param,
+	.expect_hci_len = sizeof(preset_connectable_on_ext_pdu_adv_param),
 };
 
 static void setup_add_advertising_connectable_1m(const void *test_data)
@@ -8023,6 +8336,24 @@ static void setup_add_advertising_connectable_1m(const void *test_data)
 						NULL, NULL);
 }
 
+static uint8_t preset_connectable_off_ext_1m_adv_param[] = {
+	0x01,					/* Handle */
+	0x00, 0x00,				/* Event type */
+	0x00, 0x08, 0x00,			/* min_interval */
+	0x00, 0x08, 0x00,			/* max_interval */
+	0x07,					/* channel_map */
+	0x01,					/* own_addr_type */
+	0x00,					/* peer_addr_type */
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* peer_addr */
+	0x00,					/* filter_policy */
+	0x00,					/* Tx power */
+	0x01,					/* Primary PHY */
+	0x00,					/* primary adv max skip */
+	0x01,					/* Secondary PHY */
+	0x00,					/* adv sid*/
+	0x00,					/* Scan req notification */
+};
+
 static const struct generic_data add_ext_advertising_conn_off_1m = {
 	.send_opcode = MGMT_OP_SET_CONNECTABLE,
 	.send_param = set_connectable_off_param,
@@ -8031,8 +8362,8 @@ static const struct generic_data add_ext_advertising_conn_off_1m = {
 	.expect_param = set_le_settings_param_2,
 	.expect_len = sizeof(set_le_settings_param_2),
 	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_ADV_PARAMS,
-	.expect_hci_param = set_connectable_off_ext_1m_adv_param,
-	.expect_hci_len = sizeof(set_connectable_off_ext_1m_adv_param),
+	.expect_hci_param = preset_connectable_off_ext_1m_adv_param,
+	.expect_hci_len = sizeof(preset_connectable_off_ext_1m_adv_param),
 };
 
 static const uint8_t get_phy_param[] = {
@@ -8773,6 +9104,61 @@ static void test_connected_and_advertising(const void *test_data)
 						data, NULL);
 }
 
+static void read_50_controller_cap_complete(uint8_t status, uint16_t length,
+					const void *param, void *user_data)
+{
+	struct test_data *data = user_data;
+	const struct mgmt_rp_read_controller_cap *rp = param;
+	const uint8_t *ptr = rp->cap;
+	size_t offset = 0;
+	uint8_t tag_len;
+	uint8_t tag_type;
+
+	if (status || !param) {
+		tester_warn("Failed to read advertising features: %s (0x%02x)",
+						mgmt_errstr(status), status);
+		tester_test_failed();
+	}
+
+	if (sizeof(rp->cap_len) + rp->cap_len != length) {
+		tester_warn("Controller capabilities malformed, size %zu != %u",
+				sizeof(rp->cap_len) + rp->cap_len, length);
+		tester_test_failed();
+	}
+
+	while (offset < rp->cap_len) {
+		tag_len = ptr[offset++];
+		tag_type = ptr[offset++];
+
+		switch (tag_type) {
+		case MGMT_CAP_LE_TX_PWR:
+			if ((tag_len - sizeof(tag_type)) != 2) {
+				tester_warn("TX power had unexpected length %d",
+					tag_len);
+				break;
+			}
+			tester_print("Expected Tx Power discovered: %d-%d",
+					ptr[offset], ptr[offset+1]);
+			test_condition_complete(data);
+		}
+
+		/* Step to the next entry */
+		offset += (tag_len - sizeof(tag_type));
+	}
+}
+
+static void test_50_controller_cap_response(const void *test_data)
+{
+	struct test_data *data = tester_get_data();
+
+	test_add_condition(data);
+
+	mgmt_send(data->mgmt_alt, MGMT_OP_READ_CONTROLLER_CAP, data->mgmt_index,
+						0, NULL,
+						read_50_controller_cap_complete,
+						data, NULL);
+}
+
 int main(int argc, char *argv[])
 {
 	tester_init(&argc, &argv);
@@ -9094,19 +9480,19 @@ int main(int argc, char *argv[])
 				&set_sc_only_on_success_test_2,
 				NULL, test_command_generic);
 
-	test_bredrle("Set High Speed on - Success",
+	test_hs("Set High Speed on - Success",
 				&set_hs_on_success_test,
 				NULL, test_command_generic);
-	test_bredrle("Set High Speed on - Invalid parameters 1",
+	test_hs("Set High Speed on - Invalid parameters 1",
 				&set_hs_on_invalid_param_test_1,
 				NULL, test_command_generic);
-	test_bredrle("Set High Speed on - Invalid parameters 2",
+	test_hs("Set High Speed on - Invalid parameters 2",
 				&set_hs_on_invalid_param_test_2,
 				NULL, test_command_generic);
-	test_bredrle("Set High Speed on - Invalid parameters 3",
+	test_hs("Set High Speed on - Invalid parameters 3",
 				&set_hs_on_invalid_param_test_3,
 				NULL, test_command_generic);
-	test_bredrle("Set High Speed on - Invalid index",
+	test_hs("Set High Speed on - Invalid index",
 				&set_hs_on_invalid_index_test,
 				NULL, test_command_generic);
 
@@ -10226,6 +10612,50 @@ int main(int argc, char *argv[])
 				&conn_master_adv_non_conneactable_test,
 				setup_advertise_while_connected,
 				test_connected_and_advertising, 10);
+
+	test_bredrle("Read Controller Capabilities - Invalid parameters",
+				&read_controller_cap_invalid_param_test,
+				NULL, test_command_generic);
+
+	test_bredrle50("Read Controller Capabilities - (5.0) Success",
+				&read_controller_cap_success,
+				NULL, test_50_controller_cap_response);
+
+	test_bredrle("Ext Adv MGMT Params - Unpowered",
+				&adv_params_fail_unpowered,
+				setup_ext_adv_not_powered,
+				test_command_generic);
+
+	test_bredrle("Ext Adv MGMT Params - Invalid parameters",
+				&adv_params_fail_invalid_params,
+				NULL, test_command_generic);
+
+	test_bredrle("Ext Adv MGMT Params - Success",
+				&adv_params_success,
+				NULL, test_command_generic);
+
+	test_bredrle50("Ext Adv MGMT Params - (5.0) Success",
+				&adv_params_success_50,
+				NULL, test_command_generic);
+
+	test_bredrle("Ext Adv MGMT - Data set without Params",
+				&adv_data_fail_no_params,
+				NULL, test_command_generic);
+
+	test_bredrle50("Ext Adv MGMT - AD Data (5.0) Invalid parameters",
+				&adv_data_invalid_params,
+				setup_ext_adv_params,
+				test_command_generic);
+
+	test_bredrle50("Ext Adv MGMT - AD Data (5.0) Success",
+				&adv_data_success,
+				setup_ext_adv_params,
+				test_command_generic);
+
+	test_bredrle50("Ext Adv MGMT - AD Scan Response (5.0) Success",
+				&adv_scan_rsp_success,
+				setup_ext_adv_params,
+				test_command_generic);
 
 	return tester_run();
 }

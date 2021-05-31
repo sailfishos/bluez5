@@ -326,7 +326,7 @@ static void pull_end(struct phonebook_data *data, gboolean last)
 	data->pull_buf = NULL;
 	data->pull_count = 0;
 
-	DBG("Forwarding %d bytes, %d items (%d new missed calls).",
+	DBG("Forwarding %zu bytes, %d items (%d new missed calls).",
 		buf ? strlen(buf) : 0, count, data->newmissedcalls);
 	data->cb(buf, buf ? strlen(buf) : 0, count,
 		data->newmissedcalls > 0xff ? 0xff : data->newmissedcalls,

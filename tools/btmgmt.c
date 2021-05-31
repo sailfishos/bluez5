@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2011  Intel Corporation. All rights reserved.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -92,6 +79,17 @@ static void set_index(const char *arg)
 		mgmt_index = atoi(&arg[3]);
 	else
 		mgmt_index = atoi(arg);
+}
+
+static bool parse_setting(int argc, char **argv, uint8_t *val)
+{
+	if (strcasecmp(argv[1], "on") == 0 || strcasecmp(argv[1], "yes") == 0)
+		*val = 1;
+	else if (strcasecmp(argv[1], "off") == 0)
+		*val = 0;
+	else
+		*val = atoi(argv[1]);
+	return true;
 }
 
 static void update_prompt(uint16_t index)
@@ -353,6 +351,8 @@ static const char *settings_str[] = {
 				"privacy",
 				"configuration",
 				"static-addr",
+				"phy-configuration",
+				"wide-band-speech",
 };
 
 static const char *settings2str(uint32_t settings)
@@ -1000,6 +1000,34 @@ static void advertising_removed(uint16_t index, uint16_t len,
 	print("hci%u advertising_removed: instance %u", index, ev->instance);
 }
 
+static void advmon_added(uint16_t index, uint16_t len, const void *param,
+							void *user_data)
+{
+	const struct mgmt_ev_adv_monitor_added *ev = param;
+
+	if (len < sizeof(*ev)) {
+		error("Too small (%u bytes) %s event", len, __func__);
+		return;
+	}
+
+	print("hci%u %s: handle %u", index, __func__,
+					le16_to_cpu(ev->monitor_handle));
+}
+
+static void advmon_removed(uint16_t index, uint16_t len, const void *param,
+							void *user_data)
+{
+	const struct mgmt_ev_adv_monitor_removed *ev = param;
+
+	if (len < sizeof(*ev)) {
+		error("Too small (%u bytes) %s event", len, __func__);
+		return;
+	}
+
+	print("hci%u %s: handle %u", index, __func__,
+					le16_to_cpu(ev->monitor_handle));
+}
+
 static void version_rsp(uint8_t status, uint16_t len, const void *param,
 							void *user_data)
 {
@@ -1023,7 +1051,7 @@ done:
 	bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static void cmd_version(int argc, char **argv)
+static void cmd_revision(int argc, char **argv)
 {
 	if (mgmt_send(mgmt, MGMT_OP_READ_VERSION, MGMT_INDEX_NONE,
 				0, NULL, version_rsp, NULL, NULL) == 0) {
@@ -1399,7 +1427,7 @@ static void ext_index_rsp(uint8_t status, uint16_t len, const void *param,
 							void *user_data)
 {
 	const struct mgmt_rp_read_ext_index_list *rp = param;
-	uint16_t count, index_filter = PTR_TO_UINT(user_data);
+	uint16_t count;
 	unsigned int i;
 
 	if (status != 0) {
@@ -1427,9 +1455,6 @@ static void ext_index_rsp(uint8_t status, uint16_t len, const void *param,
 	for (i = 0; i < count; i++) {
 		uint16_t index = le16_to_cpu(rp->entry[i].index);
 		char *busstr = hci_bustostr(rp->entry[i].bus);
-
-		if (index_filter != MGMT_INDEX_NONE && index_filter != index)
-			continue;
 
 		switch (rp->entry[i].type) {
 		case 0x00:
@@ -1469,14 +1494,450 @@ static void ext_index_rsp(uint8_t status, uint16_t len, const void *param,
 		bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static void cmd_extinfo(
-						int argc, char **argv)
+static void cmd_extinfo(int argc, char **argv)
 {
-	if (!mgmt_send(mgmt, MGMT_OP_READ_EXT_INDEX_LIST,
-				MGMT_INDEX_NONE, 0, NULL,
-				ext_index_rsp, UINT_TO_PTR(index), NULL)) {
-		error("Unable to send ext_index_list cmd");
+	if (mgmt_index == MGMT_INDEX_NONE) {
+		if (!mgmt_send(mgmt, MGMT_OP_READ_EXT_INDEX_LIST,
+					MGMT_INDEX_NONE, 0, NULL,
+					ext_index_rsp, mgmt, NULL)) {
+			error("Unable to send ext_index_list cmd");
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+
+		return;
+	}
+
+	if (!mgmt_send(mgmt, MGMT_OP_READ_EXT_INFO, mgmt_index, 0, NULL,
+					ext_info_rsp,
+					UINT_TO_PTR(mgmt_index), NULL)) {
+		error("Unable to send ext_read_info cmd");
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+}
+
+static void sec_info_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	const struct mgmt_rp_read_controller_cap *rp = param;
+	uint16_t index = PTR_TO_UINT(user_data);
+
+	if (status != 0) {
+		error("Reading hci%u security failed with status 0x%02x (%s)",
+					index, status, mgmt_errstr(status));
+		goto done;
+	}
+
+	if (len < sizeof(*rp)) {
+		error("Too small info reply (%u bytes)", len);
+		goto done;
+	}
+
+	print("Primary controller (hci%u)", index);
+	print("\tSecurity info length: %u", le16_to_cpu(rp->cap_len));
+
+done:
+	pending_index--;
+
+	if (pending_index > 0)
+		return;
+
+	bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static void sec_index_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	const struct mgmt_rp_read_ext_index_list *rp = param;
+	uint16_t count;
+	unsigned int i;
+
+	if (status != 0) {
+		error("Reading ext index list failed with status 0x%02x (%s)",
+						status, mgmt_errstr(status));
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	if (len < sizeof(*rp)) {
+		error("Too small ext index list reply (%u bytes)", len);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	count = get_le16(&rp->num_controllers);
+
+	if (len < sizeof(*rp) + count * (sizeof(uint16_t) + sizeof(uint8_t))) {
+		error("Index count (%u) doesn't match reply length (%u)",
+								count, len);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	for (i = 0; i < count; i++) {
+		uint16_t index = le16_to_cpu(rp->entry[i].index);
+
+		if (rp->entry[i].type != 0x00)
+			continue;
+
+		if (!mgmt_send(mgmt, MGMT_OP_READ_CONTROLLER_CAP,
+						index, 0, NULL, sec_info_rsp,
+						UINT_TO_PTR(index), NULL)) {
+			error("Unable to send read_security_info cmd");
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+		pending_index++;
+	}
+
+	if (!count)
+		bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static void cmd_secinfo(int argc, char **argv)
+{
+	if (mgmt_index == MGMT_INDEX_NONE) {
+		if (!mgmt_send(mgmt, MGMT_OP_READ_EXT_INDEX_LIST,
+					MGMT_INDEX_NONE, 0, NULL,
+					sec_index_rsp, mgmt, NULL)) {
+			error("Unable to send ext_index_list cmd");
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+
+		return;
+	}
+
+	if (!mgmt_send(mgmt, MGMT_OP_READ_CONTROLLER_CAP, mgmt_index, 0, NULL,
+					sec_info_rsp,
+					UINT_TO_PTR(mgmt_index), NULL)) {
+		error("Unable to send read_security_info cmd");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+}
+
+static void exp_info_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	const struct mgmt_rp_read_exp_features_info *rp = param;
+	uint16_t index = PTR_TO_UINT(user_data);
+
+	if (status != 0) {
+		error("Reading hci%u exp features failed with status 0x%02x (%s)",
+					index, status, mgmt_errstr(status));
+		goto done;
+	}
+
+	if (len < sizeof(*rp)) {
+		error("Too small info reply (%u bytes)", len);
+		goto done;
+	}
+
+	if (index == MGMT_INDEX_NONE)
+		print("Global");
+	else
+		print("Primary controller (hci%u)", index);
+
+	print("\tNumber of experimental features: %u",
+					le16_to_cpu(rp->feature_count));
+
+done:
+	pending_index--;
+
+	if (pending_index > 0)
+		return;
+
+	bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static void exp_index_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	const struct mgmt_rp_read_ext_index_list *rp = param;
+	uint16_t count;
+	unsigned int i;
+
+	if (status != 0) {
+		error("Reading ext index list failed with status 0x%02x (%s)",
+						status, mgmt_errstr(status));
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	if (len < sizeof(*rp)) {
+		error("Too small ext index list reply (%u bytes)", len);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	count = get_le16(&rp->num_controllers);
+
+	if (len < sizeof(*rp) + count * (sizeof(uint16_t) + sizeof(uint8_t))) {
+		error("Index count (%u) doesn't match reply length (%u)",
+								count, len);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	for (i = 0; i < count; i++) {
+		uint16_t index = le16_to_cpu(rp->entry[i].index);
+
+		if (rp->entry[i].type != 0x00)
+			continue;
+
+		if (!mgmt_send(mgmt, MGMT_OP_READ_EXP_FEATURES_INFO,
+						index, 0, NULL, exp_info_rsp,
+						UINT_TO_PTR(index), NULL)) {
+				error("Unable to send read_exp_features_info cmd");
+				return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+		pending_index++;
+	}
+}
+
+static void cmd_expinfo(int argc, char **argv)
+{
+	if (mgmt_index == MGMT_INDEX_NONE) {
+		if (!mgmt_send(mgmt, MGMT_OP_READ_EXT_INDEX_LIST,
+					MGMT_INDEX_NONE, 0, NULL,
+					exp_index_rsp, mgmt, NULL)) {
+			error("Unable to send ext_index_list cmd");
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+
+		if (!mgmt_send(mgmt, MGMT_OP_READ_EXP_FEATURES_INFO,
+					MGMT_INDEX_NONE, 0, NULL,
+					exp_info_rsp,
+					UINT_TO_PTR(MGMT_INDEX_NONE), NULL)) {
+			error("Unable to send read_exp_features_info cmd");
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+
+		pending_index++;
+		return;
+	}
+
+	if (!mgmt_send(mgmt, MGMT_OP_READ_EXP_FEATURES_INFO, mgmt_index,
+					0, NULL, exp_info_rsp,
+					UINT_TO_PTR(mgmt_index), NULL)) {
+		error("Unable to send read_exp_features_info cmd");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+}
+
+static void exp_debug_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	if (status != 0)
+		error("Set debug feature failed with status 0x%02x (%s)",
+						status, mgmt_errstr(status));
+	else
+		print("Debug feature successfully set");
+
+	bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static void cmd_exp_debug(int argc, char **argv)
+{
+	/* d4992530-b9ec-469f-ab01-6c481c47da1c */
+	static const uint8_t uuid[16] = {
+				0x1c, 0xda, 0x47, 0x1c, 0x48, 0x6c, 0x01, 0xab,
+				0x9f, 0x46, 0xec, 0xb9, 0x30, 0x25, 0x99, 0xd4,
+	};
+	struct mgmt_cp_set_exp_feature cp;
+	uint8_t val;
+
+	if (parse_setting(argc, argv, &val) == false)
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+
+	memset(&cp, 0, sizeof(cp));
+	memcpy(cp.uuid, uuid, 16);
+	cp.action = val;
+
+	if (mgmt_send(mgmt, MGMT_OP_SET_EXP_FEATURE, mgmt_index,
+			sizeof(cp), &cp, exp_debug_rsp, NULL, NULL) == 0) {
+		error("Unable to send debug feature cmd");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+}
+
+static void exp_privacy_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	if (status != 0)
+		error("Set LL privacy feature failed with status 0x%02x (%s)",
+						status, mgmt_errstr(status));
+	else
+		print("LL privacy feature successfully set");
+
+	bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static void cmd_exp_privacy(int argc, char **argv)
+{
+	/* 15c0a148-c273-11ea-b3de-0242ac130004 */
+	static const uint8_t uuid[16] = {
+				0x04, 0x00, 0x13, 0xac, 0x42, 0x02, 0xde, 0xb3,
+				0xea, 0x11, 0x73, 0xc2, 0x48, 0xa1, 0xc0, 0x15,
+	};
+	struct mgmt_cp_set_exp_feature cp;
+	uint8_t val;
+
+	if (parse_setting(argc, argv, &val) == false)
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+
+	memset(&cp, 0, sizeof(cp));
+	memcpy(cp.uuid, uuid, 16);
+	cp.action = val;
+
+	if (mgmt_send(mgmt, MGMT_OP_SET_EXP_FEATURE, mgmt_index,
+			sizeof(cp), &cp, exp_privacy_rsp, NULL, NULL) == 0) {
+		error("Unable to send LL privacy feature cmd");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+}
+
+static void print_mgmt_tlv(void *data, void *user_data)
+{
+	const struct mgmt_tlv *entry = data;
+	char buf[256];
+
+	bin2hex(entry->value, entry->length, buf, sizeof(buf));
+	print("Type: 0x%04x\tLength: %02hhu\tValue: %s", entry->type,
+							entry->length, buf);
+}
+
+static void read_sysconfig_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	struct mgmt_tlv_list *tlv_list;
+
+	if (status != 0) {
+		error("Read system configuration failed with status "
+				"0x%02x (%s)", status, mgmt_errstr(status));
+		return;
+	}
+
+	tlv_list = mgmt_tlv_list_load_from_buf(param, len);
+	if (!tlv_list) {
+		error("Unable to parse response of read system configuration");
+		return;
+	}
+
+	mgmt_tlv_list_foreach(tlv_list, print_mgmt_tlv, NULL);
+	mgmt_tlv_list_free(tlv_list);
+}
+
+static void cmd_read_sysconfig(int argc, char **argv)
+{
+	uint16_t index;
+
+	index = mgmt_index;
+	if (index == MGMT_INDEX_NONE)
+		index = 0;
+
+	if (!mgmt_send(mgmt, MGMT_OP_READ_DEF_SYSTEM_CONFIG, index,
+			0, NULL, read_sysconfig_rsp, NULL, NULL)) {
+		error("Unable to send read system configuration cmd");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+}
+
+static bool parse_mgmt_tlv(const char *input, uint16_t *type, uint8_t *length,
+								uint8_t *value)
+{
+	int i, value_starting_pos;
+
+	if (sscanf(input, "%4hx:%1hhu:%n", type, length,
+						&value_starting_pos) < 2) {
+		return false;
+	}
+
+	input += value_starting_pos;
+
+	if (*length * 2 != strlen(input))
+		return false;
+
+	for (i = 0; i < *length; i++) {
+		if (sscanf(input + i * 2, "%2hhx", &value[i]) < 1)
+			return false;
+	}
+
+	return true;
+}
+
+static void set_sysconfig_rsp(uint8_t status, uint16_t len, const void *param,
+								void *user_data)
+{
+	if (status != MGMT_STATUS_SUCCESS) {
+		error("Could not set default system configuration with status "
+				"0x%02x (%s)", status, mgmt_errstr(status));
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	print("Set default system configuration success");
+
+	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static bool set_sysconfig(int argc, char **argv)
+{
+	struct mgmt_tlv_list *tlv_list = NULL;
+	int i;
+	uint16_t index, type;
+	uint8_t length;
+	uint8_t value[256] = {};
+	bool success = false;
+
+	index = mgmt_index;
+	if (index == MGMT_INDEX_NONE)
+		index = 0;
+
+	tlv_list = mgmt_tlv_list_new();
+	if (!tlv_list) {
+		error("tlv_list failed to init");
+		goto failed;
+	}
+
+	for (i = 0; i < argc; i++) {
+		if (!parse_mgmt_tlv(argv[i], &type, &length, value)) {
+			error("failed to parse");
+			goto failed;
+		}
+
+		if (!mgmt_tlv_add(tlv_list, type, length, value)) {
+			error("failed to add");
+			goto failed;
+		}
+	}
+
+	if (!mgmt_send_tlv(mgmt, MGMT_OP_SET_DEF_SYSTEM_CONFIG, index,
+				tlv_list, set_sysconfig_rsp, NULL, NULL)) {
+		error("Failed to send \"Set Default System Configuration\""
+								" command");
+		goto failed;
+	}
+
+	success = true;
+
+failed:
+	if (tlv_list)
+		mgmt_tlv_list_free(tlv_list);
+
+	return success;
+}
+
+static void set_sysconfig_usage(void)
+{
+	bt_shell_usage();
+	print("Parameters:\n\t-v <type:length:value>...\n"
+		"e.g.:\n\tset-sysconfig -v 001a:2:1234 001f:1:00");
+}
+
+static void cmd_set_sysconfig(int argc, char **argv)
+{
+	bool success = false;
+
+	if (strcasecmp(argv[1], "-v") == 0 && argc > 2) {
+		argc -= 2;
+		argv += 2;
+		success = set_sysconfig(argc, argv);
+	}
+
+	if (!success) {
+		set_sysconfig_usage();
+		bt_shell_noninteractive_quit(EXIT_FAILURE);
 	}
 }
 
@@ -1675,17 +2136,6 @@ static void setting_rsp(uint16_t op, uint16_t id, uint8_t status, uint16_t len,
 
 done:
 	bt_shell_noninteractive_quit(EXIT_SUCCESS);
-}
-
-static bool parse_setting(int argc, char **argv, uint8_t *val)
-{
-	if (strcasecmp(argv[1], "on") == 0 || strcasecmp(argv[1], "yes") == 0)
-		*val = 1;
-	else if (strcasecmp(argv[1], "off") == 0)
-		*val = 0;
-	else
-		*val = atoi(argv[1]);
-	return true;
 }
 
 static void cmd_setting(uint16_t op, int argc, char **argv)
@@ -4311,7 +4761,350 @@ static void cmd_phy(int argc, char **argv)
 	if (mgmt_send(mgmt, MGMT_OP_SET_PHY_CONFIGURATION, index, sizeof(cp),
 					&cp, set_phy_rsp, NULL, NULL) == 0) {
 		error("Unable to send %s cmd",
-				mgmt_opstr(MGMT_OP_GET_PHY_CONFIGURATION));
+				mgmt_opstr(MGMT_OP_SET_PHY_CONFIGURATION));
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+}
+
+static void cmd_wbs(int argc, char **argv)
+{
+	cmd_setting(MGMT_OP_SET_WIDEBAND_SPEECH, argc, argv);
+}
+
+static const char * const advmon_features_str[] = {
+	"Pattern monitor with logic OR.",
+};
+
+static const char *advmon_features2str(uint32_t features)
+{
+	static char str[512];
+	unsigned int off, i;
+
+	off = 0;
+	snprintf(str, sizeof(str), "\n\tNone");
+
+	for (i = 0; i < NELEM(advmon_features_str); i++) {
+		if ((features & (1 << i)) != 0 && off < sizeof(str))
+			off += snprintf(str + off, sizeof(str) - off, "\n\t%s",
+						advmon_features_str[i]);
+	}
+
+	return str;
+}
+
+static void advmon_features_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	const struct mgmt_rp_read_adv_monitor_features *rp = param;
+	uint32_t supported_features, enabled_features;
+	uint16_t num_handles;
+	int i;
+
+	if (status != MGMT_STATUS_SUCCESS) {
+		error("Reading adv monitor features failed with status 0x%02x "
+					"(%s)", status, mgmt_errstr(status));
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	if (len < sizeof(*rp)) {
+		error("Too small adv monitor features reply (%u bytes)", len);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	supported_features = le32_to_cpu(rp->supported_features);
+	enabled_features = le32_to_cpu(rp->enabled_features);
+	num_handles = le16_to_cpu(rp->num_handles);
+
+	if (len < sizeof(*rp) + num_handles * sizeof(uint16_t)) {
+		error("Handles count (%u) doesn't match reply length (%u)",
+							num_handles, len);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	print("Supported features:%s", advmon_features2str(supported_features));
+	print("Enabled features:%s", advmon_features2str(enabled_features));
+	print("Max number of handles: %u", le16_to_cpu(rp->max_num_handles));
+	print("Max number of patterns: %u", rp->max_num_patterns);
+	print("Handles list with %u item%s", num_handles,
+			num_handles == 0 ? "" : num_handles == 1 ? ":" : "s:");
+	for (i = 0; i < num_handles; i++)
+		print("\t0x%04x ", le16_to_cpu(rp->handles[i]));
+
+	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static void cmd_advmon_features(int argc, char **argv)
+{
+	uint16_t index;
+
+	index = mgmt_index;
+	if (index == MGMT_INDEX_NONE)
+		index = 0;
+
+	if (!mgmt_send(mgmt, MGMT_OP_READ_ADV_MONITOR_FEATURES, index, 0, NULL,
+					advmon_features_rsp, NULL, NULL)) {
+		error("Unable to send advertising monitor features command");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+}
+
+static void advmon_add_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	const struct mgmt_rp_add_adv_patterns_monitor *rp = param;
+
+	if (status != MGMT_STATUS_SUCCESS) {
+		error("Could not add advertisement monitor with status "
+				"0x%02x (%s)", status, mgmt_errstr(status));
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	print("Advertisement monitor with handle:0x%04x added",
+					le16_to_cpu(rp->monitor_handle));
+	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static bool str2pattern(struct mgmt_adv_pattern *pattern, const char *str)
+{
+	int type_len, offset_len, offset_end_pos, str_len;
+	int i, j;
+	char pattern_str[62] = { 0 };
+	char tmp;
+
+	if (sscanf(str, "%2hhx%n:%2hhx%n:%s", &pattern->ad_type, &type_len,
+			&pattern->offset, &offset_end_pos, pattern_str) != 3)
+		return false;
+
+	offset_len = offset_end_pos - type_len - 1;
+	str_len = strlen(pattern_str);
+	pattern->length = str_len / 2 + str_len % 2;
+
+	if (type_len > 2 || offset_len > 2 ||
+					pattern->offset + pattern->length > 31)
+		return false;
+
+	for (i = 0, j = 0; i < str_len; i++, j++) {
+		if (sscanf(&pattern_str[i++], "%2hhx", &pattern->value[j])
+									!= 1)
+			return false;
+		if (i < str_len && sscanf(&pattern_str[i], "%1hhx", &tmp) != 1)
+			return false;
+	}
+
+	return true;
+}
+
+static struct option add_monitor_rssi_options[] = {
+	{ "help",		0, 0, 'h' },
+	{ "high-threshold",	1, 0, 'R' },
+	{ "low-threshold",	1, 0, 'r' },
+	{ "high-timeout",	1, 0, 'T' },
+	{ "low-timeout",	1, 0, 't' },
+	{ "sampling",		1, 0, 's' },
+	{ 0, 0, 0, 0 }
+};
+
+static void advmon_add_pattern_usage(void)
+{
+	bt_shell_usage();
+	print("patterns format:\n"
+		"\t<ad_type:offset:pattern> [patterns]\n"
+		"e.g.:\n"
+		"\tadd-pattern 0:1:c504 ff:a:9a55beef");
+}
+
+static void advmon_add_pattern_rssi_usage(void)
+{
+	bt_shell_usage();
+	print("RSSI options:\n"
+		"\t -R, --high-threshold <dBm>  "
+			"RSSI high threshold. Default: -70\n"
+		"\t -r, --low-threshold <dBm>   "
+			"RSSI low threshold. Default: -50\n"
+		"\t -T, --high-timeout <s>      "
+			"RSSI high threshold duration. Default: 0\n"
+		"\t -t, --low-timeout <s>       "
+			"RSSI low threshold duration. Default: 5\n"
+		"\t -s, --sampling <N * 100ms>  "
+			"RSSI sampling period. Default: 0\n"
+		"patterns format:\n"
+		"\t<ad_type:offset:pattern> [patterns]\n"
+		"e.g.:\n"
+		"\tadd-pattern-rssi -R 0xb2 -r -102 0:1:c504 ff:a:9a55beef");
+}
+
+static void cmd_advmon_add_pattern(int argc, char **argv)
+{
+	bool success = true;
+	uint16_t index;
+	int i, cp_len;
+	struct mgmt_cp_add_adv_monitor *cp = NULL;
+
+	if (!strcmp(argv[1], "-h"))
+		goto done;
+
+	argc -= 1;
+	argv += 1;
+
+	cp_len = sizeof(*cp) + argc * sizeof(struct mgmt_adv_pattern);
+	cp = malloc0(cp_len);
+	if (!cp) {
+		error("Failed to alloc patterns.");
+		success = false;
+		goto done;
+	}
+
+	cp->pattern_count = argc;
+
+	for (i = 0; i < argc; i++) {
+		if (!str2pattern(&cp->patterns[i], argv[i])) {
+			error("Failed to parse monitor patterns.");
+			success = false;
+			goto done;
+		}
+	}
+
+	index = mgmt_index;
+	if (index == MGMT_INDEX_NONE)
+		index = 0;
+
+	if (!mgmt_send(mgmt, MGMT_OP_ADD_ADV_PATTERNS_MONITOR, index,
+				cp_len, cp, advmon_add_rsp, NULL, NULL)) {
+		error("Unable to send Add Advertising Monitor command");
+		success = false;
+		goto done;
+	}
+
+	free(cp);
+	return;
+
+done:
+	free(cp);
+	advmon_add_pattern_usage();
+	bt_shell_noninteractive_quit(success ? EXIT_SUCCESS : EXIT_FAILURE);
+}
+
+static void cmd_advmon_add_pattern_rssi(int argc, char **argv)
+{
+	bool success = true;
+	int opt;
+	int8_t rssi_low = -70;
+	int8_t rssi_high = -50;
+	uint16_t rssi_low_timeout = 5;
+	uint16_t rssi_high_timeout = 0;
+	uint8_t rssi_sampling_period = 0;
+	uint16_t index;
+	int i, cp_len;
+	struct mgmt_cp_add_adv_patterns_monitor_rssi *cp = NULL;
+
+	while ((opt = getopt_long(argc, argv, "+hr:R:t:T:s:",
+				add_monitor_rssi_options, NULL)) != -1) {
+		switch (opt) {
+		case 'h':
+			goto done;
+		case 'r':
+			rssi_low = strtol(optarg, NULL, 0);
+			break;
+		case 'R':
+			rssi_high = strtol(optarg, NULL, 0);
+			break;
+		case 't':
+			rssi_low_timeout = strtol(optarg, NULL, 0);
+			break;
+		case 'T':
+			rssi_high_timeout = strtol(optarg, NULL, 0);
+			break;
+		case 's':
+			rssi_sampling_period = strtol(optarg, NULL, 0);
+			break;
+		default:
+			success = false;
+			goto done;
+		}
+	}
+
+	argc -= optind;
+	argv += optind;
+	optind = 0;
+
+	cp_len = sizeof(*cp) + argc * sizeof(struct mgmt_adv_pattern);
+	cp = malloc0(cp_len);
+	if (!cp) {
+		error("Failed to alloc patterns.");
+		success = false;
+		goto done;
+	}
+
+	cp->pattern_count = argc;
+	cp->rssi.high_threshold = rssi_high;
+	cp->rssi.low_threshold = rssi_low;
+	cp->rssi.high_threshold_timeout = htobs(rssi_high_timeout);
+	cp->rssi.low_threshold_timeout = htobs(rssi_low_timeout);
+	cp->rssi.sampling_period = rssi_sampling_period;
+
+	for (i = 0; i < argc; i++) {
+		if (!str2pattern(&cp->patterns[i], argv[i])) {
+			error("Failed to parse monitor patterns.");
+			success = false;
+			goto done;
+		}
+	}
+
+	index = mgmt_index;
+	if (index == MGMT_INDEX_NONE)
+		index = 0;
+
+	if (!mgmt_send(mgmt, MGMT_OP_ADD_ADV_PATTERNS_MONITOR_RSSI, index,
+				cp_len, cp, advmon_add_rsp, NULL, NULL)) {
+		error("Unable to send Add Advertising Monitor RSSI command");
+		success = false;
+		goto done;
+	}
+
+	free(cp);
+	return;
+
+done:
+	free(cp);
+	optind = 0;
+	advmon_add_pattern_rssi_usage();
+	bt_shell_noninteractive_quit(success ? EXIT_SUCCESS : EXIT_FAILURE);
+}
+
+static void advmon_remove_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	const struct mgmt_rp_remove_adv_monitor *rp = param;
+
+	if (status != MGMT_STATUS_SUCCESS) {
+		error("Could not remove advertisement monitor with status "
+				"0x%02x (%s)", status, mgmt_errstr(status));
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	print("Advertisement monitor with handle: 0x%04x removed",
+					le16_to_cpu(rp->monitor_handle));
+	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static void cmd_advmon_remove(int argc, char **argv)
+{
+	struct mgmt_cp_remove_adv_monitor cp;
+	uint16_t index, monitor_handle;
+
+	index = mgmt_index;
+	if (index == MGMT_INDEX_NONE)
+		index = 0;
+
+	if (sscanf(argv[1], "%hx", &monitor_handle) != 1) {
+		error("Wrong formatted handle argument");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	cp.monitor_handle = cpu_to_le16(monitor_handle);
+	if (mgmt_send(mgmt, MGMT_OP_REMOVE_ADV_MONITOR, index, sizeof(cp), &cp,
+					advmon_remove_rsp, NULL, NULL) == 0) {
+		error("Unable to send appearance cmd");
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 	}
 }
@@ -4368,6 +5161,10 @@ static void register_mgmt_callbacks(struct mgmt *mgmt, uint16_t index)
 						advertising_added, NULL, NULL);
 	mgmt_register(mgmt, MGMT_EV_ADVERTISING_REMOVED, index,
 					advertising_removed, NULL, NULL);
+	mgmt_register(mgmt, MGMT_EV_ADV_MONITOR_ADDED, index, advmon_added,
+								NULL, NULL);
+	mgmt_register(mgmt, MGMT_EV_ADV_MONITOR_REMOVED, index, advmon_removed,
+								NULL, NULL);
 }
 
 static void cmd_select(int argc, char **argv)
@@ -4384,13 +5181,30 @@ static void cmd_select(int argc, char **argv)
 	update_prompt(mgmt_index);
 }
 
+static const struct bt_shell_menu monitor_menu = {
+	.name = "monitor",
+	.desc = "Advertisement Monitor Submenu",
+	.entries = {
+	{ "features",		NULL,
+		cmd_advmon_features,	"Show advertisement monitor "
+					"features"			},
+	{ "remove",		"<handle>",
+		cmd_advmon_remove,	"Remove advertisement monitor "	},
+	{ "add-pattern",	"[-h] <patterns>",
+		cmd_advmon_add_pattern,	"Add advertisement monitor pattern" },
+	{ "add-pattern-rssi",	"[options] <patterns>",
+		cmd_advmon_add_pattern_rssi,
+		"Add advertisement monitor pattern with RSSI options"    },
+	{ } },
+};
+
 static const struct bt_shell_menu main_menu = {
 	.name = "main",
 	.entries = {
 	{ "select",		"<index>",
 		cmd_select,		"Select a different index"	},
-	{ "version",		NULL,
-		cmd_version,		"Get the MGMT Version"		},
+	{ "revision",		NULL,
+		cmd_revision,		"Get the MGMT Revision"		},
 	{ "commands",		NULL,
 		cmd_commands,		"List supported commands"	},
 	{ "config",		NULL,
@@ -4453,7 +5267,7 @@ static const struct bt_shell_menu main_menu = {
 		cmd_keys,		"Load Link Keys"		},
 	{ "ltks",		NULL,
 		cmd_ltks,		"Load Long Term Keys"		},
-	{ "irks",		"[--local <index>] [--file <file path>]",
+	{ "irks",		"[--local index] [--file file path]",
 		cmd_irks,		"Load Identity Resolving Keys"	},
 	{ "block",		"[-t type] <remote address>",
 		cmd_block,		"Block Device"			},
@@ -4517,6 +5331,20 @@ static const struct bt_shell_menu main_menu = {
 				"[EDR2M1SLOT] [EDR2M3SLOT] [EDR2M5SLOT]"
 				"[EDR3M1SLOT] [EDR3M3SLOT] [EDR3M5SLOT]",
 		cmd_phy,		"Get/Set PHY Configuration"	},
+	{ "wbs",		"<on/off>",
+		cmd_wbs,		"Toggle Wideband-Speech support"},
+	{ "secinfo",		NULL,
+		cmd_secinfo,		"Show security information"	},
+	{ "expinfo",		NULL,
+		cmd_expinfo,		"Show experimental features"	},
+	{ "exp-debug",		"<on/off>",
+		cmd_exp_debug,		"Set debug feature"		},
+	{ "exp-privacy",	"<on/off>",
+		cmd_exp_privacy,	"Set LL privacy feature"	},
+	{ "read-sysconfig",	NULL,
+		cmd_read_sysconfig,	"Read System Configuration"	},
+	{ "set-sysconfig",	"<-v|-h> [options...]",
+		cmd_set_sysconfig,	"Set System Configuration"	},
 	{} },
 };
 
@@ -4556,6 +5384,7 @@ int main(int argc, char *argv[])
 
 	bt_shell_init(argc, argv, &opt);
 	bt_shell_set_menu(&main_menu);
+	bt_shell_add_submenu(&monitor_menu);
 
 	mgmt = mgmt_new_default();
 	if (!mgmt) {

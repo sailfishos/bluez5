@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2017-2019  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
  *
  */
 
@@ -59,11 +50,40 @@ static bool match_bound_key(const void *a, const void *b)
 	return key->net_idx == idx;
 }
 
+static void finalize_key(void *a, void *b)
+{
+	struct mesh_app_key *key = a;
+	uint16_t net_idx = L_PTR_TO_UINT(b);
+
+	if (key->net_idx != net_idx)
+		return;
+
+	if (key->new_key_aid == APP_AID_INVALID)
+		return;
+
+	key->key_aid = key->new_key_aid;
+
+	key->new_key_aid = APP_AID_INVALID;
+
+	memcpy(key->key, key->new_key, 16);
+}
+
+void appkey_finalize(struct mesh_net *net, uint16_t net_idx)
+{
+	struct l_queue *app_keys;
+
+	app_keys = mesh_net_get_app_keys(net);
+	if (!app_keys)
+		return;
+
+	l_queue_foreach(app_keys, finalize_key, L_UINT_TO_PTR(net_idx));
+}
+
 static struct mesh_app_key *app_key_new(void)
 {
 	struct mesh_app_key *key = l_new(struct mesh_app_key, 1);
 
-	key->new_key_aid = 0xFF;
+	key->new_key_aid = APP_AID_INVALID;
 	return key;
 }
 
@@ -109,11 +129,11 @@ bool appkey_key_init(struct mesh_net *net, uint16_t net_idx, uint16_t app_idx,
 	if (!app_keys)
 		return NULL;
 
-	key = app_key_new();
-	if (!key)
+	if (!mesh_net_have_key(net, net_idx))
 		return false;
 
-	if (!mesh_net_have_key(net, net_idx))
+	key = app_key_new();
+	if (!key)
 		return false;
 
 	key->net_idx = net_idx;
@@ -155,7 +175,7 @@ const uint8_t *appkey_get_key(struct mesh_net *net, uint16_t app_idx,
 		return app_key->key;
 	}
 
-	if (app_key->new_key_aid == NET_NID_INVALID)
+	if (app_key->new_key_aid == APP_AID_INVALID)
 		return NULL;
 
 	*key_aid = app_key->new_key_aid;
@@ -320,7 +340,7 @@ int appkey_key_delete(struct mesh_net *net, uint16_t net_idx,
 	key = l_queue_find(app_keys, match_key_index, L_UINT_TO_PTR(app_idx));
 
 	if (!key)
-		return MESH_STATUS_INVALID_APPKEY;
+		return MESH_STATUS_SUCCESS;
 
 	if (key->net_idx != net_idx)
 		return MESH_STATUS_INVALID_NETKEY;

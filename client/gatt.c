@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2014  Intel Corporation. All rights reserved.
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -1860,9 +1847,12 @@ static int parse_options(DBusMessageIter *iter, uint16_t *offset, uint16_t *mtu,
 		} else if (strcasecmp(key, "prepare-authorize") == 0) {
 			if (var != DBUS_TYPE_BOOLEAN)
 				return -EINVAL;
-			if (prep_authorize)
-				dbus_message_iter_get_basic(&value,
-								prep_authorize);
+			if (prep_authorize) {
+				int tmp;
+
+				dbus_message_iter_get_basic(&value, &tmp);
+				*prep_authorize = !!tmp;
+			}
 		}
 
 		dbus_message_iter_next(&dict);
@@ -2141,6 +2131,12 @@ static void authorize_write_response(const char *input, void *user_data)
 		goto error;
 	}
 
+	if (aad->offset > chrc->value_len) {
+		err = "org.bluez.Error.InvalidOffset";
+
+		goto error;
+	}
+
 	/* Authorization check of prepare writes */
 	if (prep_authorize) {
 		reply = g_dbus_create_reply(pending_message, DBUS_TYPE_INVALID);
@@ -2271,6 +2267,11 @@ static DBusMessage *chrc_write_value(DBusConnection *conn, DBusMessage *msg,
 
 		return NULL;
 	}
+
+	if (offset > chrc->value_len)
+		return g_dbus_create_error(msg,
+				"org.bluez.Error.InvalidOffset", NULL);
+
 
 	/* Authorization check of prepare writes */
 	if (prep_authorize)
@@ -2682,6 +2683,10 @@ static DBusMessage *desc_write_value(DBusConnection *conn, DBusMessage *msg,
 	if (parse_options(&iter, &offset, NULL, &device, &link, NULL))
 		return g_dbus_create_error(msg,
 				"org.bluez.Error.InvalidArguments", NULL);
+
+	if (offset > desc->value_len)
+		return g_dbus_create_error(msg,
+				"org.bluez.Error.InvalidOffset", NULL);
 
 	if (write_value(&desc->value_len, &desc->value, value,
 					value_len, offset, desc->max_val_len))

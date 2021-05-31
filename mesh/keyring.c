@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2019  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
  *
  */
 
@@ -42,35 +33,52 @@ const char *dev_key_dir = "/dev_keys";
 const char *app_key_dir = "/app_keys";
 const char *net_key_dir = "/net_keys";
 
-bool keyring_put_net_key(struct mesh_node *node, uint16_t net_idx,
-						struct keyring_net_key *key)
+static int open_key_file(struct mesh_node *node, const char *key_dir,
+							uint16_t idx, int flags)
 {
 	const char *node_path;
-	char key_file[PATH_MAX];
-	bool result = false;
-	int fd;
+	char fname[PATH_MAX];
 
-	if (!node || !key)
-		return false;
+	if (!node)
+		return -1;
 
 	node_path = node_get_storage_dir(node);
 
-	if (strlen(node_path) + strlen(net_key_dir) + 1 + 3 >= PATH_MAX)
+	if (strlen(node_path) + strlen(key_dir) + 1 + 3 >= PATH_MAX)
+		return -1;
+
+	if (flags & O_CREAT) {
+		snprintf(fname, PATH_MAX, "%s%s", node_path, key_dir);
+		mkdir(fname, 0755);
+	}
+
+	snprintf(fname, PATH_MAX, "%s%s/%3.3x", node_path, key_dir, idx);
+
+	if (flags & O_CREAT)
+		return open(fname, flags, 0600);
+	else
+		return open(fname, flags);
+}
+
+bool keyring_put_net_key(struct mesh_node *node, uint16_t net_idx,
+						struct keyring_net_key *key)
+{
+	bool result = false;
+	int fd;
+
+	if (!key)
 		return false;
 
-	snprintf(key_file, PATH_MAX, "%s%s", node_path, net_key_dir);
-	mkdir(key_file, 0755);
-	snprintf(key_file, PATH_MAX, "%s%s/%3.3x", node_path, net_key_dir,
-								net_idx);
-	l_debug("Put Net Key %s", key_file);
+	fd = open_key_file(node, net_key_dir, net_idx,
+					O_WRONLY | O_CREAT | O_TRUNC);
 
-	fd = open(key_file, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-	if (fd >= 0) {
-		if (write(fd, key, sizeof(*key)) == sizeof(*key))
-			result = true;
+	if (fd < 0)
+		return false;
 
-		close(fd);
-	}
+	if (write(fd, key, sizeof(*key)) == sizeof(*key))
+		result = true;
+
+	close(fd);
 
 	return result;
 }
@@ -78,26 +86,14 @@ bool keyring_put_net_key(struct mesh_node *node, uint16_t net_idx,
 bool keyring_put_app_key(struct mesh_node *node, uint16_t app_idx,
 				uint16_t net_idx, struct keyring_app_key *key)
 {
-	const char *node_path;
-	char key_file[PATH_MAX];
 	bool result = false;
 	int fd;
 
-	if (!node || !key)
+	if (!key)
 		return false;
 
-	node_path = node_get_storage_dir(node);
+	fd = open_key_file(node, app_key_dir, app_idx, O_RDWR);
 
-	if (strlen(node_path) + strlen(app_key_dir) + 1 + 3 >= PATH_MAX)
-		return false;
-
-	snprintf(key_file, PATH_MAX, "%s%s", node_path, app_key_dir);
-	mkdir(key_file, 0755);
-	snprintf(key_file, PATH_MAX, "%s%s/%3.3x", node_path, app_key_dir,
-								app_idx);
-	l_debug("Put App Key %s", key_file);
-
-	fd = open(key_file, O_RDWR);
 	if (fd >= 0) {
 		struct keyring_app_key old_key;
 
@@ -110,15 +106,16 @@ bool keyring_put_app_key(struct mesh_node *node, uint16_t app_idx,
 
 		lseek(fd, 0, SEEK_SET);
 	} else
-		fd = open(key_file, O_WRONLY | O_CREAT | O_TRUNC,
-							S_IRUSR | S_IWUSR);
+		fd = open_key_file(node, app_key_dir, app_idx,
+						O_WRONLY | O_CREAT | O_TRUNC);
 
-	if (fd >= 0) {
-		if (write(fd, key, sizeof(*key)) == sizeof(*key))
-			result = true;
+	if (fd < 0)
+		return false;
 
-		close(fd);
-	}
+	if (write(fd, key, sizeof(*key)) == sizeof(*key))
+		result = true;
+
+	close(fd);
 
 	return result;
 }
@@ -207,6 +204,7 @@ bool keyring_put_remote_dev_key(struct mesh_node *node, uint16_t unicast,
 		return false;
 
 	snprintf(key_file, PATH_MAX, "%s%s", node_path, dev_key_dir);
+
 	mkdir(key_file, 0755);
 
 	for (i = 0; i < count; i++) {
@@ -214,8 +212,7 @@ bool keyring_put_remote_dev_key(struct mesh_node *node, uint16_t unicast,
 						dev_key_dir, unicast + i);
 		l_debug("Put Dev Key %s", key_file);
 
-		fd = open(key_file, O_WRONLY | O_CREAT | O_TRUNC,
-							S_IRUSR | S_IWUSR);
+		fd = open(key_file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
 		if (fd >= 0) {
 			if (write(fd, dev_key, 16) != 16)
 				result = false;
@@ -228,24 +225,19 @@ bool keyring_put_remote_dev_key(struct mesh_node *node, uint16_t unicast,
 	return result;
 }
 
-bool keyring_get_net_key(struct mesh_node *node, uint16_t net_idx,
-						struct keyring_net_key *key)
+static bool get_key(struct mesh_node *node, const char *key_dir,
+					uint16_t key_idx, void *key, ssize_t sz)
 {
-	const char *node_path;
-	char key_file[PATH_MAX];
 	bool result = false;
 	int fd;
 
-	if (!node || !key)
+	if (!key)
 		return false;
 
-	node_path = node_get_storage_dir(node);
-	snprintf(key_file, PATH_MAX, "%s%s/%3.3x", node_path, net_key_dir,
-								net_idx);
+	fd = open_key_file(node, key_dir, key_idx, O_RDONLY);
 
-	fd = open(key_file, O_RDONLY);
 	if (fd >= 0) {
-		if (read(fd, key, sizeof(*key)) == sizeof(*key))
+		if (read(fd, key, sz) == sz)
 			result = true;
 
 		close(fd);
@@ -254,30 +246,16 @@ bool keyring_get_net_key(struct mesh_node *node, uint16_t net_idx,
 	return result;
 }
 
+bool keyring_get_net_key(struct mesh_node *node, uint16_t net_idx,
+						struct keyring_net_key *key)
+{
+	return get_key(node, net_key_dir, net_idx, key, sizeof(*key));
+}
+
 bool keyring_get_app_key(struct mesh_node *node, uint16_t app_idx,
 						struct keyring_app_key *key)
 {
-	const char *node_path;
-	char key_file[PATH_MAX];
-	bool result = false;
-	int fd;
-
-	if (!node || !key)
-		return false;
-
-	node_path = node_get_storage_dir(node);
-	snprintf(key_file, PATH_MAX, "%s%s/%3.3x", node_path, app_key_dir,
-								app_idx);
-
-	fd = open(key_file, O_RDONLY);
-	if (fd >= 0) {
-		if (read(fd, key, sizeof(*key)) == sizeof(*key))
-			result = true;
-
-		close(fd);
-	}
-
-	return result;
+	return get_key(node, app_key_dir, app_idx, key, sizeof(*key));
 }
 
 bool keyring_get_remote_dev_key(struct mesh_node *node, uint16_t unicast,

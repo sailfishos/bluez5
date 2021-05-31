@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2012-2014  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -49,6 +36,7 @@
 #include "src/shared/util.h"
 #include "src/shared/tester.h"
 #include "src/shared/log.h"
+#include "src/shared/timeout.h"
 
 #define COLOR_OFF	"\x1B[0m"
 #define COLOR_BLACK	"\x1B[0;30m"
@@ -119,6 +107,7 @@ static gboolean option_debug = FALSE;
 static gboolean option_monitor = FALSE;
 static gboolean option_list = FALSE;
 static const char *option_prefix = NULL;
+static const char *option_string = NULL;
 
 struct monitor_hdr {
 	uint16_t opcode;
@@ -138,7 +127,7 @@ static void test_destroy(gpointer data)
 	struct test_case *test = data;
 
 	if (test->timeout_id > 0)
-		g_source_remove(test->timeout_id);
+		timeout_remove(test->timeout_id);
 
 	if (test->teardown_id > 0)
 		g_source_remove(test->teardown_id);
@@ -298,6 +287,12 @@ void tester_add_full(const char *name, const void *test_data,
 		return;
 	}
 
+	if (option_string && !strstr(name, option_string)) {
+		if (destroy)
+			destroy(user_data);
+		return;
+	}
+
 	if (option_list) {
 		tester_log("%s", name);
 		if (destroy)
@@ -435,7 +430,7 @@ static gboolean teardown_callback(gpointer user_data)
 	return FALSE;
 }
 
-static gboolean test_timeout(gpointer user_data)
+static bool test_timeout(gpointer user_data)
 {
 	struct test_case *test = user_data;
 
@@ -476,8 +471,9 @@ static void next_test_case(void)
 	test->start_time = g_timer_elapsed(test_timer, NULL);
 
 	if (test->timeout > 0)
-		test->timeout_id = g_timeout_add_seconds(test->timeout,
-							test_timeout, test);
+		test->timeout_id = timeout_add_seconds(test->timeout,
+							test_timeout, test,
+							NULL);
 
 	test->stage = TEST_STAGE_PRE_SETUP;
 
@@ -547,6 +543,11 @@ void tester_pre_setup_failed(void)
 	if (test->stage != TEST_STAGE_PRE_SETUP)
 		return;
 
+	if (test->timeout_id > 0) {
+		timeout_remove(test->timeout_id);
+		test->timeout_id = 0;
+	}
+
 	print_progress(test->name, COLOR_RED, "pre setup failed");
 
 	g_idle_add(done_callback, test);
@@ -584,7 +585,7 @@ void tester_setup_failed(void)
 	test->stage = TEST_STAGE_POST_TEARDOWN;
 
 	if (test->timeout_id > 0) {
-		g_source_remove(test->timeout_id);
+		timeout_remove(test->timeout_id);
 		test->timeout_id = 0;
 	}
 
@@ -607,7 +608,7 @@ static void test_result(enum test_result result)
 		return;
 
 	if (test->timeout_id > 0) {
-		g_source_remove(test->timeout_id);
+		timeout_remove(test->timeout_id);
 		test->timeout_id = 0;
 	}
 
@@ -817,6 +818,8 @@ static GOptionEntry options[] = {
 				"Only list the tests to be run" },
 	{ "prefix", 'p', 0, G_OPTION_ARG_STRING, &option_prefix,
 				"Run tests matching provided prefix" },
+	{ "string", 's', 0, G_OPTION_ARG_STRING, &option_string,
+				"Run tests matching provided string" },
 	{ NULL },
 };
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -6,20 +7,6 @@
  *  Copyright (C) 2002-2003  Maxim Krasnyansky <maxk@qualcomm.com>
  *  Copyright (C) 2002-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -46,7 +33,6 @@
 
 #include "src/textfile.h"
 #include "src/shared/util.h"
-#include "tools/csr.h"
 
 static struct hci_dev_info di;
 static int all;
@@ -1703,30 +1689,6 @@ static void print_rev_ericsson(int dd)
 	printf("\t%s\n", buf + 1);
 }
 
-static void print_rev_csr(int dd, uint16_t rev)
-{
-	uint16_t buildid, chipver, chiprev, maxkeylen, mapsco;
-
-	if (csr_read_varid_uint16(dd, 0, CSR_VARID_BUILDID, &buildid) < 0) {
-		printf("\t%s\n", csr_buildidtostr(rev));
-		return;
-	}
-
-	printf("\t%s\n", csr_buildidtostr(buildid));
-
-	if (!csr_read_varid_uint16(dd, 1, CSR_VARID_CHIPVER, &chipver)) {
-		if (csr_read_varid_uint16(dd, 2, CSR_VARID_CHIPREV, &chiprev) < 0)
-			chiprev = 0;
-		printf("\tChip version: %s\n", csr_chipvertostr(chipver, chiprev));
-	}
-
-	if (!csr_read_varid_uint16(dd, 3, CSR_VARID_MAX_CRYPT_KEY_LENGTH, &maxkeylen))
-		printf("\tMax key size: %d bit\n", maxkeylen * 8);
-
-	if (!csr_read_pskey_uint16(dd, 4, CSR_PSKEY_HOSTIO_MAP_SCO_PCM, 0x0000, &mapsco))
-		printf("\tSCO mapping:  %s\n", mapsco ? "PCM" : "HCI");
-}
-
 static void print_rev_digianswer(int dd)
 {
 	struct hci_request rq;
@@ -1788,9 +1750,6 @@ static void cmd_revision(int ctl, int hdev, char *opt)
 	case 37:
 	case 48:
 		print_rev_ericsson(dd);
-		break;
-	case 10:
-		print_rev_csr(dd, ver.hci_rev);
 		break;
 	case 12:
 		print_rev_digianswer(dd);

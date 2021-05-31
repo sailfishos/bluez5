@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -6,20 +7,6 @@
  *  Copyright (C) 2011  Antonio Ospite <ospite@studenti.unina.it>
  *  Copyright (C) 2013  Szymon Janc <szymon.janc@gmail.com>
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -400,6 +387,7 @@ get_pairing_type_for_device(struct udev_device *udevice, uint16_t *bus,
 						char **sysfs_path)
 {
 	struct udev_device *hid_parent;
+	const char *hid_name;
 	const char *hid_id;
 	const struct cable_pairing *cp;
 	uint16_t vid, pid;
@@ -411,10 +399,12 @@ get_pairing_type_for_device(struct udev_device *udevice, uint16_t *bus,
 
 	hid_id = udev_device_get_property_value(hid_parent, "HID_ID");
 
-	if (sscanf(hid_id, "%hx:%hx:%hx", bus, &vid, &pid) != 3)
+	if (!hid_id || sscanf(hid_id, "%hx:%hx:%hx", bus, &vid, &pid) != 3)
 		return NULL;
 
-	cp = get_pairing(vid, pid);
+	hid_name = udev_device_get_property_value(hid_parent, "HID_NAME");
+
+	cp = get_pairing(vid, pid, hid_name);
 	*sysfs_path = g_strdup(udev_device_get_syspath(udevice));
 
 	return cp;

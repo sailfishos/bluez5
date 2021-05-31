@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -6,20 +7,6 @@
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
  *  Copyright (C) 2011  Texas Instruments, Inc.
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -136,7 +123,7 @@ int control_disconnect(struct btd_service *service)
 }
 
 static DBusMessage *key_pressed(DBusConnection *conn, DBusMessage *msg,
-						uint8_t op, void *data)
+					uint8_t op, bool hold, void *data)
 {
 	struct control *control = data;
 	int err;
@@ -147,7 +134,7 @@ static DBusMessage *key_pressed(DBusConnection *conn, DBusMessage *msg,
 	if (!control->target)
 		return btd_error_not_supported(msg);
 
-	err = avctp_send_passthrough(control->session, op);
+	err = avctp_send_passthrough(control->session, op, hold);
 	if (err < 0)
 		return btd_error_failed(msg, strerror(-err));
 
@@ -157,55 +144,55 @@ static DBusMessage *key_pressed(DBusConnection *conn, DBusMessage *msg,
 static DBusMessage *control_volume_up(DBusConnection *conn, DBusMessage *msg,
 								void *data)
 {
-	return key_pressed(conn, msg, AVC_VOLUME_UP, data);
+	return key_pressed(conn, msg, AVC_VOLUME_UP, false, data);
 }
 
 static DBusMessage *control_volume_down(DBusConnection *conn, DBusMessage *msg,
 								void *data)
 {
-	return key_pressed(conn, msg, AVC_VOLUME_DOWN, data);
+	return key_pressed(conn, msg, AVC_VOLUME_DOWN, false, data);
 }
 
 static DBusMessage *control_play(DBusConnection *conn, DBusMessage *msg,
 								void *data)
 {
-	return key_pressed(conn, msg, AVC_PLAY, data);
+	return key_pressed(conn, msg, AVC_PLAY, false, data);
 }
 
 static DBusMessage *control_pause(DBusConnection *conn, DBusMessage *msg,
 								void *data)
 {
-	return key_pressed(conn, msg, AVC_PAUSE, data);
+	return key_pressed(conn, msg, AVC_PAUSE, false, data);
 }
 
 static DBusMessage *control_stop(DBusConnection *conn, DBusMessage *msg,
 								void *data)
 {
-	return key_pressed(conn, msg, AVC_STOP, data);
+	return key_pressed(conn, msg, AVC_STOP, false, data);
 }
 
 static DBusMessage *control_next(DBusConnection *conn, DBusMessage *msg,
 								void *data)
 {
-	return key_pressed(conn, msg, AVC_FORWARD, data);
+	return key_pressed(conn, msg, AVC_FORWARD, false, data);
 }
 
 static DBusMessage *control_previous(DBusConnection *conn, DBusMessage *msg,
 								void *data)
 {
-	return key_pressed(conn, msg, AVC_BACKWARD, data);
+	return key_pressed(conn, msg, AVC_BACKWARD, false, data);
 }
 
 static DBusMessage *control_fast_forward(DBusConnection *conn, DBusMessage *msg,
 								void *data)
 {
-	return key_pressed(conn, msg, AVC_FAST_FORWARD, data);
+	return key_pressed(conn, msg, AVC_FAST_FORWARD, true, data);
 }
 
 static DBusMessage *control_rewind(DBusConnection *conn, DBusMessage *msg,
 								void *data)
 {
-	return key_pressed(conn, msg, AVC_REWIND, data);
+	return key_pressed(conn, msg, AVC_REWIND, true, data);
 }
 
 static gboolean control_property_get_connected(

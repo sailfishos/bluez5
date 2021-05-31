@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,26 +6,13 @@
  *  Copyright (C) 2012-2014  Intel Corporation. All rights reserved.
  *
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
- *
  */
 
 #include <stdbool.h>
 #include <stdint.h>
 
 struct hciemu;
+struct hciemu_client;
 
 enum hciemu_type {
 	HCIEMU_TYPE_BREDRLE,
@@ -32,7 +20,7 @@ enum hciemu_type {
 	HCIEMU_TYPE_LE,
 	HCIEMU_TYPE_LEGACY,
 	HCIEMU_TYPE_BREDRLE50,
-	HCIEMU_TYPE_BREDRLE60,
+	HCIEMU_TYPE_BREDRLE52,
 };
 
 enum hciemu_hook_type {
@@ -43,9 +31,19 @@ enum hciemu_hook_type {
 };
 
 struct hciemu *hciemu_new(enum hciemu_type type);
+struct hciemu *hciemu_new_num(enum hciemu_type type, uint8_t num);
 
 struct hciemu *hciemu_ref(struct hciemu *hciemu);
 void hciemu_unref(struct hciemu *hciemu);
+
+struct hciemu_client *hciemu_get_client(struct hciemu *hciemu, int num);
+struct bthost *hciemu_client_host(struct hciemu_client *client);
+const uint8_t *hciemu_client_bdaddr(struct hciemu_client *client);
+
+typedef void (*hciemu_debug_func_t)(const char *str, void *user_data);
+typedef void (*hciemu_destroy_func_t)(void *user_data);
+bool hciemu_set_debug(struct hciemu *hciemu, hciemu_debug_func_t callback,
+			void *user_data, hciemu_destroy_func_t destroy);
 
 struct bthost *hciemu_client_get_host(struct hciemu *hciemu);
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2011-2014  Intel Corporation
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -95,6 +82,15 @@ static void vhci_read_callback(int fd, uint32_t events, void *user_data)
 	}
 }
 
+bool vhci_set_debug(struct vhci *vhci, vhci_debug_func_t callback,
+			void *user_data, vhci_destroy_func_t destroy)
+{
+	if (!vhci)
+		return false;
+
+	return btdev_set_debug(vhci->btdev, callback, user_data, destroy);
+}
+
 struct vhci *vhci_open(enum vhci_type type)
 {
 	struct vhci *vhci;
@@ -105,7 +101,7 @@ struct vhci *vhci_open(enum vhci_type type)
 
 	switch (type) {
 	case VHCI_TYPE_BREDRLE:
-		btdev_type = BTDEV_TYPE_BREDRLE60;
+		btdev_type = BTDEV_TYPE_BREDRLE52;
 		ctrl_type = HCI_PRIMARY;
 		break;
 	case VHCI_TYPE_BREDR:

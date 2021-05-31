@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2015  Andrzej Kaczmarek <andrzej.kaczmarek@codecoup.pl>
  *  Copyright (C) 2018  Pali Rohár <pali.rohar@gmail.com>
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -377,7 +364,8 @@ static bool codec_mpeg12_cap(uint8_t losc, struct l2cap_frame *frame)
 	if (losc != 4)
 		return false;
 
-	l2cap_frame_get_be16(frame, &cap);
+	if (!l2cap_frame_get_be16(frame, &cap))
+		return false;
 
 	layer = (cap >> 8) & 0xe0;
 	crc = cap & 0x1000;
@@ -385,7 +373,8 @@ static bool codec_mpeg12_cap(uint8_t losc, struct l2cap_frame *frame)
 	mpf = cap & 0x0040;
 	freq = cap & 0x003f;
 
-	l2cap_frame_get_be16(frame, &cap);
+	if (!l2cap_frame_get_be16(frame, &cap))
+		return false;
 
 	vbr = cap & 0x8000;
 	bitrate = cap & 0x7fff;
@@ -427,7 +416,8 @@ static bool codec_mpeg12_cfg(uint8_t losc, struct l2cap_frame *frame)
 	if (losc != 4)
 		return false;
 
-	l2cap_frame_get_be16(frame, &cap);
+	if (!l2cap_frame_get_be16(frame, &cap))
+		return false;
 
 	layer = (cap >> 8) & 0xe0;
 	crc = cap & 0x1000;
@@ -435,7 +425,8 @@ static bool codec_mpeg12_cfg(uint8_t losc, struct l2cap_frame *frame)
 	mpf = cap & 0x0040;
 	freq = cap & 0x003f;
 
-	l2cap_frame_get_be16(frame, &cap);
+	if (!l2cap_frame_get_be16(frame, &cap))
+		return false;
 
 	vbr = cap & 0x8000;
 	bitrate = cap & 0x7fff;
@@ -479,19 +470,22 @@ static bool codec_aac_cap(uint8_t losc, struct l2cap_frame *frame)
 	if (losc != 6)
 		return false;
 
-	l2cap_frame_get_be16(frame, &cap);
+	if (!l2cap_frame_get_be16(frame, &cap))
+		return false;
 
 	type = cap >> 8;
 	freq = cap << 8;
 
-	l2cap_frame_get_be16(frame, &cap);
+	if (!l2cap_frame_get_be16(frame, &cap))
+		return false;
 
 	freq |= (cap >> 8) & 0xf0;
 	chan = (cap >> 8) & 0x0c;
 	bitrate = (cap << 16) & 0x7f0000;
 	vbr = cap & 0x0080;
 
-	l2cap_frame_get_be16(frame, &cap);
+	if (!l2cap_frame_get_be16(frame, &cap))
+		return false;
 
 	bitrate |= cap;
 
@@ -522,19 +516,22 @@ static bool codec_aac_cfg(uint8_t losc, struct l2cap_frame *frame)
 	if (losc != 6)
 		return false;
 
-	l2cap_frame_get_be16(frame, &cap);
+	if (!l2cap_frame_get_be16(frame, &cap))
+		return false;
 
 	type = cap >> 8;
 	freq = cap << 8;
 
-	l2cap_frame_get_be16(frame, &cap);
+	if (!l2cap_frame_get_be16(frame, &cap))
+		return false;
 
 	freq |= (cap >> 8) & 0xf0;
 	chan = (cap >> 8) & 0x0c;
 	bitrate = (cap << 16) & 0x7f0000;
 	vbr = cap & 0x0080;
 
-	l2cap_frame_get_be16(frame, &cap);
+	if (!l2cap_frame_get_be16(frame, &cap))
+		return false;
 
 	bitrate |= cap;
 

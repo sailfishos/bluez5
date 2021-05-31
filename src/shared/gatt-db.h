@@ -1,23 +1,10 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2014  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -41,6 +28,7 @@ bool gatt_db_remove_service(struct gatt_db *db,
 bool gatt_db_clear(struct gatt_db *db);
 bool gatt_db_clear_range(struct gatt_db *db, uint16_t start_handle,
 							uint16_t end_handle);
+bool gatt_db_hash_support(struct gatt_db *db);
 uint8_t *gatt_db_get_hash(struct gatt_db *db);
 
 struct gatt_db_attribute *gatt_db_insert_service(struct gatt_db *db,
@@ -253,6 +241,9 @@ bool gatt_db_attribute_get_incl_data(const struct gatt_db_attribute *attrib,
 uint32_t
 gatt_db_attribute_get_permissions(const struct gatt_db_attribute *attrib);
 
+bool gatt_db_attribute_set_fixed_length(struct gatt_db_attribute *attrib,
+						uint16_t len);
+
 typedef void (*gatt_db_attribute_read_t) (struct gatt_db_attribute *attrib,
 						int err, const uint8_t *value,
 						size_t length, void *user_data);
@@ -280,3 +271,11 @@ bool gatt_db_attribute_write_result(struct gatt_db_attribute *attrib,
 bool gatt_db_attribute_reset(struct gatt_db_attribute *attrib);
 
 void *gatt_db_attribute_get_user_data(struct gatt_db_attribute *attrib);
+
+unsigned int gatt_db_attribute_register(struct gatt_db_attribute *attrib,
+					gatt_db_attribute_cb_t removed,
+					void *user_data,
+					gatt_db_destroy_func_t destroy);
+
+bool gatt_db_attribute_unregister(struct gatt_db_attribute *attrib,
+						unsigned int id);

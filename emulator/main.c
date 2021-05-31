@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2011-2014  Intel Corporation
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -32,6 +19,8 @@
 #include <getopt.h>
 
 #include "src/shared/mainloop.h"
+#include "src/shared/util.h"
+
 #include "serial.h"
 #include "server.h"
 #include "vhci.h"
@@ -54,16 +43,20 @@ static void usage(void)
 		"Usage:\n");
 	printf("\tbtvirt [options]\n");
 	printf("options:\n"
+		"\t-d                    Enable debug\n"
 		"\t-S                    Create local serial port\n"
 		"\t-s                    Create local server sockets\n"
-		"\t-l [num]              Number of local controllers\n"
+		"\t-l[num]               Number of local controllers\n"
 		"\t-L                    Create LE only controller\n"
+		"\t-U[num]               Number of test LE controllers\n"
 		"\t-B                    Create BR/EDR only controller\n"
 		"\t-A                    Create AMP controller\n"
+		"\t-T[num]               Number of test AMP controllers\n"
 		"\t-h, --help            Show help options\n");
 }
 
 static const struct option main_options[] = {
+	{ "debug",   no_argument,       NULL, 'd' },
 	{ "serial",  no_argument,       NULL, 'S' },
 	{ "server",  no_argument,       NULL, 's' },
 	{ "local",   optional_argument, NULL, 'l' },
@@ -77,6 +70,13 @@ static const struct option main_options[] = {
 	{ }
 };
 
+static void vhci_debug(const char *str, void *user_data)
+{
+	int i = PTR_TO_UINT(user_data);
+
+	printf("vhci%u: %s\n", i, str);
+}
+
 int main(int argc, char *argv[])
 {
 	struct server *server1;
@@ -84,6 +84,7 @@ int main(int argc, char *argv[])
 	struct server *server3;
 	struct server *server4;
 	struct server *server5;
+	bool debug_enabled = false;
 	bool server_enabled = false;
 	bool serial_enabled = false;
 	int letest_count = 0;
@@ -97,12 +98,15 @@ int main(int argc, char *argv[])
 	for (;;) {
 		int opt;
 
-		opt = getopt_long(argc, argv, "Ssl::LBAUTvh",
+		opt = getopt_long(argc, argv, "dSsl::LBAU::T::vh",
 						main_options, NULL);
 		if (opt < 0)
 			break;
 
 		switch (opt) {
+		case 'd':
+			debug_enabled = true;
+			break;
 		case 'S':
 			serial_enabled = true;
 			break;
@@ -183,6 +187,9 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "Failed to open Virtual HCI device\n");
 			return EXIT_FAILURE;
 		}
+
+		if (debug_enabled)
+			vhci_set_debug(vhci, vhci_debug, UINT_TO_PTR(i), NULL);
 	}
 
 	if (serial_enabled) {

@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2019  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
  *
  */
 
@@ -60,7 +51,7 @@ static void scan_cancel(struct l_timeout *timeout, void *user_data)
 	struct mesh_io *io;
 	struct mesh_net *net;
 
-	l_debug("scan_cancel");
+	l_debug("");
 
 	if (scan_timeout)
 		l_timeout_remove(scan_timeout);
@@ -80,6 +71,9 @@ static void free_pending_add_call()
 	if (add_pending->disc_watch)
 		l_dbus_remove_watch(dbus_get_bus(),
 						add_pending->disc_watch);
+
+	if (add_pending->msg)
+		l_dbus_message_unref(add_pending->msg);
 
 	l_free(add_pending);
 	add_pending = NULL;
@@ -212,19 +206,37 @@ static bool add_data_get(void *user_data, uint8_t num_ele)
 	return true;
 }
 
+static void add_start(void *user_data, int err)
+{
+	struct l_dbus_message *reply;
+
+	l_debug("Start callback");
+
+	if (err == MESH_ERROR_NONE)
+		reply = l_dbus_message_new_method_return(add_pending->msg);
+	else
+		reply = dbus_error(add_pending->msg, MESH_ERROR_FAILED,
+				"Failed to start provisioning initiator");
+
+	l_dbus_send(dbus_get_bus(), reply);
+	l_dbus_message_unref(add_pending->msg);
+
+	add_pending->msg = NULL;
+}
+
 static struct l_dbus_message *add_node_call(struct l_dbus *dbus,
 						struct l_dbus_message *msg,
 						void *user_data)
 {
 	struct mesh_node *node = user_data;
-	struct l_dbus_message_iter iter_uuid;
+	struct l_dbus_message_iter iter_uuid, options;
 	struct l_dbus_message *reply;
 	uint8_t *uuid;
-	uint32_t n;
+	uint32_t n = 22;
 
 	l_debug("AddNode request");
 
-	if (!l_dbus_message_get_arguments(msg, "ay", &iter_uuid))
+	if (!l_dbus_message_get_arguments(msg, "aya{sv}", &iter_uuid, &options))
 		return dbus_error(msg, MESH_ERROR_INVALID_ARGS, NULL);
 
 	if (!l_dbus_message_iter_get_fixed_array(&iter_uuid, &uuid, &n)
@@ -241,34 +253,28 @@ static struct l_dbus_message *add_node_call(struct l_dbus *dbus,
 	}
 
 	/* Invoke Prov Initiator */
-
 	add_pending = l_new(struct add_data, 1);
 	memcpy(add_pending->uuid, uuid, 16);
 	add_pending->node = node;
 	add_pending->agent = node_get_agent(node);
 
 	if (!node_is_provisioner(node) || (add_pending->agent == NULL)) {
-		l_info("Provisioner: %d", node_is_provisioner(node));
-		l_info("Agent: %p", add_pending->agent);
+		l_debug("Provisioner: %d", node_is_provisioner(node));
+		l_debug("Agent: %p", add_pending->agent);
 		reply = dbus_error(msg, MESH_ERROR_NOT_AUTHORIZED,
 							"Missing Interfaces");
 		goto fail;
 	}
 
-
-	if (!initiator_start(PB_ADV, uuid, 99, 0, 60, add_pending->agent,
-				add_data_get, add_cmplt, node, add_pending)) {
-		reply = dbus_error(msg, MESH_ERROR_FAILED,
-				"Failed to start provisioning initiator");
-		goto fail;
-	}
+	add_pending->msg = l_dbus_message_ref(msg);
+	initiator_start(PB_ADV, uuid, 99, 60, add_pending->agent, add_start,
+				add_data_get, add_cmplt, node, add_pending);
 
 	add_pending->disc_watch = l_dbus_add_disconnect_watch(dbus,
 						node_get_owner(node),
 						prov_disc_cb, NULL, NULL);
 
-	return l_dbus_message_new_method_return(msg);
-
+	return NULL;
 fail:
 	l_free(add_pending);
 	add_pending = NULL;
@@ -361,6 +367,9 @@ static void prov_beacon_recv(void *user_data, struct mesh_io_recv_info *info,
 	builder = l_dbus_message_builder_new(msg);
 	l_dbus_message_builder_append_basic(builder, 'n', &rssi);
 	dbus_append_byte_array(builder, data + 2, len -2);
+	l_dbus_message_builder_enter_array(builder, "{sv}");
+	/* TODO: populate with options when defined */
+	l_dbus_message_builder_leave_array(builder);
 	l_dbus_message_builder_finalize(builder);
 	l_dbus_message_builder_destroy(builder);
 
@@ -372,16 +381,33 @@ static struct l_dbus_message *start_scan_call(struct l_dbus *dbus,
 						void *user_data)
 {
 	struct mesh_node *node = user_data;
-	uint16_t duration;
+	uint16_t duration = 0;
 	struct mesh_io *io;
 	struct mesh_net *net;
+	const char *key;
+	struct l_dbus_message_iter options, var;
 	const char *sender = l_dbus_message_get_sender(msg);
 
 	if (strcmp(sender, node_get_owner(node)))
 		return dbus_error(msg, MESH_ERROR_NOT_AUTHORIZED, NULL);
 
-	if (!l_dbus_message_get_arguments(msg, "q", &duration))
+	if (!l_dbus_message_get_arguments(msg, "a{sv}", &options))
 		return dbus_error(msg, MESH_ERROR_INVALID_ARGS, NULL);
+
+	while (l_dbus_message_iter_next_entry(&options, &key, &var)) {
+		bool failed = true;
+
+		if (!strcmp(key, "Seconds")) {
+			if (l_dbus_message_iter_get_variant(&var, "q",
+							    &duration)) {
+				failed = false;
+			}
+		}
+
+		if (failed)
+			return dbus_error(msg, MESH_ERROR_INVALID_ARGS,
+							"Invalid options");
+	}
 
 	if (scan_node && scan_node != node)
 		return dbus_error(msg, MESH_ERROR_BUSY, NULL);
@@ -517,7 +543,8 @@ static struct l_dbus_message *update_subnet_call(struct l_dbus *dbus,
 	}
 
 	/* All other phases mean KR already in progress over-the-air */
-	return dbus_error(msg, MESH_ERROR_BUSY, "Key Refresh in progress");
+	return dbus_error(msg, MESH_ERROR_IN_PROGRESS,
+					"Key Refresh in progress");
 }
 
 static struct l_dbus_message *delete_subnet_call(struct l_dbus *dbus,
@@ -752,13 +779,13 @@ static struct l_dbus_message *set_key_phase_call(struct l_dbus *dbus,
 static void setup_management_interface(struct l_dbus_interface *iface)
 {
 	l_dbus_interface_method(iface, "AddNode", 0, add_node_call, "",
-								"ay", "uuid");
+						"aya{sv}", "uuid", "options");
 	l_dbus_interface_method(iface, "ImportRemoteNode", 0, import_node_call,
 				"", "qyay", "primary", "count", "dev_key");
 	l_dbus_interface_method(iface, "DeleteRemoteNode", 0, delete_node_call,
 						"", "qy", "primary", "count");
 	l_dbus_interface_method(iface, "UnprovisionedScan", 0, start_scan_call,
-							"", "q", "seconds");
+							"", "a{sv}", "options");
 	l_dbus_interface_method(iface, "UnprovisionedScanCancel", 0,
 						cancel_scan_call, "", "");
 	l_dbus_interface_method(iface, "CreateSubnet", 0, create_subnet_call,

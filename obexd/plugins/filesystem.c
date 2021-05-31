@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  OBEX Server
@@ -5,20 +6,6 @@
  *  Copyright (C) 2009-2010  Intel Corporation
  *  Copyright (C) 2007-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -157,15 +144,15 @@ static char *file_stat_line(char *filename, struct stat *fstat,
 
 	snprintf(perm, 50, "user-perm=\"%s%s%s\" group-perm=\"%s%s%s\" "
 			"other-perm=\"%s%s%s\"",
-			(fstat->st_mode & S_IRUSR ? "R" : ""),
-			(fstat->st_mode & S_IWUSR ? "W" : ""),
-			(dstat->st_mode & S_IWUSR ? "D" : ""),
-			(fstat->st_mode & S_IRGRP ? "R" : ""),
-			(fstat->st_mode & S_IWGRP ? "W" : ""),
-			(dstat->st_mode & S_IWGRP ? "D" : ""),
-			(fstat->st_mode & S_IROTH ? "R" : ""),
-			(fstat->st_mode & S_IWOTH ? "W" : ""),
-			(dstat->st_mode & S_IWOTH ? "D" : ""));
+			(fstat->st_mode & 0400 ? "R" : ""),
+			(fstat->st_mode & 0200 ? "W" : ""),
+			(dstat->st_mode & 0200 ? "D" : ""),
+			(fstat->st_mode & 0040 ? "R" : ""),
+			(fstat->st_mode & 0020 ? "W" : ""),
+			(dstat->st_mode & 0020 ? "D" : ""),
+			(fstat->st_mode & 0004 ? "R" : ""),
+			(fstat->st_mode & 0002 ? "W" : ""),
+			(dstat->st_mode & 0002 ? "D" : ""));
 
 	strftime(atime, 17, "%Y%m%dT%H%M%SZ", gmtime(&fstat->st_atime));
 	strftime(ctime, 17, "%Y%m%dT%H%M%SZ", gmtime(&fstat->st_ctime));

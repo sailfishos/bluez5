@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2019  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
  *
  */
 
@@ -263,7 +254,7 @@ bool net_key_encrypt(uint32_t id, uint32_t iv_index, uint8_t *pkt, size_t len)
 	if (!key)
 		return false;
 
-	result = mesh_crypto_packet_encode(pkt, len, key->encrypt, iv_index,
+	result = mesh_crypto_packet_encode(pkt, len, iv_index, key->encrypt,
 							key->privacy);
 
 	if (!result)
@@ -522,4 +513,10 @@ void net_key_beacon_disable(uint32_t id)
 	/* Disable periodic Beaconing on this key */
 	l_timeout_remove(key->snb.timeout);
 	key->snb.timeout = NULL;
+}
+
+void net_key_cleanup(void)
+{
+	l_queue_destroy(keys, l_free);
+	keys = NULL;
 }

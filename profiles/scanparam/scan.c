@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2012  Nordic Semiconductor Inc.
  *  Copyright (C) 2012  Instituto Nokia de Tecnologia - INdT
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -45,12 +32,11 @@
 #include "src/shared/gatt-db.h"
 #include "src/shared/gatt-client.h"
 #include "attrib/att.h"
+#include "src/btd.h"
 
 #define SCAN_INTERVAL_WIN_UUID		0x2A4F
 #define SCAN_REFRESH_UUID		0x2A31
 
-#define SCAN_INTERVAL		0x0060
-#define SCAN_WINDOW		0x0030
 #define SERVER_REQUIRES_REFRESH	0x00
 
 struct scan {
@@ -75,8 +61,16 @@ static void write_scan_params(struct scan *scan)
 {
 	uint8_t value[4];
 
-	put_le16(SCAN_INTERVAL, &value[0]);
-	put_le16(SCAN_WINDOW, &value[2]);
+	/* Unless scan parameters are configured, use the known kernel default
+	 * parameters
+	 */
+	put_le16(btd_opts.defaults.le.scan_interval_autoconnect ?
+			btd_opts.defaults.le.scan_interval_autoconnect :
+			0x60, &value[0]);
+
+	put_le16(btd_opts.defaults.le.scan_win_autoconnect ?
+			btd_opts.defaults.le.scan_win_autoconnect :
+			0x30, &value[2]);
 
 	bt_gatt_client_write_without_response(scan->client, scan->iwhandle,
 						false, value, sizeof(value));

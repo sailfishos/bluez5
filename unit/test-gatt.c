@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2014  Intel Corporation. All rights reserved.
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -671,7 +658,7 @@ static struct context *create_context(uint16_t mtu, gconstpointer data)
 
 	switch (test_data->context_type) {
 	case ATT:
-		bt_att_set_debug(context->att, print_debug, "bt_att:", NULL);
+		bt_att_set_debug(context->att, 1, print_debug, "bt_att:", NULL);
 
 		bt_gatt_exchange_mtu(context->att, mtu, NULL, NULL, NULL);
 		break;
@@ -3081,7 +3068,7 @@ int main(int argc, char *argv[])
 			raw_pdu(0x0a, 0x03, 0x00),
 			raw_pdu(0x01, 0x0a, 0x03, 0x00, 0x05),
 			raw_pdu(0x0a, 0x03, 0x00),
-			raw_pdu(0x0d, 0x01, 0x02, 0x03));
+			raw_pdu(0x0b, 0x01, 0x02, 0x03));
 
 	define_test_client("/TP/GAR/CL/BI-17-C", test_client, service_db_1,
 			&test_long_read_8,

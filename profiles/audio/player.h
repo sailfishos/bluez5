@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -6,20 +7,6 @@
  *  Copyright (C) 2004-2009  Marcel Holtmann <marcel@holtmann.org>
  *  Copyright (C) 2012-2012  Intel Corporation
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -45,26 +32,31 @@ struct media_player;
 struct media_item;
 
 struct media_player_callback {
-	bool (*set_setting) (struct media_player *mp, const char *key,
+	bool (*set_setting)(struct media_player *mp, const char *key,
 				const char *value, void *user_data);
-	int (*play) (struct media_player *mp, void *user_data);
-	int (*pause) (struct media_player *mp, void *user_data);
-	int (*stop) (struct media_player *mp, void *user_data);
-	int (*next) (struct media_player *mp, void *user_data);
-	int (*previous) (struct media_player *mp, void *user_data);
-	int (*fast_forward) (struct media_player *mp, void *user_data);
-	int (*rewind) (struct media_player *mp, void *user_data);
-	int (*list_items) (struct media_player *mp, const char *name,
+	int (*play)(struct media_player *mp, void *user_data);
+	int (*pause)(struct media_player *mp, void *user_data);
+	int (*stop)(struct media_player *mp, void *user_data);
+	int (*next)(struct media_player *mp, void *user_data);
+	int (*previous)(struct media_player *mp, void *user_data);
+	int (*fast_forward)(struct media_player *mp, void *user_data);
+	int (*rewind)(struct media_player *mp, void *user_data);
+	int (*press)(struct media_player *mp, uint8_t avc_key,
+							void *user_data);
+	int (*hold)(struct media_player *mp, uint8_t avc_key,
+							void *user_data);
+	int (*release)(struct media_player *mp, void *user_data);
+	int (*list_items)(struct media_player *mp, const char *name,
 				uint32_t start, uint32_t end, void *user_data);
-	int (*change_folder) (struct media_player *mp, const char *path,
+	int (*change_folder)(struct media_player *mp, const char *path,
 						uint64_t uid, void *user_data);
-	int (*search) (struct media_player *mp, const char *string,
+	int (*search)(struct media_player *mp, const char *string,
 						void *user_data);
-	int (*play_item) (struct media_player *mp, const char *name,
+	int (*play_item)(struct media_player *mp, const char *name,
 					uint64_t uid, void *user_data);
-	int (*add_to_nowplaying) (struct media_player *mp, const char *name,
+	int (*add_to_nowplaying)(struct media_player *mp, const char *name,
 					uint64_t uid, void *user_data);
-	int (*total_items) (struct media_player *mp, const char *name,
+	int (*total_items)(struct media_player *mp, const char *name,
 						void *user_data);
 };
 

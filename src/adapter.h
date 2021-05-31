@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -6,25 +7,16 @@
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
  *
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
- *
  */
 
 #include <stdbool.h>
 #include <dbus/dbus.h>
 #include <glib.h>
+
+#include <lib/bluetooth.h>
+#include <lib/sdp.h>
+
+#define ADAPTER_INTERFACE	"org.bluez.Adapter1"
 
 #define MAX_NAME_LENGTH		248
 
@@ -91,6 +83,8 @@ sdp_list_t *btd_adapter_get_services(struct btd_adapter *adapter);
 struct btd_device *btd_adapter_find_device(struct btd_adapter *adapter,
 							const bdaddr_t *dst,
 							uint8_t dst_type);
+struct btd_device *btd_adapter_find_device_by_path(struct btd_adapter *adapter,
+						   const char *path);
 
 const char *adapter_get_path(struct btd_adapter *adapter);
 const bdaddr_t *btd_adapter_get_address(struct btd_adapter *adapter);
@@ -113,6 +107,7 @@ struct btd_adapter_driver {
 	const char *name;
 	int (*probe) (struct btd_adapter *adapter);
 	void (*remove) (struct btd_adapter *adapter);
+	void (*resume) (struct btd_adapter *adapter);
 };
 
 typedef void (*service_auth_cb) (DBusError *derr, void *user_data);
@@ -213,6 +208,8 @@ int adapter_connect_list_add(struct btd_adapter *adapter,
 					struct btd_device *device);
 void adapter_connect_list_remove(struct btd_adapter *adapter,
 						struct btd_device *device);
+void adapter_set_device_wakeable(struct btd_adapter *adapter,
+				 struct btd_device *dev, bool wakeable);
 void adapter_auto_connect_add(struct btd_adapter *adapter,
 					struct btd_device *device);
 void adapter_auto_connect_remove(struct btd_adapter *adapter,
@@ -232,5 +229,16 @@ void btd_adapter_for_each_device(struct btd_adapter *adapter,
 
 bool btd_le_connect_before_pairing(void);
 
+enum kernel_features {
+	KERNEL_CONN_CONTROL		= 1 << 0,
+	KERNEL_BLOCKED_KEYS_SUPPORTED	= 1 << 1,
+	KERNEL_SET_SYSTEM_CONFIG	= 1 << 2,
+	KERNEL_EXP_FEATURES		= 1 << 3,
+	KERNEL_HAS_RESUME_EVT		= 1 << 4,
+	KERNEL_HAS_EXT_ADV_ADD_CMDS	= 1 << 5,
+	KERNEL_HAS_CONTROLLER_CAP_CMD	= 1 << 6,
+};
+
+bool btd_has_kernel_features(uint32_t feature);
 int btd_adapter_set_did(struct btd_adapter *adapter, uint16_t vendor,
 			uint16_t product, uint16_t version, uint16_t source);

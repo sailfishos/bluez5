@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -6,20 +7,6 @@
  *  Copyright (C) 2002-2003  Maxim Krasnyansky <maxk@qualcomm.com>
  *  Copyright (C) 2002-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -163,6 +150,8 @@ char *hci_bustostr(int bus)
 		return "I2C";
 	case HCI_SMD:
 		return "SMD";
+	case HCI_VIRTIO:
+		return "VIRTIO";
 	default:
 		return "Unknown";
 	}
@@ -1257,12 +1246,14 @@ int hci_send_req(int dd, struct hci_request *r, int to)
 
 failed:
 	err = errno;
-	setsockopt(dd, SOL_HCI, HCI_FILTER, &of, sizeof(of));
+	if (setsockopt(dd, SOL_HCI, HCI_FILTER, &of, sizeof(of)) < 0)
+		err = errno;
 	errno = err;
 	return -1;
 
 done:
-	setsockopt(dd, SOL_HCI, HCI_FILTER, &of, sizeof(of));
+	if (setsockopt(dd, SOL_HCI, HCI_FILTER, &of, sizeof(of)) < 0)
+		return -1;
 	return 0;
 }
 

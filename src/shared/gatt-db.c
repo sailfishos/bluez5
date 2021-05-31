@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2014  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -81,6 +68,13 @@ struct notify {
 	void *user_data;
 };
 
+struct attribute_notify {
+	unsigned int id;
+	gatt_db_attribute_cb_t removed;
+	gatt_db_destroy_func_t destroy;
+	void *user_data;
+};
+
 struct pending_read {
 	struct gatt_db_attribute *attrib;
 	unsigned int id;
@@ -114,6 +108,9 @@ struct gatt_db_attribute {
 
 	unsigned int write_id;
 	struct queue *pending_writes;
+
+	unsigned int next_notify_id;
+	struct queue *notify_list;
 };
 
 struct gatt_db_service {
@@ -171,6 +168,16 @@ static void pending_write_free(void *data)
 	pending_write_result(p, -ECANCELED);
 }
 
+static void attribute_notify_destroy(void *data)
+{
+	struct attribute_notify *notify = data;
+
+	if (notify->destroy)
+		notify->destroy(notify->user_data);
+
+	free(notify);
+}
+
 static void attribute_destroy(struct gatt_db_attribute *attribute)
 {
 	/* Attribute was not initialized by user */
@@ -179,6 +186,7 @@ static void attribute_destroy(struct gatt_db_attribute *attribute)
 
 	queue_destroy(attribute->pending_reads, pending_read_free);
 	queue_destroy(attribute->pending_writes, pending_write_free);
+	queue_destroy(attribute->notify_list, attribute_notify_destroy);
 
 	free(attribute->value);
 	free(attribute);
@@ -208,6 +216,7 @@ static struct gatt_db_attribute *new_attribute(struct gatt_db_service *service,
 
 	attribute->pending_reads = queue_new();
 	attribute->pending_writes = queue_new();
+	attribute->notify_list = queue_new();
 
 	return attribute;
 
@@ -352,11 +361,37 @@ static bool db_hash_update(void *user_data)
 	return false;
 }
 
+static void handle_attribute_notify(void *data, void *user_data)
+{
+	struct attribute_notify *notify = data;
+	struct gatt_db_attribute *attrib = user_data;
+
+	if (notify->removed)
+		notify->removed(attrib, notify->user_data);
+}
+
+static void notify_attribute_changed(struct gatt_db_service *service)
+{
+	int i;
+
+	for (i = 0; i < service->num_handles; i++) {
+		struct gatt_db_attribute *attr = service->attributes[i];
+
+		if (!attr)
+			continue;
+
+		queue_foreach(attr->notify_list, handle_attribute_notify, attr);
+	}
+}
+
 static void notify_service_changed(struct gatt_db *db,
 						struct gatt_db_service *service,
 						bool added)
 {
 	struct notify_data data;
+
+	if (!added)
+		notify_attribute_changed(service);
 
 	if (queue_isempty(db->notify_list))
 		return;
@@ -595,6 +630,14 @@ uint8_t *gatt_db_get_hash(struct gatt_db *db)
 	}
 
 	return db->hash;
+}
+
+bool gatt_db_hash_support(struct gatt_db *db)
+{
+	if (!db || !db->crypto)
+		return false;
+
+	return true;
 }
 
 static struct gatt_db_service *find_insert_loc(struct gatt_db *db,
@@ -1793,6 +1836,38 @@ static uint8_t attribute_authorize(struct gatt_db_attribute *attrib,
 	return db->authorize(attrib, opcode, att, db->authorize_data);
 }
 
+bool gatt_db_attribute_set_fixed_length(struct gatt_db_attribute *attrib,
+						uint16_t len)
+{
+	struct gatt_db_service *service;
+
+	if (!attrib)
+		return false;
+
+	service = attrib->service;
+
+	/* Don't allow overwriting length of service attribute */
+	if (attrib->service->attributes[0] == attrib)
+		return false;
+
+	/* If attribute is a characteristic declaration ajust to its value */
+	if (!bt_uuid_cmp(&characteristic_uuid, &attrib->uuid)) {
+		int i;
+
+		/* Start from the attribute following the value handle */
+		for (i = 0; i < service->num_handles; i++) {
+			if (service->attributes[i] == attrib) {
+				attrib = service->attributes[i + 1];
+				break;
+			}
+		}
+	}
+
+	attrib->value_len = len;
+
+	return true;
+}
+
 bool gatt_db_attribute_read(struct gatt_db_attribute *attrib, uint16_t offset,
 				uint8_t opcode, struct bt_att *att,
 				gatt_db_attribute_read_t func, void *user_data)
@@ -1801,6 +1876,12 @@ bool gatt_db_attribute_read(struct gatt_db_attribute *attrib, uint16_t offset,
 
 	if (!attrib || !func)
 		return false;
+
+	/* Check boundaries if value_len is set */
+	if (attrib->value_len && offset > attrib->value_len) {
+		func(attrib, BT_ATT_ERROR_INVALID_OFFSET, NULL, 0, user_data);
+		return true;
+	}
 
 	if (attrib->read_func) {
 		struct pending_read *p;
@@ -1824,12 +1905,6 @@ bool gatt_db_attribute_read(struct gatt_db_attribute *attrib, uint16_t offset,
 
 		attrib->read_func(attrib, p->id, offset, opcode, att,
 							attrib->user_data);
-		return true;
-	}
-
-	/* Check boundary if value is stored in the db */
-	if (offset > attrib->value_len) {
-		func(attrib, BT_ATT_ERROR_INVALID_OFFSET, NULL, 0, user_data);
 		return true;
 	}
 
@@ -1887,18 +1962,30 @@ bool gatt_db_attribute_write(struct gatt_db_attribute *attrib, uint16_t offset,
 					gatt_db_attribute_write_t func,
 					void *user_data)
 {
+	uint8_t err = 0;
+
 	if (!attrib || !func)
 		return false;
 
 	if (attrib->write_func) {
 		struct pending_write *p;
-		uint8_t err;
+
+		/* Check boundaries if value_len is set */
+		if (attrib->value_len) {
+			if (offset > attrib->value_len) {
+				err = BT_ATT_ERROR_INVALID_OFFSET;
+				goto done;
+			}
+
+			if (offset + len > attrib->value_len) {
+				err = BT_ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LEN;
+				goto done;
+			}
+		}
 
 		err = attribute_authorize(attrib, opcode, att);
-		if (err) {
-			func(attrib, err, user_data);
-			return true;
-		}
+		if (err)
+			goto done;
 
 		p = new0(struct pending_write, 1);
 		p->attrib = attrib;
@@ -1940,7 +2027,7 @@ bool gatt_db_attribute_write(struct gatt_db_attribute *attrib, uint16_t offset,
 	memcpy(&attrib->value[offset], value, len);
 
 done:
-	func(attrib, 0, user_data);
+	func(attrib, err, user_data);
 
 	return true;
 }
@@ -1984,4 +2071,59 @@ void *gatt_db_attribute_get_user_data(struct gatt_db_attribute *attrib)
 		return NULL;
 
 	return attrib->user_data;
+}
+
+static bool match_attribute_notify_id(const void *a, const void *b)
+{
+	const struct attribute_notify *notify = a;
+	unsigned int id = PTR_TO_UINT(b);
+
+	return notify->id == id;
+}
+
+unsigned int gatt_db_attribute_register(struct gatt_db_attribute *attrib,
+					gatt_db_attribute_cb_t removed,
+					void *user_data,
+					gatt_db_destroy_func_t destroy)
+{
+	struct attribute_notify *notify;
+
+	if (!attrib || !removed)
+		return 0;
+
+	notify = new0(struct attribute_notify, 1);
+	notify->removed = removed;
+	notify->destroy = destroy;
+	notify->user_data = user_data;
+
+	if (attrib->next_notify_id < 1)
+		attrib->next_notify_id = 1;
+
+	notify->id = attrib->next_notify_id++;
+
+	if (!queue_push_tail(attrib->notify_list, notify)) {
+		free(notify);
+		return 0;
+	}
+
+	return notify->id;
+}
+
+bool gatt_db_attribute_unregister(struct gatt_db_attribute *attrib,
+						unsigned int id)
+{
+	struct attribute_notify *notify;
+
+	if (!attrib || !id)
+		return false;
+
+	notify = queue_find(attrib->notify_list, match_attribute_notify_id,
+						UINT_TO_PTR(id));
+	if (!notify)
+		return false;
+
+	queue_remove(attrib->notify_list, notify);
+	attribute_notify_destroy(notify);
+
+	return true;
 }

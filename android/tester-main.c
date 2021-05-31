@@ -1,17 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
 /*
  * Copyright (C) 2014 Intel Corporation
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  *
  */
 
@@ -2867,7 +2856,7 @@ void emu_add_l2cap_server_action(void)
 	bthost = hciemu_client_get_host(data->hciemu);
 
 	bthost_add_l2cap_server(bthost, l2cap_data->psm, l2cap_data->func,
-							l2cap_data->user_data);
+						NULL, l2cap_data->user_data);
 
 	step->action_status = BT_STATUS_SUCCESS;
 

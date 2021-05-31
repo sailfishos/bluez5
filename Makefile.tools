@@ -1,4 +1,4 @@
-
+# SPDX-License-Identifier: GPL-2.0
 if CLIENT
 bin_PROGRAMS += client/bluetoothctl
 
@@ -7,6 +7,8 @@ client_bluetoothctl_SOURCES = client/main.c \
 					client/agent.h client/agent.c \
 					client/advertising.h \
 					client/advertising.c \
+					client/adv_monitor.h \
+					client/adv_monitor.c \
 					client/gatt.h client/gatt.c
 client_bluetoothctl_LDADD = gdbus/libgdbus-internal.la src/libshared-glib.la \
 				$(GLIB_LIBS) $(DBUS_LIBS) -lreadline
@@ -42,6 +44,7 @@ monitor_btmon_SOURCES = monitor/main.c monitor/bt.h \
 				monitor/analyze.h monitor/analyze.c \
 				monitor/intel.h monitor/intel.c \
 				monitor/broadcom.h monitor/broadcom.c \
+				monitor/msft.h monitor/msft.c \
 				monitor/jlink.h monitor/jlink.c \
 				monitor/tty.h
 monitor_btmon_LDADD = lib/libbluetooth-internal.la \
@@ -174,9 +177,8 @@ tools_userchan_tester_LDADD = lib/libbluetooth-internal.la \
 endif
 
 if TOOLS
-bin_PROGRAMS += tools/rctest tools/l2test tools/l2ping tools/bccmd \
-			tools/bluemoon tools/hex2hcd tools/mpris-proxy \
-			tools/btattach
+bin_PROGRAMS += tools/rctest tools/l2test tools/l2ping tools/bluemoon \
+		tools/hex2hcd tools/mpris-proxy tools/btattach
 
 noinst_PROGRAMS += tools/bdaddr tools/avinfo tools/avtest \
 			tools/scotest tools/amptest tools/hwdb \
@@ -276,12 +278,6 @@ tools_l2test_LDADD = lib/libbluetooth-internal.la
 
 tools_l2ping_LDADD = lib/libbluetooth-internal.la
 
-tools_bccmd_SOURCES = tools/bccmd.c tools/csr.h tools/csr.c \
-			tools/csr_hci.c tools/csr_usb.c \
-			tools/csr_h4.c tools/csr_3wire.c \
-			tools/csr_bcsp.c tools/ubcsp.h tools/ubcsp.c
-tools_bccmd_LDADD = lib/libbluetooth-internal.la
-
 tools_bluemoon_SOURCES = tools/bluemoon.c monitor/bt.h
 tools_bluemoon_LDADD = src/libshared-mainloop.la
 
@@ -296,7 +292,7 @@ tools_gatt_service_LDADD = $(GLIB_LIBS) $(DBUS_LIBS) gdbus/libgdbus-internal.la
 profiles_iap_iapd_SOURCES = profiles/iap/main.c
 profiles_iap_iapd_LDADD = gdbus/libgdbus-internal.la $(GLIB_LIBS) $(DBUS_LIBS)
 
-dist_man_MANS += tools/rctest.1 tools/l2ping.1 tools/bccmd.1 tools/btattach.1
+dist_man_MANS += tools/rctest.1 tools/l2ping.1 tools/btattach.1
 
 EXTRA_DIST += tools/bdaddr.1
 
@@ -336,7 +332,6 @@ tools_mesh_cfgclient_SOURCES = tools/mesh-cfgclient.c \
 				tools/mesh/agent.h tools/mesh/agent.c \
 				tools/mesh/mesh-db.h tools/mesh/mesh-db.c \
 				mesh/util.h mesh/util.c \
-				mesh/mesh-config.h mesh/mesh-config-json.c \
 				mesh/crypto.h mesh/crypto.c
 
 tools_mesh_cfgclient_LDADD = lib/libbluetooth-internal.la src/libshared-ell.la \
@@ -359,7 +354,7 @@ tools_hciattach_SOURCES = tools/hciattach.c tools/hciattach.h \
 						tools/hciattach_bcm43xx.c
 tools_hciattach_LDADD = lib/libbluetooth-internal.la
 
-tools_hciconfig_SOURCES = tools/hciconfig.c tools/csr.h tools/csr.c
+tools_hciconfig_SOURCES = tools/hciconfig.c
 tools_hciconfig_LDADD = lib/libbluetooth-internal.la
 
 tools_hcitool_SOURCES = tools/hcitool.c src/oui.h src/oui.c
@@ -408,7 +403,7 @@ EXTRA_DIST += tools/hciattach.1 tools/hciconfig.1 \
 			tools/rfcomm.1 tools/sdptool.1 tools/ciptool.1
 endif
 else
-EXTRA_DIST += tools/rctest.1 tools/l2ping.1 tools/bccmd.1 tools/btattach.1
+EXTRA_DIST += tools/rctest.1 tools/l2ping.1 tools/btattach.1
 endif
 
 if HID2HCI
@@ -493,11 +488,15 @@ test_scripts += test/sap_client.py test/bluezutils.py \
 		test/test-gatt-profile test/test-mesh test/agent.py
 
 if BTPCLIENT
-noinst_PROGRAMS += tools/btpclient
+noinst_PROGRAMS += tools/btpclient tools/btpclientctl
 
 tools_btpclient_SOURCES = tools/btpclient.c src/shared/btp.c src/shared/btp.h
 tools_btpclient_LDADD = lib/libbluetooth-internal.la \
 				src/libshared-ell.la $(ell_ldadd)
 tools_btpclient_DEPENDENCIES = lib/libbluetooth-internal.la $(ell_dependencies)
 tools/btpclient.$(OBJEXT): src/libshared-ell.la ell/internal
+
+tools_btpclientctl_SOURCES = tools/btpclientctl.c client/display.c
+tools_btpclientctl_LDADD = src/libshared-mainloop.la src/libshared-glib.la \
+				lib/libbluetooth-internal.la -lreadline
 endif

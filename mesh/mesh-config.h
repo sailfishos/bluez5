@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,26 +6,18 @@
  *  Copyright (C) 2018-2019  Intel Corporation. All rights reserved.
  *
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
  */
+
+#define MIN_COMP_SIZE 14
 
 struct mesh_config;
 
 struct mesh_config_sub {
 	bool virt;
 	union {
-		uint16_t	addr;
-		uint8_t	virt_addr[16];
-	} src;
+		uint16_t grp;
+		uint8_t	label[16];
+	} addr;
 };
 
 struct mesh_config_pub {
@@ -32,10 +25,10 @@ struct mesh_config_pub {
 	uint32_t period;
 	uint16_t addr;
 	uint16_t idx;
+	uint16_t interval;
 	uint8_t ttl;
 	uint8_t credential;
-	uint8_t count;
-	uint8_t interval;
+	uint8_t cnt;
 	uint8_t virt_addr[16];
 };
 
@@ -45,6 +38,8 @@ struct mesh_config_model {
 	uint16_t *bindings;
 	uint32_t id;
 	bool vendor;
+	bool sub_enabled;
+	bool pub_enabled;
 	uint32_t num_bindings;
 	uint32_t num_subs;
 };
@@ -86,10 +81,17 @@ struct mesh_config_transmit {
 	uint8_t count;
 };
 
+struct mesh_config_comp_page {
+	uint16_t len;
+	uint8_t page_num;
+	uint8_t data[];
+};
+
 struct mesh_config_node {
 	struct l_queue *elements;
 	struct l_queue *netkeys;
 	struct l_queue *appkeys;
+	struct l_queue *pages;
 	uint32_t seq_number;
 	uint32_t iv_index;
 	bool iv_update;
@@ -114,7 +116,7 @@ typedef bool (*mesh_config_node_func_t)(struct mesh_config_node *node,
 bool mesh_config_load_nodes(const char *cfgdir_name, mesh_config_node_func_t cb,
 							void *user_data);
 void mesh_config_release(struct mesh_config *cfg);
-void mesh_config_destroy(struct mesh_config *cfg);
+void mesh_config_destroy_nvm(struct mesh_config *cfg);
 bool mesh_config_save(struct mesh_config *cfg, bool no_wait,
 				mesh_config_status_func_t cb, void *user_data);
 struct mesh_config *mesh_config_create(const char *cfgdir_name,
@@ -137,11 +139,14 @@ bool mesh_config_write_relay_mode(struct mesh_config *cfg, uint8_t mode,
 bool mesh_config_write_ttl(struct mesh_config *cfg, uint8_t ttl);
 bool mesh_config_write_mode(struct mesh_config *cfg, const char *keyword,
 								int value);
+bool mesh_config_comp_page_add(struct mesh_config *cfg, uint8_t page,
+						uint8_t *data, uint16_t size);
+bool mesh_config_comp_page_mv(struct mesh_config *cfg, uint8_t old, uint8_t nw);
 bool mesh_config_model_binding_add(struct mesh_config *cfg, uint16_t ele_addr,
-						bool vendor, uint32_t mod_id,
+						uint32_t mod_id, bool vendor,
 							uint16_t app_idx);
 bool mesh_config_model_binding_del(struct mesh_config *cfg, uint16_t ele_addr,
-						bool vendor, uint32_t mod_id,
+						uint32_t mod_id, bool vendor,
 							uint16_t app_idx);
 bool mesh_config_model_pub_add(struct mesh_config *cfg, uint16_t ele_addr,
 						uint32_t mod_id, bool vendor,
@@ -156,6 +161,12 @@ bool mesh_config_model_sub_del(struct mesh_config *cfg, uint16_t ele_addr,
 						struct mesh_config_sub *sub);
 bool mesh_config_model_sub_del_all(struct mesh_config *cfg, uint16_t ele_addr,
 						uint32_t mod_id, bool vendor);
+bool mesh_config_model_pub_enable(struct mesh_config *cfg, uint16_t ele_addr,
+						uint32_t mod_id, bool vendor,
+						bool enable);
+bool mesh_config_model_sub_enable(struct mesh_config *cfg, uint16_t ele_addr,
+						uint32_t mod_id, bool vendor,
+						bool enable);
 bool mesh_config_app_key_add(struct mesh_config *cfg, uint16_t net_idx,
 				uint16_t app_idx, const uint8_t key[16]);
 bool mesh_config_app_key_update(struct mesh_config *cfg, uint16_t app_idx,
@@ -172,3 +183,7 @@ bool mesh_config_net_key_set_phase(struct mesh_config *cfg, uint16_t idx,
 bool mesh_config_write_address(struct mesh_config *cfg, uint16_t address);
 bool mesh_config_write_iv_index(struct mesh_config *cfg, uint32_t idx,
 								bool update);
+bool mesh_config_update_company_id(struct mesh_config *cfg, uint16_t cid);
+bool mesh_config_update_product_id(struct mesh_config *cfg, uint16_t pid);
+bool mesh_config_update_version_id(struct mesh_config *cfg, uint16_t vid);
+bool mesh_config_update_crpl(struct mesh_config *cfg, uint16_t crpl);

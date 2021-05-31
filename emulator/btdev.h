@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2011-2012  Intel Corporation
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -64,7 +51,7 @@ enum btdev_type {
 	BTDEV_TYPE_AMP,
 	BTDEV_TYPE_BREDR20,
 	BTDEV_TYPE_BREDRLE50,
-	BTDEV_TYPE_BREDRLE60,
+	BTDEV_TYPE_BREDRLE52,
 };
 
 enum btdev_hook_type {
@@ -78,6 +65,11 @@ struct btdev;
 
 struct btdev *btdev_create(enum btdev_type type, uint16_t id);
 void btdev_destroy(struct btdev *btdev);
+
+typedef void (*btdev_debug_func_t)(const char *str, void *user_data);
+typedef void (*btdev_destroy_func_t)(void *user_data);
+bool btdev_set_debug(struct btdev *btdev, btdev_debug_func_t callback,
+			void *user_data, btdev_destroy_func_t destroy);
 
 const uint8_t *btdev_get_bdaddr(struct btdev *btdev);
 uint8_t *btdev_get_features(struct btdev *btdev);

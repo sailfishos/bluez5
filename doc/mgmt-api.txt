@@ -30,7 +30,9 @@ Linux kernel v4.6	Version 1.12
 Linux kernel v4.8	Version 1.13
 Linux kernel v4.9	Version 1.14
 Linux kernel v5.5	Version 1.15
-Linux kernel v5.6	Version 1.16 (not yet released)
+Linux kernel v5.6	Version 1.16
+Linux kernel v5.7	Version 1.17
+Linux kernel v5.8	Version 1.18 (not yet released)
 
 Version 1.1 introduces Set Device ID command.
 
@@ -93,6 +95,19 @@ Load Blocked Keys commands.
 
 Version 1.16 introduces Wideband Speech setting and its corresponding
 Set Wideband Speech command.
+
+Version 1.17 introduces Read Security Information command, Read Experimental
+Features Information command, Set Experimental Feature command and the
+Experimental Feature Changed event.
+
+Version 1.18 introduces Read Default System Configuration command, Set
+Default System Configuration command, Default System Configuration Changed
+event, Read Default Runtime Configuration command, Set Default Runtime
+Configuration command, Default Runtime Configuration Changed event, Get
+Device Flags command, Set Device Flags command, Device Flags Changed event,
+Read Advertisement Monitor Features command, Add Advertisement Patterns
+Monitor command, Remove Advertisement Monitor command, Advertisement Monitor
+Added event and Advertisement Monitor Removed event.
 
 
 Example
@@ -644,8 +659,8 @@ Set Low Energy Command
 				Invalid Index
 
 
-Set Device Class
-================
+Set Device Class Command
+========================
 
 	Command Code:		0x000E
 	Controller Index:	<controller id>
@@ -2480,6 +2495,7 @@ Read Extended Controller Index List Command
 		0x07	SPI
 		0x08	I2C
 		0x09	SMD
+		0x0A	VIRTIO
 
 	Controllers marked as RAW only operation are currently not listed
 	by this command.
@@ -2607,7 +2623,7 @@ Add Advertising Command
 				Duration (2 Octets)
 				Timeout (2 Octets)
 				Adv_Data_Len (1 Octet)
-				Scan_Rsp_len (1 Octet)
+				Scan_Rsp_Len (1 Octet)
 				Adv_Data (0-255 Octets)
 				Scan_Rsp (0-255 Octets)
 	Return Parameters:	Instance (1 Octet)
@@ -3094,6 +3110,753 @@ Set Wideband Speech Command
 				Invalid Index
 
 
+Read Controller Capabilities Command
+====================================
+
+	Command Code:		0x0048
+	Controller Index:	<controller id>
+	Command Parameters:
+	Return Parameters:	Capabilities_Data_Length (2 Octets)
+				Capabilities_Data (0-65535 Octets)
+
+	This command is used to retrieve the supported capabilities
+	by the controller or the host stack.
+
+	The Capabilities_Data_Length and Capabilities_Data parameters provide
+	a list of security settings, features and information. It uses
+	the same format as EIR_Data, but with the namespace defined here.
+
+		Data Type	Name
+		--------------------
+		0x01		Flags
+		0x02		Max Encryption Key Size (BR/EDR)
+		0x03		Max Encryption Key Size (LE)
+		0x04		Supported Tx Power (LE)
+
+	Flags (data type 0x01)
+
+		0	Remote public key validation (BR/EDR)
+		1	Remote public key validation (LE)
+		2	Encryption key size enforcement (BR/EDR)
+		3	Encryption key size enforcement (LE)
+
+	Max Encryption Key Size (data types 0x02 and 0x03)
+
+		When the field is present, then it provides 1 Octet value
+		indicating the max encryption key size. If the field is not
+		present, then it is unknown what the max encryption key
+		size of the controller or host is in use.
+
+	Supported LE Tx Power (data type 0x04)
+
+		When present, this 2-octet field provides the min and max
+		LE Tx power supported by the controller, respectively, as
+		reported by the LE Read Transmit Power HCI command. If this
+		field is not available, it indicates that the LE Read
+		Transmit Power HCI command was not available.
+
+	This command generates a Command Complete event on success or
+	a Command Status event on failure.
+
+	Possible errors:	Invalid Parameters
+				Invalid Index
+
+
+Read Experimental Features Information Command
+==============================================
+
+	Command Code:		0x0049
+	Controller Index:	<controller id> or <non-controller>
+	Command Parameters:
+	Return Parameters:	Feature_Count (2 Octets)
+				Feature1 {
+					UUID (16 Octets)
+					Flags (4 Octets)
+				}
+				Feature2 {  }
+				...
+
+	This command is used to retrieve the supported experimental features
+	by the host stack.
+
+	The UUID values are not defined here. They can change over time and
+	are on purpose not stable. Features that mature will be removed at
+	some point. The mapping of feature UUID to the actual functionality
+	of a given feature is out of scope here.
+
+	The following bits are defined for the Flags parameter:
+
+		0	Feature active
+		1	Causes change in supported settings
+
+	This command generates a Command Complete event on success or
+	a Command Status event on failure.
+
+	Possible errors:	Invalid Parameters
+				Invalid Index
+
+
+Set Experimental Feature Command
+================================
+
+	Command Code:		0x004a
+	Controller Index:	<controller id> or <non-controller>
+	Command Parameters:	UUID (16 Octets)
+				Action (1 Octet)
+	Return Parameters:	UUID (16 Octets)
+				Flags (4 Octets)
+
+	This command is used to change the setting of an experimental feature
+	of the host stack.
+
+	The UUID value must be a supported value returned from the Read
+	Experimental Features Information command.
+
+	The Action parameter is UUID specific, but in most cases it will be
+	just a simple on/off toggle with these values:
+
+		0x00	Disable feature
+		0x01	Enable feature
+
+	It depends on the feature if the command can be used when the
+	controller is powered up. See Flags parameter of Read Experimental
+	Features Information command for details if the controller has
+	to be powered down first.
+
+	The following bits are defined for the Flags return parameter:
+
+		0	Feature active
+		1	Supported settings changed
+
+	When a feature causes the change of supported settings, then it is
+	a good idea to re-read the controller information.
+
+	When the UUID parameter is an empty UUID (16 x 0x00), then all
+	experimental features will be deactivated.
+
+	This command generates a Command Complete event on success or
+	a Command Status event on failure.
+
+	Possible errors:	Invalid Parameters
+				Not Powered
+				Invalid Index
+
+
+Read Default System Configuration Command
+=========================================
+
+	Command Code:		0x004b
+	Controller Index:	<controller id>
+	Command Parameters:
+	Return Parameters:	Parameter1 {
+					Parameter_Type (2 Octet)
+					Value_Length (1 Octet)
+					Value (0-255 Octets)
+				}
+				Parameter2 { }
+				...
+
+	This command is used to read a list of default controller parameters.
+
+	Currently defined Parameter_Type values are:
+
+		0x0000	BR/EDR Page Scan Type
+		0x0001	BR/EDR Page Scan Interval
+		0x0002	BR/EDR Page Scan Window
+		0x0003	BR/EDR Inquiry Scan Type
+		0x0004	BR/EDR Inquiry Scan Interval
+		0x0005	BR/EDR Inquiry Scan Window
+		0x0006	BR/EDR Link Supervision Timeout
+		0x0007	BR/EDR Page Timeout
+		0x0008	BR/EDR Min Sniff Interval
+		0x0009	BR/EDR Max Sniff Interval
+		0x000a	LE Advertisement Min Interval
+		0x000b	LE Advertisement Max Interval
+		0x000c	LE Multi Advertisement Rotation Interval
+		0x000d	LE Scanning Interval for auto connect
+		0x000e	LE Scanning Window for auto connect
+		0x000f	LE Scanning Interval for wake scenarios
+		0x0010	LE Scanning Window for wake scenarios
+		0x0011	LE Scanning Interval for discovery
+		0x0012	LE Scanning Window for discovery
+		0x0013	LE Scanning Interval for adv monitoring
+		0x0014	LE Scanning Window for adv monitoring
+		0x0015	LE Scanning Interval for connect
+		0x0016	LE Scanning Window for connect
+		0x0017	LE Min Connection Interval
+		0x0018	LE Max Connection Interval
+		0x0019	LE Connection Latency
+		0x001a	LE Connection Supervision Timeout
+		0x001b	LE Autoconnect Timeout
+
+	This command can be used at any time and will return a list of
+	supported default parameters as well as their current value.
+
+	This command generates a Command Complete event on success or
+	a Command Status event on failure.
+
+	Possible errors:	Invalid Parameters
+				Invalid Index
+
+
+Set Default System Configuration Command
+========================================
+
+	Command Code:		0x004c
+	Controller Index:	<controller id>
+	Command Parameters:	Parameter1 {
+					Parameter_Type (2 Octet)
+					Value_Length (1 Octet)
+					Value (0-255 Octets)
+				}
+				Parameter2 { }
+				...
+	Return Parameters:
+
+	This command is used to set a list of default controller parameters.
+
+	See Read Default System Configuration command for list of supported
+	Parameter_Type values.
+
+	This command can be used when the controller is not powered and
+	all supported parameters will be programmed once powered.
+
+	When providing unsupported values or invalid values, no parameter
+	value will be changed and all values discarded.
+
+	This command generates a Command Complete event on success or
+	a Command Status event on failure.
+
+	Possible errors:	Rejected
+				Not Supported
+				Invalid Parameters
+				Invalid Index
+
+
+Read Default Runtime Configuration Command
+==========================================
+
+	Command Code:		0x004d
+	Controller Index:	<controller id>
+	Command Parameters:
+	Return Parameters:	Parameter1 {
+					Parameter_Type (2 Octet)
+					Value_Length (1 Octet)
+					Value (0-255 Octets)
+				}
+				Parameter2 { }
+				...
+
+	This command is used to read a list of default runtime parameters.
+
+	Currently no Parameter_Type values are defined and an empty list
+	will be returned.
+
+	This command can be used at any time and will return a list of
+	supported default parameters as well as their current value.
+
+	This command generates a Command Complete event on success or
+	a Command Status event on failure.
+
+	Possible errors:	Invalid Parameters
+				Invalid Index
+
+
+Set Default Runtime Configuration Command
+=========================================
+
+	Command Code:		0x004e
+	Controller Index:	<controller id>
+	Command Parameters:	Parameter1 {
+					Parameter_Type (2 Octet)
+					Value_Length (1 Octet)
+					Value (0-255 Octets)
+				}
+				Parameter2 { }
+				...
+	Return Parameters:
+
+	This command is used to set a list of default runtime parameters.
+
+	See Read Default Runtime Configuration command for list of supported
+	Parameter_Type values.
+
+	This command can be used at any time and will change the runtime
+	default. Changes however will not apply to existing connections or
+	currently active operations.
+
+	When providing unsupported values or invalid values, no parameter
+	value will be changed and all values discarded.
+
+	This command generates a Command Complete event on success or
+	a Command Status event on failure.
+
+	Possible errors:	Rejected
+				Not Supported
+				Invalid Parameters
+				Invalid Index
+
+
+Get Device Flags Command
+========================
+
+	Command Code:		0x004f
+	Controller Index:	<controller id>
+	Command Parameters:	Address (6 Octets)
+				Address_Type (1 Octet)
+	Return Parameters:	Address (6 Octets)
+				Address_Type (1 Octet)
+				Supported_Flags (4 Octets)
+				Current_Flags (4 Octets)
+
+	This command is used to retrieve additional flags and settings
+	for devices that are added via Add Device command.
+
+	Possible values for the Address_Type parameter:
+		0	BR/EDR
+		1	LE Public
+		2	LE Random
+
+	The Flags parameters are a bitmask with currently the following
+	available bits:
+
+		0	Remote Wakeup enabled
+
+	This command generates a Command Complete event on success
+	or a Command Status event on failure.
+
+	Possible errors:	Invalid Parameters
+				Invalid Index
+
+
+Set Device Flags Command
+========================
+
+	Command Code:		0x0050
+	Controller Index:	<controller id>
+	Command Parameters:	Address (6 Octets)
+				Address_Type (1 Octet)
+				Current_Flags (4 Octets)
+	Return Parameters:	Address (6 Octets)
+				Address_Type (1 Octet)
+
+	This command is used to configure additional flags and settings
+	for devices that are added via Add Device command.
+
+	Possible values for the Address_Type parameter:
+		0	BR/EDR
+		1	LE Public
+		2	LE Random
+
+	The list of supported Flags can be retrieved via the Get Device
+	Flags or Device Flags Changed command. Selecting unsupported flags
+	will result in an Invalid Parameter error;
+
+	Refer to the Get Device Flags command for a detailed description
+	of the Flags parameters.
+
+	This command can be used when the controller is not powered and
+	all settings will be programmed once powered.
+
+	This command generates a Command Complete event on success
+	or a Command Status event on failure.
+
+	Possible errors:	Invalid Parameters
+				Invalid Index
+
+
+Read Advertisement Monitor Features Command
+===========================================
+
+	Command Code:		0x0051
+	Controller Index:	<controller id>
+	Command Parameters:
+	Return Parameters:	Supported_Features (4 Octets)
+				Enabled_Features (4 Octets)
+				Max_Num_Handles (2 Octets)
+				Max_Num_Patterns (1 Octet)
+				Num_Handles (2 Octets)
+				Handle1 (2 Octets)
+				Handle2 (2 Octets)
+				...
+
+	This command is used to read the advertisement monitor features
+	supported by the controller and stack. Supported_Features lists all
+	related features supported by the controller while Enabled_Features
+	lists the ones currently used by the kernel.
+
+	Supported_Features and Enabled_Features are bitmasks with currently
+	the following available bits:
+
+		0	Advertisement content monitoring based on patterns with
+			logic OR.
+
+	Max_Num_Handles indicates the maximum number of supported
+	advertisement monitors. Note that the actual number of supported
+	ones might be less depending on the limitation of the controller.
+
+	Max_Num_Pattern indicates the maximum number of supported patterns
+	in an advertisement patterns monitor. Note that the actual number
+	of supported ones might be less depending on the limitation of the
+	controller.
+
+	Num_Handles indicates the number of added advertisement monitors,
+	and it is followed by a list of handles.
+
+	This command can be used when the controller is not powered.
+
+
+Add Advertisement Patterns Monitor Command
+==========================================
+
+	Command Code:		0x0052
+	Controller Index:	<controller id>
+	Command Parameters:	Pattern_Count (1 Octet)
+				Pattern1 {
+					AD_Type (1 Octet)
+					Offset (1 Octet)
+					Length (1 Octet)
+					Value (31 Octets)
+				}
+				Pattern2 { }
+				...
+	Return Parameters:	Monitor_Handle (2 Octets)
+
+	This command is used to add an advertisement monitor whose
+	filtering conditions are patterns. The kernel will trigger scanning
+	if there is at least one monitor added. If the controller supports
+	advertisement filtering, the kernel would offload the content
+	filtering to the controller in order to reduce power consumption;
+	otherwise the kernel ignores the content of the monitor. Note that
+	if the there are more than one patterns, OR logic would applied
+	among patterns during filtering. In other words, any advertisement
+	matching at least one pattern in a given monitor would be
+	considered as a match.
+
+	A pattern contains the following fields.
+		AD_Data_Type	Advertising Data Type. The possible values
+				are defined in Core Specification
+				Supplement.
+		Offset		The start index where pattern matching
+				shall be performed with in the AD data.
+		Length		The length of the pattern value in bytes.
+		Value		The value of the pattern in bytes.
+
+	Here is an example of a pattern.
+		{
+			0x16, // Service Data - 16-bit UUID
+			0x02, // Skip the UUID part.
+			0x04,
+			{0x11, 0x22, 0x33, 0x44},
+		}
+
+	This command can be used when the controller is not powered and
+	all settings will be programmed once powered.
+
+	Possible errors:	Failed
+				Busy
+				No Resources
+				Invalid Parameters
+
+
+Remove Advertisement Monitor Command
+====================================
+
+	Command Code:		0x0053
+	Controller Index:	<controller id>
+	Command Parameters:	Monitor_Handle (2 Octets)
+	Return Parameters:	Monitor_Handle (2 Octets)
+
+	This command is used to remove advertisement monitor(s). The kernel
+	would remove the monitor(s) with Monitor_Handle and update the LE
+	scanning.
+
+	When the Monitor_Handle is set to zero, then all previously added
+	handles will be removed.
+
+	Removing a monitor while it is being added will be ignored.
+
+	This command can be used when the controller is not powered and
+	all settings will be programmed once powered.
+
+	Possible errors:	Failed
+				Busy
+
+
+Add Extended Advertising Parameters Command
+===========================================
+
+	Command Code:		0x0054
+	Controller Index:	<controller id>
+	Command Parameters:	Instance (1 Octet)
+				Flags (4 Octets)
+				Params (2 Octets)
+				Duration (2 Octets)
+				Timeout (2 Octets)
+				MinInterval (4 Octets)
+				MaxInterval (4 Octets)
+				TxPower (1 Octet)
+	Return Parameters:	Instance (1 Octet)
+				TxPower (1 Octet)
+				MaxAdvDataLen (1 Octet)
+				MaxScanRspLen (1 Octet)
+
+	This command is used to configure the parameters for Bluetooth Low
+	Energy advertising instance. This command is expected to be followed
+	by an Add Extended Advertising Data command to complete and enable
+	the advertising instance.
+
+	Added advertising information with this command will not be visible
+	immediately if advertising is enabled via the Set Advertising
+	command. The usage of the Set Advertising command takes precedence
+	over this command. Instance information is stored and will be
+	advertised once advertising via Set Advertising has been disabled.
+
+	The Instance identifier is a value between 1 and the number of
+	supported instances. The value 0 is reserved.
+
+	With the Flags value the type of advertising is controlled and
+	the following flags are defined:
+
+		0	Switch into Connectable mode
+		1	Advertise as Discoverable
+		2	Advertise as Limited Discoverable
+		3	Add Flags field to Adv_Data
+		4	Add TX Power field to Adv_Data
+		5	Add Appearance field to Scan_Rsp
+		6	Add Local Name in Scan_Rsp
+		7	Secondary Channel with LE 1M
+		8	Secondary Channel with LE 2M
+		9	Secondary Channel with LE Coded
+		12	The Duration parameter should be used
+		13	The Timeout parameter should be used
+		14	The Interval parameters should be used
+		15	The Tx Power parameter should be used
+		16	The advertisement will contain a scan response
+
+	When the connectable flag is set, then the controller will use
+	undirected connectable advertising. The value of the connectable
+	setting can be overwritten this way. This is useful to switch a
+	controller into connectable mode only for LE operation. This is
+	similar to the mode 0x02 from the Set Advertising command.
+
+	When the connectable flag is not set, then the controller will
+	use advertising based on the connectable setting. When using
+	non-connectable or scannable advertising, the controller will
+	be programmed with a non-resolvable random address. When the
+	system is connectable, then the identity address or resolvable
+	private address will be used.
+
+	Using the connectable flag is useful for peripheral mode support
+	where BR/EDR (and/or LE) is controlled by Add Device. This allows
+	making the peripheral connectable without having to interfere
+	with the global connectable setting.
+
+	Secondary channel flags can be used to advertise in secondary
+	channel with the corresponding PHYs. These flag bits are mutually
+	exclusive and setting multiple will result in Invalid Parameter
+	error. Choosing either LE 1M or LE 2M will result in using
+	extended advertising on the primary channel with LE 1M and the
+	respectively LE 1M or LE 2M on the secondary channel. Choosing
+	LE Coded will result in using extended advertising on the primary
+	and secondary channels with LE Coded. Choosing none of these flags
+	will result in legacy advertising.
+
+	To allow future parameters to be optionally extended in this structure,
+	the flags member has been used to specify which of the structure
+	fields were purposefully set by the caller. Unspecified parameters will
+	be given sensible defaults by the kernel before the advertisement is
+	registered.
+
+	The Duration parameter configures the length of an Instance. The
+	value is in seconds. The default is 2 seconds.
+
+	If only one advertising Instance has been added, then the Duration
+	value will be ignored. It only applies for the case where multiple
+	Instances are configured. In that case every Instance will be
+	available for the Duration time and after that it switches to
+	the next one. This is a simple round-robin based approach.
+
+	The Timeout parameter configures the life-time of an Instance. In
+	case the value 0 is used it indicates no expiration time. If a
+	timeout value is provided, then the advertising Instance will be
+	automatically removed when the timeout passes. The value for the
+	timeout is in seconds. Powering down a controller will invalidate
+	all advertising Instances and it is not possible to add a new
+	Instance with a timeout when the controller is powered down.
+
+	When a Timeout is provided, then the Duration subtracts from
+	the actual Timeout value of that Instance. For example an Instance
+	with Timeout of 5 and Duration of 2 will be scheduled exactly 3
+	times, twice with 2 seconds and once with one second. Other
+	Instances have no influence on the Timeout.
+
+	MinInterval and MaxInterval define the minimum and maximum advertising
+	intervals, with units as number of .625ms advertising slots. The Max
+	interval is expected to be greater than or equal to the Min interval,
+	and both must have values in the range [0x000020, 0xFFFFFF]. If either
+	condition is not met, the registration will fail.
+
+	The provided Tx Power parameter will only be used if the controller
+	supports it, which can be determined by the presence of the
+	CanSetTxPower member of the Read Advertising Features command.
+
+	The acceptable range for requested Tx Power is defined in the spec
+	(Version 5.2 | Vol 4, Part E, page 2585) to be [-127, +20] dBm, and the
+	controller will select a power value up to the requested one. The
+	transmission power selected by the controller is not guaranteed
+	to match the requested one, so the reply will contain the power
+	chosen by the controller. If the requested Tx Power is outside
+	the valid range, the registration will fail.
+
+	When flag bit 16 is enabled, it indicates that the subsequent request
+	to set advertising data will contain a scan response, and that the
+	parameters should set a PDU type that is scannable.
+
+	Re-adding an already existing instance (i.e. issuing the Add Extended
+	Advertising Parameters command with an Instance identifier of an
+	existing instance) will update that instance's configuration. In this
+	case where no new instance is added, no Advertising Added event will
+	be generated. However, if the update of the instance fails, the
+	instance will be removed, and an Advertising Removed event will be
+	generated.
+
+	An instance being added or changed while another instance is
+	being advertised will not be visible immediately but only when
+	the new/changed instance is being scheduled by the round robin
+	advertising algorithm.
+
+	Changes to an instance that is currently being advertised will
+	cancel that instance and switch to the next instance. The changes
+	will be visible the next time the instance is scheduled for
+	advertising. In case a single instance is active, this means
+	that changes will be visible right away.
+
+	The MaxAdvDataLen return parameter indicates how large the data
+	payload can be in the subsequent Add Extended Advertising Data
+	Command, as it accounts for the data required for the selected flags.
+	Similarly, the MaxScanRspLen return parameter indicates how large
+	the scan response can be.
+
+	LE must already be enabled, and the controller must be powered,
+	otherwise a "rejected" status will be returned.
+
+	This command generates a Command Complete event on success or a
+	Command Status event on failure.
+
+	Possible errors:	Failed
+				Rejected
+				Not Supported
+				Invalid Parameters
+				Busy
+
+
+Add Extended Advertising Data Command
+=====================================
+
+	Command Code:		0x0055
+	Controller Index:	<controller id>
+	Command Parameters:	Instance (1 Octet)
+				Advertising Data Length (1 Octet)
+				Scan Response Length (1 Octet)
+				Advertising Data (0-255 Octets)
+				Scan Response (0-255 Octets)
+	Return Parameters:	Instance (1 Octet)
+
+	The Add Extended Advertising Data command is used to update the
+	advertising data of an existing advertising instance known to the
+	kernel. It is expected to be called after an Add Extended Advertising
+	Parameters command, as part of the advertisement registration
+	process.
+
+	If extended advertising is available, this call will initiate HCI
+	commands to set the instance's advertising data, set scan response
+	data, and then enable the instance. If extended advertising is
+	unavailable, the advertising instance structure maintained in kernel
+	will have its advertising data and scan response updated, and the
+	instance will either be scheduled immediately or left in the queue
+	for later advertisement as part of round-robin advertisement rotation
+	in software.
+
+	If Scan_Rsp_Len is zero and the flags defined in Add Extended
+	Advertising Parameters command do not have connectable flag set and
+	the global connectable setting is off, then non-connectable
+	advertising is used. If Scan_Rsp_Len is larger than zero and
+	connectable flag is not set and the global advertising is off,
+	then scannable advertising is used. This small difference is
+	supported to provide less air traffic for devices implementing
+	broadcaster role.
+
+	If the Instance provided does not match a known instance, or if the
+	provided advertising data or scan response are in an unrecognized
+	format, an "Invalid Parameters" status will be returned.
+
+	If a "Set LE" or Advertising command is still in progress, a "Busy"
+	status will be returned.
+
+	If the controller is not powered, a "rejected" status will be returned.
+
+	This command generates a Command Complete event on success or a
+	Command Status event on failure.
+
+	Possible errors:	Failed
+				Rejected
+				Invalid Parameters
+				Busy
+
+
+Add Advertisement Patterns Monitor With RSSI Threshold Command
+==============================================================
+
+	Command Code:		0x0056
+	Controller Index:	<controller id>
+	Command Parameters:	RSSI_Data {
+					High_Threshold (1 Octet)
+					High_Threshold_Timer (2 Octets)
+					Low_Threshold (1 Octet)
+					Low_Threshold_Timer (2 Octets)
+					Sampling_Period (1 Octet)
+				}
+				Pattern_Count (1 Octet)
+				Pattern1 {
+					AD_Type (1 Octet)
+					Offset (1 Octet)
+					Length (1 Octet)
+					Value (31 Octets)
+				}
+				Pattern2 { }
+				...
+	Return Parameters:	Monitor_Handle (2 Octets)
+
+	This command is essentially the same as Add Advertisement Patterns
+	Monitor Command (0x0052), but with an additional RSSI parameters.
+	As such, if the kernel supports advertisement filtering, then the
+	advertisement data will be filtered in accordance with the set
+	RSSI parameters. Otherwise, it would behave exactly the same as the
+	Add Advertisement Patterns Monitor Command.
+
+	Devices would be considered "in-range" if the RSSI of the received adv
+	packets are greater than High_Threshold dBm for High_Threshold_Timer
+	seconds. Similarly, devices would be considered lost if no received
+	adv have RSSI greater than Low_Threshold dBm for Low_Threshold_Timer
+	seconds. Only adv packets of "in-range" device would be propagated.
+
+	The meaning of Sampling_Period is as follows:
+		0x00	All adv packets from "in-range" devices would be
+			propagated.
+		0xFF	Only the first adv data of "in-range" devices would be
+			propagated. If the device becomes lost, then the first
+			data when it is found again will also be propagated.
+		other	Advertisement data would be grouped into 100ms * N
+			time period. Data in the same group will only be
+			reported once, with the RSSI value being averaged out.
+
+	Possible errors:	Failed
+				Busy
+				No Resources
+				Invalid Parameters
+
+
 Command Complete Event
 ======================
 
@@ -3325,6 +4088,7 @@ Device Connected Event
 		0	Reserved (not in use)
 		1	Legacy Pairing
 		2	Reserved (not in use)
+		3	Initiated Connection
 
 
 Device Disconnected Event
@@ -3354,6 +4118,7 @@ Device Disconnected Event
 		2	Connection terminated by local host
 		3	Connection terminated by remote host
 		4	Connection terminated due to authentication failure
+		5	Connection terminated by local host for suspend
 
 	Note that the local/remote distinction just determines which side
 	terminated the low-level connection, regardless of the
@@ -3497,6 +4262,7 @@ Device Found Event
 		0	Confirm name
 		1	Legacy Pairing
 		2	Not Connectable
+		3	Reserved (not in use)
 
 	For the RSSI field a value of 127 indicates that the RSSI is
 	not available. That can happen with Bluetooth 1.1 and earlier
@@ -3960,6 +4726,7 @@ Extended Controller Information Changed Event
 	The event will only be sent to management sockets other than the
 	one through which the change was triggered.
 
+
 PHY Configuration Changed Event
 ===============================
 
@@ -3976,3 +4743,170 @@ PHY Configuration Changed Event
 	one through which the change was triggered.
 
 	Refer Get PHY Configuration command for PHYs parameter.
+
+
+Experimental Feature Changed Event
+==================================
+
+	Event Code:		0x0027
+	Controller Index:	<controller id>
+	Event Parameters:	UUID (16 Octets)
+				Flags (4 Octets)
+
+	This event indicates that the status of an experimental feature
+	has been changed.
+
+	The event will only be sent to management sockets other than the
+	one through which the change was triggered.
+
+	Refer to Set Experimental Feature command for the Flags parameter.
+
+
+Default System Configuration Changed Event
+==========================================
+
+	Event Code:		0x0028
+	Controller Index:	<controller id>
+	Event Parameters:	Parameter1 {
+					Parameter_Type (2 Octet)
+					Value_Length (1 Octet)
+					Value (0-255 Octets)
+				}
+				Parameter2 { }
+				...
+
+	This event indicates the change of default system parameter values.
+
+	The event will only be sent to management sockets other than the
+	one through which the change was trigged. In addition it will
+	only be sent to sockets that have issues the Read Default System
+	Configuration command.
+
+	Refer to Read Default System configuration command for the supported
+	Parameter_Type values.
+
+
+Default Runtime Configuration Changed Event
+===========================================
+
+	Event Code:		0x0029
+	Controller Index:	<controller id>
+	Event Parameters:	Parameter1 {
+					Parameter_Type (2 Octet)
+					Value_Length (1 Octet)
+					Value (0-255 Octets)
+				}
+				Parameter2 { }
+				...
+
+	This event indicates the change of default runtime parameter values.
+
+	The event will only be sent to management sockets other than the
+	one through which the change was trigged. In addition it will
+	only be sent to sockets that have issues the Read Default Runtime
+	Configuration command.
+
+	Refer to Read Default Runtime configuration command for the supported
+	Parameter_Type values.
+
+
+Device Flags Changed Event
+==========================
+
+	Event Code:		0x002a
+	Controller Index:	<controller id>
+	Event Parameters:	Address (6 Octets)
+				Address_Type (1 Octet)
+				Supported_Flags (4 Octets)
+				Current_Flags (4 Octets)
+
+	This event indicates that the device flags have been changed via
+	the Set Device Flags command or that a new device has been added
+	via the Add Device command. In the latter case it is send right
+	after the Device Added event.
+
+	Possible values for the Address_Type parameter:
+		0	BR/EDR
+		1	LE Public
+		2	LE Random
+
+	The event will only be sent to management sockets other than the
+	one through which the command was sent.
+
+	In case this event is triggered by Add Device then it is sent to
+	all management sockets.
+
+
+Advertisement Monitor Added Event
+=================================
+
+	Event Code:		0x002b
+	Controller Index:	<controller id>
+	Event Parameters:	Monitor_Handle (2 Octets)
+
+	This event indicates that an advertisement monitor has been added
+	using the Add Advertisement Patterns Monitor command.
+
+	The event will only be sent to management sockets other than the
+	one through which the command was sent.
+
+
+Advertisement Monitor Removed Event
+===================================
+
+	Event Code:		0x002c
+	Controller Index:	<controller id>
+	Event Parameters:	Monitor_Handle (2 Octets)
+
+	This event indicates that an advertisement monitor has been removed
+	using the Remove Advertisement Monitor command.
+
+	The event will only be sent to management sockets other than the
+	one through which the command was sent.
+
+
+Controller Suspend Event
+========================
+
+	Event code:		0x002d
+	Controller Index:	<controller_id>
+	Event Parameters:	Suspend_State (1 octet)
+
+	This event indicates that the controller is suspended for host suspend.
+
+	Possible values for the Suspend_State parameter:
+		0	Running (not disconnected)
+		1	Disconnected and not scanning
+		2	Page scanning and/or passive scanning.
+
+	The value 0 is used for the running state and may be sent if the
+	controller could not be configured to suspend properly.
+
+	This event will be sent to all management sockets.
+
+
+Controller Resume Event
+=======================
+
+	Event code:		0x002e
+	Controller Index:	<controller_id>
+	Event Parameters:	Wake_Reason (1 octet)
+				Address (6 octets)
+				Address_Type (1 octet)
+
+	This event indicates that the controller has resumed from suspend.
+
+	Possible values for the Wake_Reason parameter:
+		0	Resume from non-Bluetooth wake source
+		1	Wake due to unexpected event
+		2	Remote wake due to peer device connection
+
+	Currently, we expect that only peer reconnections should wake us from
+	the suspended state. Any other events that occurred while the system
+	should have been suspended results in wake due to unexpected event.
+
+	If the Wake_Reason is Remote wake due to connection, the address of the
+	peer device that caused the event will be shared in Address and
+	Address_Type. Otherwise, Address and Address_Type will both be zero.
+
+	This event will be sent to all management sockets.

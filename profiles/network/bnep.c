@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -45,6 +32,7 @@
 #include "lib/uuid.h"
 
 #include "src/log.h"
+#include "src/shared/timeout.h"
 #include "src/shared/util.h"
 #include "btio/btio.h"
 
@@ -67,7 +55,7 @@ struct bnep {
 	bdaddr_t	dst_addr;
 	char	iface[16];
 	guint	attempts;
-	guint	setup_to;
+	unsigned int	setup_to;
 	guint	watch;
 	bnep_connect_cb	conn_cb;
 	void	*conn_data;
@@ -222,7 +210,7 @@ static gboolean bnep_setup_cb(GIOChannel *chan, GIOCondition cond,
 		return FALSE;
 
 	if (session->setup_to > 0) {
-		g_source_remove(session->setup_to);
+		timeout_remove(session->setup_to);
 		session->setup_to = 0;
 	}
 
@@ -268,7 +256,11 @@ static gboolean bnep_setup_cb(GIOChannel *chan, GIOCondition cond,
 
 	memset(&timeo, 0, sizeof(timeo));
 	timeo.tv_sec = 0;
-	setsockopt(sk, SOL_SOCKET, SO_RCVTIMEO, &timeo, sizeof(timeo));
+	if (setsockopt(sk, SOL_SOCKET, SO_RCVTIMEO, &timeo,
+							sizeof(timeo)) < 0) {
+		error("bnep: Set setsockopt failed: %s", strerror(errno));
+		goto failed;
+	};
 
 	sk = g_io_channel_unix_get_fd(session->io);
 	if (bnep_connadd(sk, session->src, session->iface) < 0)
@@ -322,7 +314,7 @@ static int bnep_setup_conn_req(struct bnep *session)
 	return 0;
 }
 
-static gboolean bnep_conn_req_to(gpointer user_data)
+static bool bnep_conn_req_to(gpointer user_data)
 {
 	struct bnep *session = user_data;
 
@@ -411,8 +403,9 @@ int bnep_connect(struct bnep *session, bnep_connect_cb conn_cb,
 	if (err < 0)
 		return err;
 
-	session->setup_to = g_timeout_add_seconds(CON_SETUP_TO,
-						bnep_conn_req_to, session);
+	session->setup_to = timeout_add_seconds(CON_SETUP_TO,
+						bnep_conn_req_to, session,
+						NULL);
 	return 0;
 }
 

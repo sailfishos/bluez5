@@ -1,19 +1,10 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2018-2019  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
  *
  */
 
@@ -39,7 +30,7 @@ struct mesh_node *node_find_by_addr(uint16_t addr);
 struct mesh_node *node_find_by_uuid(uint8_t uuid[16]);
 struct mesh_node *node_find_by_token(uint64_t token);
 bool node_is_provisioner(struct mesh_node *node);
-bool node_is_provisioned(struct mesh_node *node);
+bool node_is_busy(struct mesh_node *node);
 void node_app_key_delete(struct mesh_node *node, uint16_t net_idx,
 							uint16_t app_idx);
 uint16_t node_get_primary(struct mesh_node *node);
@@ -49,21 +40,19 @@ const uint8_t *node_get_token(struct mesh_node *node);
 const uint8_t *node_get_device_key(struct mesh_node *node);
 void node_set_num_elements(struct mesh_node *node, uint8_t num_ele);
 uint8_t node_get_num_elements(struct mesh_node *node);
-bool node_add_binding(struct mesh_node *node, uint8_t ele_idx,
-			uint32_t model_id, uint16_t app_idx);
-bool node_del_binding(struct mesh_node *node, uint8_t ele_idx,
-			uint32_t model_id, uint16_t app_idx);
 uint8_t node_default_ttl_get(struct mesh_node *node);
 bool node_default_ttl_set(struct mesh_node *node, uint8_t ttl);
 bool node_set_sequence_number(struct mesh_node *node, uint32_t seq);
 uint32_t node_get_sequence_number(struct mesh_node *node);
 int node_get_element_idx(struct mesh_node *node, uint16_t ele_addr);
-struct l_queue *node_get_element_models(struct mesh_node *node, uint8_t ele_idx,
-								int *status);
+struct l_queue *node_get_element_models(struct mesh_node *node,
+							uint8_t ele_idx);
 uint16_t node_get_crpl(struct mesh_node *node);
 bool node_init_from_storage(struct mesh_node *node, const uint8_t uuid[16],
 					struct mesh_config_node *db_node);
-uint16_t node_generate_comp(struct mesh_node *node, uint8_t *buf, uint16_t sz);
+const uint8_t *node_get_comp(struct mesh_node *node, uint8_t page_num,
+								uint16_t *len);
+bool node_replace_comp(struct mesh_node *node, uint8_t retire, uint8_t with);
 uint8_t node_lpn_mode_get(struct mesh_node *node);
 bool node_relay_mode_set(struct mesh_node *node, bool enable, uint8_t cnt,
 							uint16_t interval);
@@ -81,22 +70,22 @@ const char *node_get_app_path(struct mesh_node *node);
 bool node_add_pending_local(struct mesh_node *node, void *info);
 void node_attach_io_all(struct mesh_io *io);
 void node_attach_io(struct mesh_node *node, struct mesh_io *io);
-int node_attach(const char *app_root, const char *sender, uint64_t token,
+void node_attach(const char *app_root, const char *sender, uint64_t token,
 					node_ready_func_t cb, void *user_data);
 void node_build_attach_reply(struct mesh_node *node,
 						struct l_dbus_message *reply);
 void node_create(const char *app_root, const char *sender, const uint8_t *uuid,
 					node_ready_func_t cb, void *user_data);
-bool node_import(const char *app_root, const char *sender, const uint8_t *uuid,
+void node_import(const char *app_root, const char *sender, const uint8_t *uuid,
 			const uint8_t dev_key[16], const uint8_t net_key[16],
 			uint16_t net_idx, bool kr, bool ivu,
 			uint32_t iv_index, uint16_t unicast,
 			node_ready_func_t cb, void *user_data);
-void node_id_set(struct mesh_node *node, uint16_t node_id);
-uint16_t node_id_get(struct mesh_node *node);
 bool node_dbus_init(struct l_dbus *bus);
 void node_cleanup_all(void);
 struct mesh_config *node_config_get(struct mesh_node *node);
 struct mesh_agent *node_get_agent(struct mesh_node *node);
 const char *node_get_storage_dir(struct mesh_node *node);
 bool node_load_from_storage(const char *storage_dir);
+void node_finalize_new_node(struct mesh_node *node, struct mesh_io *io);
+void node_property_changed(struct mesh_node *node, const char *property);

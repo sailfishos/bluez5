@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2011-2012  Intel Corporation
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -35,6 +22,11 @@ void bthost_destroy(struct bthost *bthost);
 
 typedef void (*bthost_ready_cb) (void);
 void bthost_notify_ready(struct bthost *bthost, bthost_ready_cb cb);
+
+typedef void (*bthost_debug_func_t)(const char *str, void *user_data);
+typedef void (*bthost_destroy_func_t)(void *user_data);
+bool bthost_set_debug(struct bthost *bthost, bthost_debug_func_t callback,
+			void *user_data, bthost_destroy_func_t destroy);
 
 void bthost_set_send_handler(struct bthost *bthost, bthost_send_func handler,
 							void *user_data);
@@ -100,9 +92,12 @@ void bthost_le_start_encrypt(struct bthost *bthost, uint16_t handle,
 							const uint8_t ltk[16]);
 typedef void (*bthost_l2cap_connect_cb) (uint16_t handle, uint16_t cid,
 							void *user_data);
+typedef void (*bthost_l2cap_disconnect_cb) (void *user_data);
 
 void bthost_add_l2cap_server(struct bthost *bthost, uint16_t psm,
-				bthost_l2cap_connect_cb func, void *user_data);
+				bthost_l2cap_connect_cb func,
+				bthost_l2cap_disconnect_cb disconn_func,
+				void *user_data);
 
 void bthost_set_sc_support(struct bthost *bthost, bool enable);
 
@@ -147,8 +142,9 @@ void bthost_start(struct bthost *bthost);
 
 void *smp_start(struct bthost *bthost);
 void smp_stop(void *smp_data);
-void *smp_conn_add(void *smp_data, uint16_t handle, const uint8_t *ia,
-			const uint8_t *ra, uint8_t addr_type, bool conn_init);
+void *smp_conn_add(void *smp_data, uint16_t handle,
+			const uint8_t *ia, uint8_t ia_type,
+			const uint8_t *ra, uint8_t ra_type, bool conn_init);
 void smp_conn_del(void *conn_data);
 void smp_conn_encrypted(void *conn_data, uint8_t encrypt);
 void smp_data(void *conn_data, const void *data, uint16_t len);

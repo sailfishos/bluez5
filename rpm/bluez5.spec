@@ -1,7 +1,7 @@
 Name:       bluez5
 
 Summary:    Bluetooth daemon
-Version:    5.54
+Version:    5.58
 Release:    1
 License:    GPLv2+
 URL:        http://www.bluez.org/
@@ -31,6 +31,7 @@ BuildRequires:  bison
 BuildRequires:  flex
 BuildRequires:  automake
 BuildRequires:  autoconf
+BuildRequires:  libtool
 Conflicts: bluez
 
 %description
@@ -135,7 +136,7 @@ Summary:    Configuration for bluez5-obexd to enable tracing
 Will enable tracing for BlueZ 5 OBEX daemon
 
 %prep
-%setup -q -n %{name}-%{version}
+%autosetup -n %{name}-%{version}
 
 ./bootstrap
 
@@ -148,6 +149,7 @@ autoreconf --force --install
     --with-systemdsystemunitdir=%{_unitdir} \
     --with-systemduserunitdir=%{_userunitdir} \
     --enable-deprecated \
+    --enable-hid2hci \
     --enable-jolla-blacklist \
     --enable-jolla-dbus-access \
     --enable-jolla-did \
@@ -159,7 +161,7 @@ autoreconf --force --install
     --disable-autopair \
     --disable-hostname
 
-make %{?_smp_mflags}
+%make_build
 
 %check
 
@@ -295,7 +297,6 @@ systemctl-user daemon-reload ||:
 
 %files tools
 %defattr(-,root,root,-)
-%{_bindir}/bccmd
 %{_bindir}/bluetooth-player
 %{_bindir}/bluemoon
 %{_bindir}/bluetoothctl

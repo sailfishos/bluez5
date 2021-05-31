@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2014  Google Inc.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -174,9 +161,12 @@ static void request_unref(void *data)
 }
 
 struct notify_chrc {
+	struct bt_gatt_client *client;
+	struct gatt_db_attribute *attr;
 	uint16_t value_handle;
 	uint16_t ccc_handle;
 	uint16_t properties;
+	unsigned int notify_id;
 	int notify_count;  /* Reference count of registered notify callbacks */
 
 	/* Pending calls to register_notify are queued here so that they can be
@@ -190,6 +180,7 @@ struct notify_data {
 	struct bt_gatt_client *client;
 	unsigned int id;
 	unsigned int att_id;
+	uint8_t att_ecode;
 	int ref_count;
 	struct notify_chrc *chrc;
 	bt_gatt_client_register_callback_t callback;
@@ -234,6 +225,51 @@ static void find_ccc(struct gatt_db_attribute *attr, void *user_data)
 	*ccc_ptr = attr;
 }
 
+static bool match_notify_chrc(const void *data, const void *user_data)
+{
+	const struct notify_data *notify_data = data;
+	const struct notify_chrc *chrc = user_data;
+
+	return notify_data->chrc == chrc;
+}
+
+static void notify_data_cleanup(void *data)
+{
+	struct notify_data *notify_data = data;
+
+	if (notify_data->att_id)
+		bt_att_cancel(notify_data->client->att, notify_data->att_id);
+
+	notify_data_unref(notify_data);
+}
+
+static void notify_chrc_free(void *data)
+{
+	struct notify_chrc *chrc = data;
+
+	if (chrc->notify_id)
+		gatt_db_attribute_unregister(chrc->attr, chrc->notify_id);
+
+	queue_destroy(chrc->reg_notify_queue, notify_data_unref);
+	free(chrc);
+}
+
+static void chrc_removed(struct gatt_db_attribute *attr, void *user_data)
+{
+	struct notify_chrc *chrc = user_data;
+	struct bt_gatt_client *client = chrc->client;
+	struct notify_data *data;
+
+	chrc->notify_id = 0;
+
+	while ((data = queue_remove_if(client->notify_list, match_notify_chrc,
+								chrc)))
+		notify_data_cleanup(data);
+
+	queue_remove(client->notify_chrcs, chrc);
+	notify_chrc_free(chrc);
+}
+
 static struct notify_chrc *notify_chrc_create(struct bt_gatt_client *client,
 							uint16_t value_handle)
 {
@@ -273,20 +309,16 @@ static struct notify_chrc *notify_chrc_create(struct bt_gatt_client *client,
 	if (ccc)
 		chrc->ccc_handle = gatt_db_attribute_get_handle(ccc);
 
+	chrc->client = client;
+	chrc->attr = attr;
 	chrc->value_handle = value_handle;
 	chrc->properties = properties;
+	chrc->notify_id = gatt_db_attribute_register(attr, chrc_removed, chrc,
+									NULL);
 
 	queue_push_tail(client->notify_chrcs, chrc);
 
 	return chrc;
-}
-
-static void notify_chrc_free(void *data)
-{
-	struct notify_chrc *chrc = data;
-
-	queue_destroy(chrc->reg_notify_queue, notify_data_unref);
-	free(chrc);
 }
 
 static bool match_notify_data_id(const void *a, const void *b)
@@ -301,16 +333,6 @@ struct handle_range {
 	uint16_t start;
 	uint16_t end;
 };
-
-static void notify_data_cleanup(void *data)
-{
-	struct notify_data *notify_data = data;
-
-	if (notify_data->att_id)
-		bt_att_cancel(notify_data->client->att, notify_data->att_id);
-
-	notify_data_unref(notify_data);
-}
 
 struct discovery_op;
 
@@ -376,6 +398,10 @@ static void discovery_op_complete(struct discovery_op *op, bool success,
 	for (svc = queue_get_entries(op->pending_svcs); svc; svc = svc->next) {
 		struct gatt_db_attribute *attr = svc->data;
 		uint16_t start, end;
+
+		/* Leave active services if operation was aborted */
+		if ((!success && err == 0) && gatt_db_service_get_active(attr))
+			continue;
 
 		gatt_db_attribute_get_service_data(attr, &start, &end,
 							NULL, NULL);
@@ -632,7 +658,13 @@ static bool discover_descs(struct discovery_op *op, bool *discovering)
 			util_debug(client->debug_callback, client->debug_data,
 				"Failed to insert characteristic at 0x%04x",
 				chrc_data->value_handle);
-			goto failed;
+
+			/* Some devices have been seen reporting orphaned
+			 * characteristics.  In order to favor interoperability
+			 * we skip over characteristics in error
+			 */
+			free(chrc_data);
+			continue;
 		}
 
 		if (gatt_db_attribute_get_handle(attr) !=
@@ -642,7 +674,7 @@ static bool discover_descs(struct discovery_op *op, bool *discovering)
 		gatt_db_attribute_get_service_handles(svc, &start, &end);
 
 		/*
-		 * Ajust end_handle in case the next chrc is not within the
+		 * Adjust end_handle in case the next chrc is not within the
 		 * same service.
 		 */
 		if (chrc_data->end_handle > end)
@@ -651,7 +683,7 @@ static bool discover_descs(struct discovery_op *op, bool *discovering)
 		/*
 		 * check for descriptors presence, before initializing the
 		 * desc_handle and avoid integer overflow during desc_handle
-		 * intialization.
+		 * initialization.
 		 */
 		if (chrc_data->value_handle >= chrc_data->end_handle) {
 			free(chrc_data);
@@ -1062,6 +1094,49 @@ static void discovery_found_service(struct discovery_op *op,
 		op->last = end;
 }
 
+static bool discovery_parse_services(struct discovery_op *op, bool primary,
+						struct bt_gatt_iter *iter)
+{
+	struct bt_gatt_client *client = op->client;
+	struct gatt_db_attribute *attr;
+	uint16_t start, end;
+	uint128_t u128;
+	bt_uuid_t uuid;
+	char uuid_str[MAX_LEN_UUID_STR];
+
+	while (bt_gatt_iter_next_service(iter, &start, &end, u128.data)) {
+		bt_uuid128_create(&uuid, u128);
+
+		/* Log debug message */
+		bt_uuid_to_string(&uuid, uuid_str, sizeof(uuid_str));
+		util_debug(client->debug_callback, client->debug_data,
+				"start: 0x%04x, end: 0x%04x, uuid: %s",
+				start, end, uuid_str);
+
+		/* Store the service */
+		attr = gatt_db_insert_service(client->db, start, &uuid, primary,
+							end - start + 1);
+		if (!attr) {
+			gatt_db_clear_range(client->db, start, end);
+			attr = gatt_db_insert_service(client->db, start, &uuid,
+							false, end - start + 1);
+			if (!attr) {
+				util_debug(client->debug_callback,
+						client->debug_data,
+						"Failed to store service");
+				return false;
+			}
+			/* Database has changed adjust last handle */
+			op->last = end;
+		}
+
+		/* Update pending list */
+		discovery_found_service(op, attr, start, end);
+	}
+
+	return true;
+}
+
 static void discover_secondary_cb(bool success, uint8_t att_ecode,
 						struct bt_gatt_result *result,
 						void *user_data)
@@ -1069,11 +1144,6 @@ static void discover_secondary_cb(bool success, uint8_t att_ecode,
 	struct discovery_op *op = user_data;
 	struct bt_gatt_client *client = op->client;
 	struct bt_gatt_iter iter;
-	struct gatt_db_attribute *attr;
-	uint16_t start, end;
-	uint128_t u128;
-	bt_uuid_t uuid;
-	char uuid_str[MAX_LEN_UUID_STR];
 	struct handle_range *range;
 
 	discovery_req_clear(client);
@@ -1102,36 +1172,11 @@ static void discover_secondary_cb(bool success, uint8_t att_ecode,
 					"Secondary services found: %u",
 					bt_gatt_result_service_count(result));
 
-	while (bt_gatt_iter_next_service(&iter, &start, &end, u128.data)) {
-		bt_uuid128_create(&uuid, u128);
-
-		/* Log debug message */
-		bt_uuid_to_string(&uuid, uuid_str, sizeof(uuid_str));
-		util_debug(client->debug_callback, client->debug_data,
-				"start: 0x%04x, end: 0x%04x, uuid: %s",
-				start, end, uuid_str);
-
-		/* Store the service */
-		attr = gatt_db_insert_service(client->db, start, &uuid, false,
-							end - start + 1);
-		if (!attr) {
-			gatt_db_clear_range(client->db, start, end);
-			attr = gatt_db_insert_service(client->db, start, &uuid,
-							false, end - start + 1);
-			if (!attr) {
-				util_debug(client->debug_callback,
-						client->debug_data,
-						"Failed to store service");
-				success = false;
-				goto done;
-			}
-			/* Database has changed adjust last handle */
-			op->last = end;
-		}
-
-		/* Update pending list */
-		discovery_found_service(op, attr, start, end);
+	if (!discovery_parse_services(op, false, &iter)) {
+		success = false;
+		goto done;
 	}
+
 
 next:
 	if (queue_isempty(op->pending_svcs) || queue_isempty(op->discov_ranges))
@@ -1169,11 +1214,6 @@ static void discover_primary_cb(bool success, uint8_t att_ecode,
 	struct discovery_op *op = user_data;
 	struct bt_gatt_client *client = op->client;
 	struct bt_gatt_iter iter;
-	struct gatt_db_attribute *attr;
-	uint16_t start, end;
-	uint128_t u128;
-	bt_uuid_t uuid;
-	char uuid_str[MAX_LEN_UUID_STR];
 
 	discovery_req_clear(client);
 
@@ -1201,34 +1241,9 @@ static void discover_primary_cb(bool success, uint8_t att_ecode,
 					"Primary services found: %u",
 					bt_gatt_result_service_count(result));
 
-	while (bt_gatt_iter_next_service(&iter, &start, &end, u128.data)) {
-		bt_uuid128_create(&uuid, u128);
-
-		/* Log debug message. */
-		bt_uuid_to_string(&uuid, uuid_str, sizeof(uuid_str));
-		util_debug(client->debug_callback, client->debug_data,
-				"start: 0x%04x, end: 0x%04x, uuid: %s",
-				start, end, uuid_str);
-
-		attr = gatt_db_insert_service(client->db, start, &uuid, true,
-							end - start + 1);
-		if (!attr) {
-			gatt_db_clear_range(client->db, start, end);
-			attr = gatt_db_insert_service(client->db, start, &uuid,
-							true, end - start + 1);
-			if (!attr) {
-				util_debug(client->debug_callback,
-						client->debug_data,
-						"Failed to store service");
-				success = false;
-				goto done;
-			}
-			/* Database has changed adjust last handle */
-			op->last = end;
-		}
-
-		/* Update pending list */
-		discovery_found_service(op, attr, start, end);
+	if (!discovery_parse_services(op, true, &iter)) {
+		success = false;
+		goto done;
 	}
 
 secondary:
@@ -1415,8 +1430,10 @@ static bool read_db_hash(struct discovery_op *op)
 	struct bt_gatt_client *client = op->client;
 	bt_uuid_t uuid;
 
-	/* Check if hash was already read */
-	if (op->hash)
+	/* Check if hash was already been read or there are more services to
+	 * process.
+	 */
+	if (op->hash || !queue_isempty(client->svc_chngd_queue))
 		return false;
 
 	bt_uuid16_create(&uuid, GATT_CHARAC_DB_HASH);
@@ -1559,7 +1576,8 @@ static void complete_notify_request(void *data)
 	notify_data->att_id = 0;
 
 	if (notify_data->callback)
-		notify_data->callback(0, notify_data->user_data);
+		notify_data->callback(notify_data->att_ecode,
+						notify_data->user_data);
 }
 
 static bool notify_data_write_ccc(struct notify_data *notify_data, bool enable,
@@ -1600,50 +1618,42 @@ static uint8_t process_error(const void *pdu, uint16_t length)
 	const struct bt_att_pdu_error_rsp *error_pdu;
 
 	if (!pdu || length != sizeof(struct bt_att_pdu_error_rsp))
-		return 0;
+		return BT_ATT_ERROR_UNLIKELY;
 
 	error_pdu = pdu;
 
 	return error_pdu->ecode;
 }
 
+static bool notify_set_ecode(const void *data, const void *match_data)
+{
+	struct notify_data *notify_data = (void *)data;
+	uint8_t ecode = PTR_TO_UINT(match_data);
+
+	notify_data->att_ecode = ecode;
+
+	return true;
+}
+
 static void enable_ccc_callback(uint8_t opcode, const void *pdu,
 					uint16_t length, void *user_data)
 {
 	struct notify_data *notify_data = user_data;
-	uint8_t att_ecode;
 
 	assert(notify_data->chrc->ccc_write_id);
 
 	notify_data->chrc->ccc_write_id = 0;
 
-	if (opcode == BT_ATT_OP_ERROR_RSP) {
-		att_ecode = process_error(pdu, length);
-
-		/* Failed to enable. Complete the current request and move on to
-		 * the next one in the queue. If there was an error sending the
-		 * write request, then just move on to the next queued entry.
-		 */
-		queue_remove(notify_data->client->notify_list, notify_data);
-		notify_data->callback(att_ecode, notify_data->user_data);
-
-		while ((notify_data = queue_pop_head(
-					notify_data->chrc->reg_notify_queue))) {
-
-			if (notify_data_write_ccc(notify_data, true,
-							enable_ccc_callback))
-				return;
-		}
-
-		return;
-	}
-
-	/* Success! Report success for all remaining requests. */
 	bt_gatt_client_ref(notify_data->client);
 
+	if (opcode == BT_ATT_OP_ERROR_RSP)
+		notify_data->att_ecode = process_error(pdu, length);
+
+	/* Notify for all remaining requests. */
 	complete_notify_request(notify_data);
-	queue_remove_all(notify_data->chrc->reg_notify_queue, NULL, NULL,
-						complete_notify_request);
+	queue_remove_all(notify_data->chrc->reg_notify_queue, notify_set_ecode,
+				UINT_TO_PTR(notify_data->att_ecode),
+				complete_notify_request);
 
 	bt_gatt_client_unref(notify_data->client);
 }
@@ -2169,6 +2179,7 @@ static void notify_cb(struct bt_att_chan *chan, uint8_t opcode,
 								&data);
 
 			length -= data.len;
+			pdu += data.len;
 		}
 	} else {
 		data.handle = get_le16(pdu);
@@ -2192,6 +2203,7 @@ static void bt_gatt_client_free(struct bt_gatt_client *client)
 {
 	bt_gatt_client_cancel_all(client);
 
+	queue_destroy(client->notify_chrcs, notify_chrc_free);
 	queue_destroy(client->notify_list, notify_data_cleanup);
 
 	queue_destroy(client->ready_cbs, ready_destroy);
@@ -2212,7 +2224,6 @@ static void bt_gatt_client_free(struct bt_gatt_client *client)
 	queue_destroy(client->clones, NULL);
 	queue_destroy(client->svc_chngd_queue, free);
 	queue_destroy(client->long_write_queue, request_unref);
-	queue_destroy(client->notify_chrcs, notify_chrc_free);
 	queue_destroy(client->pending_requests, request_unref);
 
 	if (client->parent) {

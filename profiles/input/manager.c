@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -96,7 +83,7 @@ static int input_init(void)
 	config = load_config_file(CONFIGDIR "/input.conf");
 	if (config) {
 		int idle_timeout;
-		gboolean uhid_enabled, classic_bonded_only;
+		gboolean uhid_enabled, classic_bonded_only, auto_sec;
 		gboolean uhid_autodetect;
 
 		idle_timeout = g_key_file_get_integer(config, "General",
@@ -144,6 +131,15 @@ static int input_init(void)
 			DBG("input.conf: ClassicBondedOnly=%s",
 					classic_bonded_only ? "true" : "false");
 			input_set_classic_bonded_only(classic_bonded_only);
+		} else
+			g_clear_error(&err);
+
+		auto_sec = g_key_file_get_boolean(config, "General",
+						"LEAutoSecurity", &err);
+		if (!err) {
+			DBG("input.conf: LEAutoSecurity=%s",
+					auto_sec ? "true" : "false");
+			input_set_auto_sec(auto_sec);
 		} else
 			g_clear_error(&err);
 

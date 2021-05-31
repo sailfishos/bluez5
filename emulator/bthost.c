@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2011-2012  Intel Corporation
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -37,6 +24,7 @@
 #include "lib/bluetooth.h"
 
 #include "src/shared/util.h"
+#include "src/shared/tester.h"
 #include "monitor/bt.h"
 #include "monitor/rfcomm.h"
 #include "bthost.h"
@@ -180,6 +168,7 @@ struct l2cap_pending_req {
 struct l2cap_conn_cb_data {
 	uint16_t psm;
 	bthost_l2cap_connect_cb func;
+	bthost_l2cap_disconnect_cb disconn_func;
 	void *user_data;
 	struct l2cap_conn_cb_data *next;
 };
@@ -225,6 +214,10 @@ struct bthost {
 	bool conn_init;
 	bool le;
 	bool sc;
+
+	bthost_debug_func_t debug_callback;
+	bthost_destroy_func_t debug_destroy;
+	void *debug_data;
 };
 
 struct bthost *bthost_create(void)
@@ -499,8 +492,19 @@ static void queue_command(struct bthost *bthost, const struct iovec *iov,
 static void send_packet(struct bthost *bthost, const struct iovec *iov,
 								int iovlen)
 {
+	int i;
+
 	if (!bthost->send_handler)
 		return;
+
+	for (i = 0; i < iovlen; i++) {
+		if (!i)
+			util_hexdump('<', iov[i].iov_base, iov[i].iov_len,
+				bthost->debug_callback, bthost->debug_data);
+		else
+			util_hexdump(' ', iov[i].iov_base, iov[i].iov_len,
+				bthost->debug_callback, bthost->debug_data);
+	}
 
 	bthost->send_handler(iov, iovlen, bthost->send_data);
 }
@@ -687,6 +691,9 @@ static void send_command(struct bthost *bthost, uint16_t opcode,
 	uint8_t pkt = BT_H4_CMD_PKT;
 	struct iovec iov[3];
 
+	util_debug(bthost->debug_callback, bthost->debug_data,
+				"command 0x%02x", opcode);
+
 	iov[0].iov_base = &pkt;
 	iov[0].iov_len = sizeof(pkt);
 
@@ -771,6 +778,22 @@ void bthost_notify_ready(struct bthost *bthost, bthost_ready_cb cb)
 	bthost->ready_cb = cb;
 }
 
+bool bthost_set_debug(struct bthost *bthost, bthost_debug_func_t callback,
+			void *user_data, bthost_destroy_func_t destroy)
+{
+	if (!bthost)
+		return false;
+
+	if (bthost->debug_destroy)
+		bthost->debug_destroy(bthost->debug_data);
+
+	bthost->debug_callback = callback;
+	bthost->debug_destroy = destroy;
+	bthost->debug_data = user_data;
+
+	return true;
+}
+
 static void read_local_features_complete(struct bthost *bthost,
 						const void *data, uint8_t len)
 {
@@ -847,7 +870,8 @@ static void evt_cmd_complete(struct bthost *bthost, const void *data,
 	case BT_HCI_CMD_LE_SET_EXT_ADV_ENABLE:
 		break;
 	default:
-		printf("Unhandled cmd_complete opcode 0x%04x\n", opcode);
+		util_debug(bthost->debug_callback, bthost->debug_data,
+				"Unhandled cmd_complete opcode 0x%04x", opcode);
 		break;
 	}
 
@@ -899,6 +923,7 @@ static void init_conn(struct bthost *bthost, uint16_t handle,
 {
 	struct btconn *conn;
 	const uint8_t *ia, *ra;
+	uint8_t ia_type, ra_type;
 
 	conn = malloc(sizeof(*conn));
 	if (!conn)
@@ -915,14 +940,18 @@ static void init_conn(struct bthost *bthost, uint16_t handle,
 
 	if (bthost->conn_init) {
 		ia = bthost->bdaddr;
+		ia_type = addr_type;
 		ra = conn->bdaddr;
+		ra_type = conn->addr_type;
 	} else {
 		ia = conn->bdaddr;
+		ia_type = conn->addr_type;
 		ra = bthost->bdaddr;
+		ra_type = addr_type;
 	}
 
-	conn->smp_data = smp_conn_add(bthost->smp_data, handle, ia, ra,
-						addr_type, bthost->conn_init);
+	conn->smp_data = smp_conn_add(bthost->smp_data, handle, ia, ia_type,
+					ra, ra_type, bthost->conn_init);
 
 	if (bthost->new_conn_cb)
 		bthost->new_conn_cb(conn->handle, bthost->new_conn_data);
@@ -1245,6 +1274,21 @@ static void evt_le_ltk_request(struct bthost *bthost, const void *data,
 								sizeof(cp));
 }
 
+static void evt_le_cis_req(struct bthost *bthost, const void *data, uint8_t len)
+{
+	const struct bt_hci_evt_le_cis_req *ev = data;
+	struct bt_hci_cmd_le_accept_cis cmd;
+
+	if (len < sizeof(*ev))
+		return;
+
+	memset(&cmd, 0, sizeof(cmd));
+
+	cmd.handle = ev->cis_handle;
+
+	send_command(bthost, BT_HCI_CMD_LE_ACCEPT_CIS, &cmd, sizeof(cmd));
+}
+
 static void evt_le_meta_event(struct bthost *bthost, const void *data,
 								uint8_t len)
 {
@@ -1253,6 +1297,9 @@ static void evt_le_meta_event(struct bthost *bthost, const void *data,
 
 	if (len < 1)
 		return;
+
+	util_debug(bthost->debug_callback, bthost->debug_data,
+				"event 0x%02x", *event);
 
 	switch (*event) {
 	case BT_HCI_EVT_LE_CONN_COMPLETE:
@@ -1270,8 +1317,12 @@ static void evt_le_meta_event(struct bthost *bthost, const void *data,
 	case BT_HCI_EVT_LE_ENHANCED_CONN_COMPLETE:
 		evt_le_ext_conn_complete(bthost, evt_data, len - 1);
 		break;
+	case BT_HCI_EVT_LE_CIS_REQ:
+		evt_le_cis_req(bthost, evt_data, len - 1);
+		break;
 	default:
-		printf("Unsupported LE Meta event 0x%2.2x\n", *event);
+		util_debug(bthost->debug_callback, bthost->debug_data,
+				"Unsupported LE Meta event 0x%2.2x", *event);
 		break;
 	}
 }
@@ -1288,6 +1339,9 @@ static void process_evt(struct bthost *bthost, const void *data, uint16_t len)
 		return;
 
 	param = data + sizeof(*hdr);
+
+	util_debug(bthost->debug_callback, bthost->debug_data,
+				"event 0x%02x", hdr->evt);
 
 	switch (hdr->evt) {
 	case BT_HCI_EVT_CMD_COMPLETE:
@@ -1355,7 +1409,8 @@ static void process_evt(struct bthost *bthost, const void *data, uint16_t len)
 		break;
 
 	default:
-		printf("Unsupported event 0x%2.2x\n", hdr->evt);
+		util_debug(bthost->debug_callback, bthost->debug_data,
+				"Unsupported event 0x%2.2x", hdr->evt);
 		break;
 	}
 }
@@ -1510,7 +1565,9 @@ static bool l2cap_disconn_req(struct bthost *bthost, struct btconn *conn,
 				uint8_t ident, const void *data, uint16_t len)
 {
 	const struct bt_l2cap_pdu_disconn_req *req = data;
+	struct l2cap_conn_cb_data *cb_data;
 	struct bt_l2cap_pdu_disconn_rsp rsp;
+	struct l2conn *l2conn;
 
 	if (len < sizeof(*req))
 		return false;
@@ -1521,6 +1578,15 @@ static bool l2cap_disconn_req(struct bthost *bthost, struct btconn *conn,
 
 	l2cap_sig_send(bthost, conn, BT_L2CAP_PDU_DISCONN_RSP, ident, &rsp,
 								sizeof(rsp));
+
+	l2conn = btconn_find_l2cap_conn_by_scid(conn, rsp.scid);
+	if (!l2conn)
+		return true;
+
+	cb_data = bthost_find_l2cap_cb_by_psm(bthost, l2conn->psm);
+
+	if (cb_data && cb_data->disconn_func)
+		cb_data->disconn_func(cb_data->user_data);
 
 	return true;
 }
@@ -1617,6 +1683,19 @@ static void handle_pending_l2reqs(struct bthost *bthost, struct btconn *conn,
 	}
 }
 
+static bool l2cap_rsp(uint8_t code)
+{
+	switch (code) {
+	case BT_L2CAP_PDU_CMD_REJECT:
+	case BT_L2CAP_PDU_CONN_RSP:
+	case BT_L2CAP_PDU_CONFIG_RSP:
+	case BT_L2CAP_PDU_INFO_RSP:
+		return true;
+	}
+
+	return false;
+}
+
 static void l2cap_sig(struct bthost *bthost, struct btconn *conn,
 						const void *data, uint16_t len)
 {
@@ -1675,11 +1754,13 @@ static void l2cap_sig(struct bthost *bthost, struct btconn *conn,
 		break;
 
 	default:
-		printf("Unknown L2CAP code 0x%02x\n", hdr->code);
+		util_debug(bthost->debug_callback, bthost->debug_data,
+				"Unknown L2CAP code 0x%02x", hdr->code);
 		ret = false;
 	}
 
-	handle_pending_l2reqs(bthost, conn, hdr->ident, hdr->code,
+	if (l2cap_rsp(hdr->code))
+		handle_pending_l2reqs(bthost, conn, hdr->ident, hdr->code,
 						data + sizeof(*hdr), hdr_len);
 
 	if (ret)
@@ -1773,6 +1854,82 @@ static bool l2cap_le_conn_rsp(struct bthost *bthost, struct btconn *conn,
 	return true;
 }
 
+static bool l2cap_ecred_conn_req(struct bthost *bthost, struct btconn *conn,
+				uint8_t ident, const void *data, uint16_t len)
+{
+	const struct bt_l2cap_pdu_ecred_conn_req *req = data;
+	struct {
+		struct bt_l2cap_pdu_ecred_conn_rsp pdu;
+		uint16_t dcid[5];
+	} __attribute__ ((packed)) rsp;
+	uint16_t psm;
+	int num_scid, i = 0;
+
+	if (len < sizeof(*req))
+		return false;
+
+	psm = le16_to_cpu(req->psm);
+
+	memset(&rsp, 0, sizeof(rsp));
+
+	rsp.pdu.mtu = 64;
+	rsp.pdu.mps = 64;
+	rsp.pdu.credits = 1;
+
+	if (!bthost_find_l2cap_cb_by_psm(bthost, psm)) {
+		rsp.pdu.result = cpu_to_le16(0x0002); /* PSM Not Supported */
+		goto respond;
+	}
+
+	len -= sizeof(rsp.pdu);
+	num_scid = len / sizeof(*req->scid);
+
+	for (; i < num_scid; i++)
+		rsp.dcid[i] = cpu_to_le16(conn->next_cid++);
+
+respond:
+	l2cap_sig_send(bthost, conn, BT_L2CAP_PDU_ECRED_CONN_RSP, ident, &rsp,
+			sizeof(rsp.pdu) + i * sizeof(*rsp.dcid));
+
+	return true;
+}
+
+static bool l2cap_ecred_conn_rsp(struct bthost *bthost, struct btconn *conn,
+				uint8_t ident, const void *data, uint16_t len)
+{
+	const struct  {
+		const struct bt_l2cap_pdu_ecred_conn_rsp *pdu;
+		uint16_t scid[5];
+	} __attribute__ ((packed)) *rsp = data;
+	int num_scid, i;
+
+	if (len < sizeof(*rsp))
+		return false;
+
+	num_scid = len / sizeof(*rsp->scid);
+
+	for (i = 0; i < num_scid; i++)
+		/* TODO add L2CAP connection before with proper PSM */
+		bthost_add_l2cap_conn(bthost, conn, 0,
+				      le16_to_cpu(rsp->scid[i]), 0);
+
+
+	return true;
+}
+
+static bool l2cap_le_rsp(uint8_t code)
+{
+	switch (code) {
+	case BT_L2CAP_PDU_CMD_REJECT:
+	case BT_L2CAP_PDU_CONN_PARAM_RSP:
+	case BT_L2CAP_PDU_LE_CONN_RSP:
+	case BT_L2CAP_PDU_ECRED_CONN_RSP:
+		return true;
+	}
+
+	return false;
+}
+
 static void l2cap_le_sig(struct bthost *bthost, struct btconn *conn,
 						const void *data, uint16_t len)
 {
@@ -1819,13 +1976,24 @@ static void l2cap_le_sig(struct bthost *bthost, struct btconn *conn,
 		ret = l2cap_le_conn_rsp(bthost, conn, hdr->ident,
 						data + sizeof(*hdr), hdr_len);
 		break;
+	case BT_L2CAP_PDU_ECRED_CONN_REQ:
+		ret = l2cap_ecred_conn_req(bthost, conn, hdr->ident,
+						data + sizeof(*hdr), hdr_len);
+		break;
+
+	case BT_L2CAP_PDU_ECRED_CONN_RSP:
+		ret = l2cap_ecred_conn_rsp(bthost, conn, hdr->ident,
+						data + sizeof(*hdr), hdr_len);
+		break;
 
 	default:
-		printf("Unknown L2CAP code 0x%02x\n", hdr->code);
+		util_debug(bthost->debug_callback, bthost->debug_data,
+				"Unknown L2CAP code 0x%02x", hdr->code);
 		ret = false;
 	}
 
-	handle_pending_l2reqs(bthost, conn, hdr->ident, hdr->code,
+	if (l2cap_le_rsp(hdr->code))
+		handle_pending_l2reqs(bthost, conn, hdr->ident, hdr->code,
 						data + sizeof(*hdr), hdr_len);
 
 	if (ret)
@@ -2161,7 +2329,8 @@ static void process_rfcomm(struct bthost *bthost, struct btconn *conn,
 		rfcomm_uih_recv(bthost, conn, l2conn, data, len);
 		break;
 	default:
-		printf("Unknown frame type\n");
+		util_debug(bthost->debug_callback, bthost->debug_data,
+					"Unknown frame type");
 		break;
 	}
 }
@@ -2186,7 +2355,8 @@ static void process_acl(struct bthost *bthost, const void *data, uint16_t len)
 	handle = acl_handle(acl_hdr->handle);
 	conn = bthost_find_conn(bthost, handle);
 	if (!conn) {
-		printf("ACL data for unknown handle 0x%04x\n", handle);
+		util_debug(bthost->debug_callback, bthost->debug_data,
+				"ACL data for unknown handle 0x%04x", handle);
 		return;
 	}
 
@@ -2222,8 +2392,9 @@ static void process_acl(struct bthost *bthost, const void *data, uint16_t len)
 		if (l2conn && l2conn->psm == 0x0003)
 			process_rfcomm(bthost, conn, l2conn, l2_data, l2_len);
 		else
-			printf("Packet for unknown CID 0x%04x (%u)\n", cid,
-									cid);
+			util_debug(bthost->debug_callback, bthost->debug_data,
+					"Packet for unknown CID 0x%04x (%u)",
+					cid, cid);
 		break;
 	}
 }
@@ -2238,6 +2409,9 @@ void bthost_receive_h4(struct bthost *bthost, const void *data, uint16_t len)
 	if (len < 1)
 		return;
 
+	util_hexdump('>', data, len, bthost->debug_callback,
+					bthost->debug_data);
+
 	pkt_type = ((const uint8_t *) data)[0];
 
 	switch (pkt_type) {
@@ -2248,7 +2422,8 @@ void bthost_receive_h4(struct bthost *bthost, const void *data, uint16_t len)
 		process_acl(bthost, data + 1, len - 1);
 		break;
 	default:
-		printf("Unsupported packet 0x%2.2x\n", pkt_type);
+		util_debug(bthost->debug_callback, bthost->debug_data,
+				"Unsupported packet 0x%2.2x", pkt_type);
 		break;
 	}
 }
@@ -2407,6 +2582,7 @@ void bthost_set_ext_adv_enable(struct bthost *bthost, uint8_t enable)
 	send_command(bthost, BT_HCI_CMD_LE_SET_EXT_ADV_PARAMS,
 							&cp, sizeof(cp));
 
+	memset(&cp_enable, 0, sizeof(cp_enable));
 	cp_enable.enable = enable;
 	send_command(bthost, BT_HCI_CMD_LE_SET_EXT_ADV_ENABLE, &cp_enable,
 					sizeof(cp_enable));
@@ -2481,7 +2657,9 @@ uint64_t bthost_conn_get_fixed_chan(struct bthost *bthost, uint16_t handle)
 }
 
 void bthost_add_l2cap_server(struct bthost *bthost, uint16_t psm,
-				bthost_l2cap_connect_cb func, void *user_data)
+				bthost_l2cap_connect_cb func,
+				bthost_l2cap_disconnect_cb disconn_func,
+				void *user_data)
 {
 	struct l2cap_conn_cb_data *data;
 
@@ -2492,6 +2670,7 @@ void bthost_add_l2cap_server(struct bthost *bthost, uint16_t psm,
 	data->psm = psm;
 	data->user_data = user_data;
 	data->func = func;
+	data->disconn_func = disconn_func;
 	data->next = bthost->new_l2cap_conn_data;
 
 	bthost->new_l2cap_conn_data = data;

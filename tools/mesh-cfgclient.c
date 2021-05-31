@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2019  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
  *
  */
 
@@ -57,6 +48,7 @@
 #define DEFAULT_START_ADDRESS	0x00aa
 #define DEFAULT_MAX_ADDRESS	(VIRTUAL_ADDRESS_LOW - 1)
 #define DEFAULT_NET_INDEX	0x0000
+#define MAX_CRPL_SIZE		0x7fff
 
 #define DEFAULT_CFG_FILE	"config_db.json"
 
@@ -112,7 +104,7 @@ static struct model_info *cfgcli;
 static struct l_queue *devices;
 
 static bool prov_in_progress;
-static const char *caps[2] = {"out-numeric", "in-numeric"};
+static const char *caps[] = {"static-oob", "out-numeric", "in-numeric"};
 
 static bool have_config;
 
@@ -122,7 +114,7 @@ static struct meshcfg_app app = {
 	.cid = 0x05f1,
 	.pid = 0x0002,
 	.vid = 0x0001,
-	.crpl = 10,
+	.crpl = MAX_CRPL_SIZE,
 	.ele = {
 		.path = "/mesh/cfgclient/ele0",
 		.index = 0,
@@ -143,6 +135,7 @@ static const char *range_opt;
 static const char *net_idx_opt;
 static const char *config_opt;
 
+static uint32_t iv_index;
 static uint16_t low_addr;
 static uint16_t high_addr;
 static uint16_t prov_net_idx;
@@ -231,6 +224,21 @@ struct key_data {
 	bool update;
 };
 
+static void append_dict_entry_basic(struct l_dbus_message_builder *builder,
+					const char *key, const char *signature,
+					const void *data)
+{
+	if (!builder)
+		return;
+
+	l_dbus_message_builder_enter_dict(builder, "sv");
+	l_dbus_message_builder_append_basic(builder, 's', key);
+	l_dbus_message_builder_enter_variant(builder, signature);
+	l_dbus_message_builder_append_basic(builder, signature[0], data);
+	l_dbus_message_builder_leave_variant(builder);
+	l_dbus_message_builder_leave_dict(builder);
+}
+
 static void append_byte_array(struct l_dbus_message_builder *builder,
 					unsigned char *data, unsigned int len)
 {
@@ -257,6 +265,14 @@ static void send_msg_setup(struct l_dbus_message *msg, void *user_data)
 		l_dbus_message_builder_append_basic(builder, 'b', &req->rmt);
 
 	l_dbus_message_builder_append_basic(builder, 'q', &req->idx);
+
+	/* Options */
+	l_dbus_message_builder_enter_array(builder, "{sv}");
+	l_dbus_message_builder_enter_dict(builder, "sv");
+	l_dbus_message_builder_leave_dict(builder);
+	l_dbus_message_builder_leave_array(builder);
+
+	/* Data */
 	append_byte_array(builder, req->data, req->len);
 	l_dbus_message_builder_finalize(builder);
 	l_dbus_message_builder_destroy(builder);
@@ -322,12 +338,14 @@ static bool send_key(void *user_data, uint16_t dst, uint16_t key_idx,
 	}
 
 	if (!is_appkey && !keys_subnet_exists(key_idx)) {
-		bt_shell_printf("Local NetKey %u not found\n", key_idx);
+		bt_shell_printf("Local NetKey %u (0x%3.3x) not found\n",
+							key_idx, key_idx);
 		return false;
 	}
 
 	if (is_appkey && (keys_get_bound_key(key_idx) == NET_IDX_INVALID)) {
-		bt_shell_printf("Local AppKey %u not found\n", key_idx);
+		bt_shell_printf("Local AppKey %u (0x%3.3x) not found\n",
+							key_idx, key_idx);
 		return false;
 	}
 
@@ -342,9 +360,38 @@ static bool send_key(void *user_data, uint16_t dst, uint16_t key_idx,
 				send_key_setup, NULL, req, l_free) != 0;
 }
 
+static void delete_node_setup(struct l_dbus_message *msg, void *user_data)
+{
+	struct generic_request *req = user_data;
+	uint16_t primary;
+	uint8_t ele_cnt;
+
+	primary = (uint16_t) req->arg1;
+	ele_cnt = (uint8_t) req->arg2;
+
+	l_dbus_message_set_arguments(msg, "qy", primary, ele_cnt);
+}
+
+static void delete_node(uint16_t primary, uint8_t ele_cnt)
+{
+	struct generic_request *req;
+
+	if (!local || !local->proxy || !local->mgmt_proxy) {
+		bt_shell_printf("Node is not attached\n");
+		return;
+	}
+
+	req = l_new(struct generic_request, 1);
+	req->arg1 = primary;
+	req->arg2 = ele_cnt;
+
+	l_dbus_proxy_method_call(local->mgmt_proxy, "DeleteRemoteNode",
+				delete_node_setup, NULL, req, l_free);
+}
+
 static void client_init(void)
 {
-	cfgcli = cfgcli_init(send_key, (void *) app.ele.path);
+	cfgcli = cfgcli_init(send_key, delete_node, (void *) app.ele.path);
 	cfgcli->ops.set_send_func(send_msg, (void *) app.ele.path);
 }
 
@@ -587,6 +634,13 @@ static bool register_agent(void)
 		return false;
 	}
 
+	if (!l_dbus_object_add_interface(dbus, app.agent_path,
+					 L_DBUS_INTERFACE_PROPERTIES, NULL)) {
+		l_error("Failed to add interface %s",
+					L_DBUS_INTERFACE_PROPERTIES);
+		return false;
+	}
+
 	return true;
 }
 
@@ -610,6 +664,7 @@ static void attach_node_reply(struct l_dbus_proxy *proxy,
 {
 	struct meshcfg_node *node = user_data;
 	struct l_dbus_message_iter iter_cfg;
+	uint32_t ivi;
 
 	if (l_dbus_message_is_error(msg)) {
 		const char *name;
@@ -639,6 +694,13 @@ static void attach_node_reply(struct l_dbus_proxy *proxy,
 	/* Inititalize config client model */
 	client_init();
 
+	if (l_dbus_proxy_get_property(local->proxy, "IvIndex", "u", &ivi) &&
+							ivi != iv_index) {
+		iv_index = ivi;
+		mesh_db_set_iv_index(ivi);
+		remote_clear_blacklisted_addresses(ivi);
+	}
+
 	return;
 
 fail:
@@ -655,44 +717,13 @@ static void attach_node_setup(struct l_dbus_message *msg, void *user_data)
 static void create_net_reply(struct l_dbus_proxy *proxy,
 				struct l_dbus_message *msg, void *user_data)
 {
-	char *str;
-	uint64_t tmp;
-
 	if (l_dbus_message_is_error(msg)) {
 		const char *name;
 
 		l_dbus_message_get_error(msg, &name, NULL);
 		l_error("Failed to create network: %s", name);
 		return;
-
 	}
-
-	if (!l_dbus_message_get_arguments(msg, "t", &tmp))
-		return;
-
-	local = l_new(struct meshcfg_node, 1);
-	local->token.u64 = l_get_be64(&tmp);
-	str = l_util_hexstring(&local->token.u8[0], 8);
-	bt_shell_printf("Created new node with token %s\n", str);
-	l_free(str);
-
-	if (!mesh_db_create(cfg_fname, local->token.u8,
-						"Mesh Config Client Network")) {
-		l_free(local);
-		local = NULL;
-		return;
-	}
-
-	mesh_db_set_addr_range(low_addr, high_addr);
-	keys_add_net_key(PRIMARY_NET_IDX);
-	mesh_db_net_key_add(PRIMARY_NET_IDX);
-
-	remote_add_node(app.uuid, 0x0001, 1, PRIMARY_NET_IDX);
-	mesh_db_add_node(app.uuid, 0x0001, 1, PRIMARY_NET_IDX);
-
-	l_dbus_proxy_method_call(net_proxy, "Attach", attach_node_setup,
-						attach_node_reply, NULL,
-						NULL);
 }
 
 static void create_net_setup(struct l_dbus_message *msg, void *user_data)
@@ -700,7 +731,7 @@ static void create_net_setup(struct l_dbus_message *msg, void *user_data)
 	struct l_dbus_message_builder *builder;
 
 	/* Generate random UUID */
-	l_getrandom(app.uuid, sizeof(app.uuid));
+	l_uuid_v4(app.uuid);
 
 	builder = l_dbus_message_builder_new(msg);
 
@@ -739,9 +770,15 @@ static void scan_reply(struct l_dbus_proxy *proxy, struct l_dbus_message *msg,
 
 static void scan_setup(struct l_dbus_message *msg, void *user_data)
 {
-	int32_t secs = L_PTR_TO_UINT(user_data);
+	uint16_t secs = (uint16_t) L_PTR_TO_UINT(user_data);
+	struct l_dbus_message_builder *builder;
 
-	l_dbus_message_set_arguments(msg, "q", (uint16_t) secs);
+	builder = l_dbus_message_builder_new(msg);
+	l_dbus_message_builder_enter_array(builder, "{sv}");
+	append_dict_entry_basic(builder, "Seconds", "q", &secs);
+	l_dbus_message_builder_leave_array(builder);
+	l_dbus_message_builder_finalize(builder);
+	l_dbus_message_builder_destroy(builder);
 }
 
 static void cmd_scan_unprov(int argc, char *argv[])
@@ -798,50 +835,6 @@ static void free_generic_request(void *data)
 
 	l_free(req->data1);
 	l_free(req->data2);
-	l_free(req);
-}
-
-static void delete_node_setup(struct l_dbus_message *msg, void *user_data)
-{
-	struct generic_request *req = user_data;
-	uint16_t primary;
-	uint8_t ele_cnt;
-
-	primary = (uint16_t) req->arg1;
-	ele_cnt = (uint8_t) req->arg2;
-
-	l_dbus_message_set_arguments(msg, "qy", primary, ele_cnt);
-}
-
-static void cmd_delete_node(int argc, char *argv[])
-{
-	struct generic_request *req;
-
-	if (!local || !local->proxy || !local->mgmt_proxy) {
-		bt_shell_printf("Node is not attached\n");
-		return;
-	}
-
-	if (argc < 3) {
-		bt_shell_printf("Unicast and element count are required\n");
-		return;
-	}
-
-	req = l_new(struct generic_request, 1);
-
-	if (sscanf(argv[1], "%04x", &req->arg1) != 1)
-		goto fail;
-
-	if (sscanf(argv[2], "%u", &req->arg2) != 1)
-		goto fail;
-
-	l_dbus_proxy_method_call(local->mgmt_proxy, "DeleteRemoteNode",
-				delete_node_setup, NULL, req, l_free);
-
-	/* TODO:: Delete node from configuration */
-	return;
-
-fail:
 	l_free(req);
 }
 
@@ -906,7 +899,7 @@ static void cmd_import_node(int argc, char *argv[])
 
 	/* Device UUID */
 	req->data1 = l_util_from_hexstring(argv[1], &sz);
-	if (!req->data1 || sz != 16) {
+	if (!req->data1 || sz != 16 || !l_uuid_is_valid(req->data1)) {
 		l_error("Failed to generate UUID array from %s", argv[1]);
 		goto fail;
 	}
@@ -943,14 +936,25 @@ fail:
 static void subnet_set_phase_reply(struct l_dbus_proxy *proxy,
 				struct l_dbus_message *msg, void *user_data)
 {
+	struct generic_request *req = user_data;
+	uint16_t net_idx;
+	uint8_t phase;
+
 	if (l_dbus_message_is_error(msg)) {
 		const char *name;
 
 		l_dbus_message_get_error(msg, &name, NULL);
 		l_error("Failed to set subnet phase: %s", name);
+		return;
 	}
 
-	/* TODO: Set key phase in configuration */
+	net_idx = (uint16_t) req->arg1;
+	phase = (uint8_t) req->arg2;
+
+	if (phase == KEY_REFRESH_PHASE_THREE)
+		phase = KEY_REFRESH_PHASE_NONE;
+
+	keys_set_net_key_phase(net_idx, phase, true);
 }
 
 static void subnet_set_phase_setup(struct l_dbus_message *msg, void *user_data)
@@ -1009,6 +1013,7 @@ static void mgr_key_reply(struct l_dbus_proxy *proxy,
 
 		l_dbus_message_get_error(msg, &name, NULL);
 		l_error("Method %s returned error: %s", method, name);
+		bt_shell_printf("Method %s returned error: %s\n", method, name);
 		return;
 	}
 
@@ -1018,6 +1023,8 @@ static void mgr_key_reply(struct l_dbus_proxy *proxy,
 	} else if (!strcmp("DeleteSubnet", method)) {
 		keys_del_net_key(idx);
 		mesh_db_net_key_del(idx);
+	} else if (!strcmp("UpdateSubnet", method)) {
+		keys_set_net_key_phase(idx, KEY_REFRESH_PHASE_ONE, true);
 	} else if (!strcmp("DeleteAppKey", method)) {
 		keys_del_app_key(idx);
 		mesh_db_app_key_del(idx);
@@ -1291,13 +1298,16 @@ static void add_node_setup(struct l_dbus_message *msg, void *user_data)
 	struct l_dbus_message_builder *builder;
 
 	uuid = l_util_from_hexstring(str, &sz);
-	if (!uuid || sz != 16) {
+	if (!uuid || sz != 16 || !l_uuid_is_valid(uuid)) {
 		l_error("Failed to generate UUID array from %s", str);
 		return;
 	}
 
 	builder = l_dbus_message_builder_new(msg);
 	append_byte_array(builder, uuid, 16);
+	l_dbus_message_builder_enter_array(builder, "{sv}");
+	/* TODO: populate with options when defined */
+	l_dbus_message_builder_leave_array(builder);
 	l_dbus_message_builder_finalize(builder);
 	l_dbus_message_builder_destroy(builder);
 
@@ -1359,8 +1369,6 @@ static const struct bt_shell_menu main_menu = {
 	{ "node-import", "<uuid> <net_idx> <primary> <ele_count> <dev_key>",
 			cmd_import_node,
 			"Import an externally provisioned remote node"},
-	{ "node-delete", "<primary> <ele_count>", cmd_delete_node,
-			"Delete a remote node"},
 	{ "list-nodes", NULL, cmd_list_nodes,
 			"List remote mesh nodes"},
 	{ "keys", NULL, cmd_keys,
@@ -1439,14 +1447,26 @@ static void proxy_removed(struct l_dbus_proxy *proxy, void *user_data)
 	}
 }
 
+static void build_model(struct l_dbus_message_builder *builder, uint16_t mod_id,
+					bool pub_enable, bool sub_enable)
+{
+	l_dbus_message_builder_enter_struct(builder, "qa{sv}");
+	l_dbus_message_builder_append_basic(builder, 'q', &mod_id);
+	l_dbus_message_builder_enter_array(builder, "{sv}");
+	append_dict_entry_basic(builder, "Subscribe", "b", &sub_enable);
+	append_dict_entry_basic(builder, "Publish", "b", &pub_enable);
+	l_dbus_message_builder_leave_array(builder);
+	l_dbus_message_builder_leave_struct(builder);
+}
+
 static bool mod_getter(struct l_dbus *dbus,
 				struct l_dbus_message *message,
 				struct l_dbus_message_builder *builder,
 				void *user_data)
 {
-	l_dbus_message_builder_enter_array(builder, "q");
-	l_dbus_message_builder_append_basic(builder, 'q', &app.ele.mods[0]);
-	l_dbus_message_builder_append_basic(builder, 'q', &app.ele.mods[1]);
+	l_dbus_message_builder_enter_array(builder, "(qa{sv})");
+	build_model(builder, app.ele.mods[0], false, false);
+	build_model(builder, app.ele.mods[1], false, false);
 	l_dbus_message_builder_leave_array(builder);
 
 	return true;
@@ -1457,7 +1477,7 @@ static bool vmod_getter(struct l_dbus *dbus,
 				struct l_dbus_message_builder *builder,
 				void *user_data)
 {
-	l_dbus_message_builder_enter_array(builder, "(qq)");
+	l_dbus_message_builder_enter_array(builder, "(qqa{sv})");
 	l_dbus_message_builder_leave_array(builder);
 
 	return true;
@@ -1508,9 +1528,10 @@ static void setup_ele_iface(struct l_dbus_interface *iface)
 	/* Properties */
 	l_dbus_interface_property(iface, "Index", 0, "y", ele_idx_getter,
 									NULL);
-	l_dbus_interface_property(iface, "VendorModels", 0, "a(qq)",
+	l_dbus_interface_property(iface, "VendorModels", 0, "a(qqa{sv})",
 							vmod_getter, NULL);
-	l_dbus_interface_property(iface, "Models", 0, "aq", mod_getter, NULL);
+	l_dbus_interface_property(iface, "Models", 0, "a(qa{sv})", mod_getter,
+									NULL);
 
 	/* Methods */
 	l_dbus_interface_method(iface, "DevKeyMessageReceived", 0,
@@ -1524,17 +1545,17 @@ static struct l_dbus_message *scan_result_call(struct l_dbus *dbus,
 						struct l_dbus_message *msg,
 						void *user_data)
 {
-	struct l_dbus_message_iter iter;
+	struct l_dbus_message_iter iter, opts;
 	int16_t rssi;
 	uint32_t n;
 	uint8_t *prov_data;
 	char *str;
 	struct unprov_device *dev;
+	const char *sig = "naya{sv}";
 
-	if (!l_dbus_message_get_arguments(msg, "nay", &rssi, &iter)) {
+	if (!l_dbus_message_get_arguments(msg, sig, &rssi, &iter, &opts)) {
 		l_error("Cannot parse scan results");
 		return l_dbus_message_new_error(msg, dbus_err_args, NULL);
-
 	}
 
 	if (!l_dbus_message_iter_get_fixed_array(&iter, &prov_data, &n) ||
@@ -1548,6 +1569,19 @@ static struct l_dbus_message *scan_result_call(struct l_dbus *dbus,
 	str = l_util_hexstring_upper(prov_data, 16);
 	bt_shell_printf("\t" COLOR_GREEN "UUID = %s\n" COLOR_OFF, str);
 	l_free(str);
+
+	if (n >= 18) {
+		str = l_util_hexstring_upper(prov_data + 16, 2);
+		bt_shell_printf("\t" COLOR_GREEN "OOB = %s\n" COLOR_OFF, str);
+		l_free(str);
+	}
+
+	if (n >= 22) {
+		str = l_util_hexstring_upper(prov_data + 18, 4);
+		bt_shell_printf("\t" COLOR_GREEN "URI Hash = %s\n" COLOR_OFF,
+									str);
+		l_free(str);
+	}
 
 	/* TODO: Handle the rest of provisioning data if present */
 
@@ -1685,7 +1719,7 @@ static struct l_dbus_message *add_node_fail_call(struct l_dbus *dbus,
 static void setup_prov_iface(struct l_dbus_interface *iface)
 {
 	l_dbus_interface_method(iface, "ScanResult", 0, scan_result_call, "",
-							"nay", "rssi", "data");
+					"naya{sv}", "rssi", "data", "options");
 
 	l_dbus_interface_method(iface, "RequestProvData", 0, req_prov_call,
 				"qq", "y", "net_index", "unicast", "count");
@@ -1737,6 +1771,76 @@ static bool crpl_getter(struct l_dbus *dbus,
 	return true;
 }
 
+static void attach_node(void *user_data)
+{
+	l_dbus_proxy_method_call(net_proxy, "Attach", attach_node_setup,
+						attach_node_reply, NULL,
+						NULL);
+}
+
+static struct l_dbus_message *join_complete(struct l_dbus *dbus,
+						struct l_dbus_message *message,
+						void *user_data)
+{
+	char *str;
+	uint64_t tmp;
+
+	if (!l_dbus_message_get_arguments(message, "t", &tmp))
+		return l_dbus_message_new_error(message, dbus_err_args, NULL);
+
+	local = l_new(struct meshcfg_node, 1);
+	local->token.u64 = l_get_be64(&tmp);
+	str = l_util_hexstring(&local->token.u8[0], 8);
+	bt_shell_printf("Created new node with token %s\n", str);
+	l_free(str);
+
+	if (!mesh_db_create(cfg_fname, local->token.u8,
+					"Mesh Config Client Network")) {
+		l_free(local);
+		local = NULL;
+		return l_dbus_message_new_error(message, dbus_err_fail, NULL);
+	}
+
+	mesh_db_set_addr_range(low_addr, high_addr);
+	keys_add_net_key(PRIMARY_NET_IDX);
+	mesh_db_net_key_add(PRIMARY_NET_IDX);
+
+	remote_add_node(app.uuid, 0x0001, 1, PRIMARY_NET_IDX);
+	mesh_db_add_node(app.uuid, 0x0001, 1, PRIMARY_NET_IDX);
+
+	l_idle_oneshot(attach_node, NULL, NULL);
+
+	return l_dbus_message_new_method_return(message);
+}
+
+static void property_changed(struct l_dbus_proxy *proxy, const char *name,
+				struct l_dbus_message *msg, void *user_data)
+{
+	const char *interface = l_dbus_proxy_get_interface(proxy);
+	const char *path = l_dbus_proxy_get_path(proxy);
+
+	if (strcmp(path, local->path))
+		return;
+
+	bt_shell_printf("Property changed: %s %s %s\n", name, path, interface);
+
+	if (!strcmp(interface, "org.bluez.mesh.Node1")) {
+
+		if (!strcmp(name, "IvIndex")) {
+			uint32_t ivi;
+
+			if (!l_dbus_message_get_arguments(msg, "u", &ivi))
+				return;
+
+			bt_shell_printf("New IV Index: %u\n", ivi);
+
+			iv_index = ivi;
+			mesh_db_set_iv_index(ivi);
+			remote_clear_blacklisted_addresses(ivi);
+		}
+	}
+}
+
 static void setup_app_iface(struct l_dbus_interface *iface)
 {
 	l_dbus_interface_property(iface, "CompanyID", 0, "q", cid_getter,
@@ -1746,6 +1850,9 @@ static void setup_app_iface(struct l_dbus_interface *iface)
 	l_dbus_interface_property(iface, "ProductID", 0, "q", pid_getter,
 									NULL);
 	l_dbus_interface_property(iface, "CRPL", 0, "q", crpl_getter, NULL);
+
+	l_dbus_interface_method(iface, "JoinComplete", 0, join_complete,
+							"", "t", "token");
 
 	/* TODO: Methods */
 }
@@ -1916,6 +2023,8 @@ static bool read_mesh_config(void)
 		high_addr = range_h;
 	}
 
+	iv_index = mesh_db_get_iv_index();
+
 	return true;
 }
 
@@ -1982,7 +2091,7 @@ int main(int argc, char *argv[])
 	l_dbus_client_set_disconnect_handler(client, client_disconnected, NULL,
 									NULL);
 	l_dbus_client_set_proxy_handlers(client, proxy_added, proxy_removed,
-							NULL, NULL, NULL);
+						property_changed, NULL, NULL);
 	l_dbus_client_set_ready_handler(client, client_ready, NULL, NULL);
 
 	node_proxies = l_queue_new();

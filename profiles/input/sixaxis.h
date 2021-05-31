@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -6,20 +7,6 @@
  *  Copyright (C) 2011  Antonio Ospite <ospite@studenti.unina.it>
  *  Copyright (C) 2013  Szymon Janc <szymon.janc@gmail.com>
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -42,11 +29,19 @@ struct cable_pairing {
 };
 
 static inline const struct cable_pairing *
-get_pairing(uint16_t vid, uint16_t pid)
+get_pairing(uint16_t vid, uint16_t pid, const char *name)
 {
 	static const struct cable_pairing devices[] = {
 		{
 			.name = "Sony PLAYSTATION(R)3 Controller",
+			.source = 0x0002,
+			.vid = 0x054c,
+			.pid = 0x0268,
+			.version = 0x0000,
+			.type = CABLE_PAIRING_SIXAXIS,
+		},
+		{
+			.name = "SHANWAN PS3 GamePad",
 			.source = 0x0002,
 			.vid = 0x054c,
 			.pid = 0x0268,
@@ -84,6 +79,9 @@ get_pairing(uint16_t vid, uint16_t pid)
 		if (devices[i].vid != vid)
 			continue;
 		if (devices[i].pid != pid)
+			continue;
+
+		if (name && strcmp(name, devices[i].name))
 			continue;
 
 		return &devices[i];

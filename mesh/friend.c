@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2018-2019  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
  *
  */
 
@@ -97,7 +88,7 @@ static void response_delay(struct l_timeout *timeout, void *user_data)
 	n += 2;
 	seq = mesh_net_next_seq_num(neg->net);
 	print_packet("Tx-NET_OP_FRND_OFFER", msg, n);
-	mesh_net_transport_send(neg->net, key_id, true,
+	mesh_net_transport_send(neg->net, key_id, 0,
 			mesh_net_get_iv_index(neg->net), 0,
 			seq, 0, neg->lp_addr,
 			msg, n);
@@ -316,7 +307,7 @@ void friend_clear(struct mesh_net *net, uint16_t src, uint16_t lpn,
 
 	l_put_be16(lpn, msg + 1);
 	l_put_be16(lpnCounter, msg + 3);
-	mesh_net_transport_send(net, 0, false,
+	mesh_net_transport_send(net, 0, 0,
 			mesh_net_get_iv_index(net), DEFAULT_TTL,
 			0, 0, src,
 			msg, sizeof(msg));
@@ -332,7 +323,7 @@ static void clear_retry(struct l_timeout *timeout, void *user_data)
 
 	l_put_be16(neg->lp_addr, msg + 1);
 	l_put_be16(neg->lp_cnt, msg + 3);
-	mesh_net_transport_send(neg->net, 0, false,
+	mesh_net_transport_send(neg->net, 0, 0,
 			mesh_net_get_iv_index(neg->net), DEFAULT_TTL,
 			0, 0, neg->old_friend,
 			msg, sizeof(msg));
@@ -398,7 +389,7 @@ static void friend_delay_rsp(struct l_timeout *timeout, void *user_data)
 					pkt->u.one[0].data, pkt->last_len);
 
 			pkt->u.one[0].sent = true;
-			mesh_net_transport_send(net, frnd->net_key_cur, false,
+			mesh_net_transport_send(net, frnd->net_key_cur, 0,
 					pkt->iv_index, pkt->ttl,
 					pkt->u.one[0].seq, pkt->src, pkt->dst,
 					pkt->u.one[0].data, pkt->last_len);
@@ -439,7 +430,7 @@ update:
 	l_put_be32(iv_index, upd + 2);
 	upd[6] = false; /* Queue is Empty */
 	print_packet("Update", upd, sizeof(upd));
-	mesh_net_transport_send(net, frnd->net_key_cur, false,
+	mesh_net_transport_send(net, frnd->net_key_cur, 0,
 			mesh_net_get_iv_index(net), 0,
 			net_seq, 0, frnd->lp_addr,
 			upd, sizeof(upd));
@@ -487,7 +478,7 @@ void friend_poll(struct mesh_net *net, uint16_t src, bool seq,
 			neg->u.negotiate.clearing = true;
 			l_put_be16(neg->lp_addr, msg + 1);
 			l_put_be16(neg->lp_cnt, msg + 3);
-			mesh_net_transport_send(net, 0, false,
+			mesh_net_transport_send(net, 0, 0,
 					mesh_net_get_iv_index(net), DEFAULT_TTL,
 					0, 0, neg->old_friend,
 					msg, sizeof(msg));
@@ -596,7 +587,7 @@ void friend_sub_add(struct mesh_net *net, struct mesh_friend *frnd,
 
 	print_packet("Tx-NET_OP_PROXY_SUB_CONFIRM", msg, sizeof(msg));
 	net_seq = mesh_net_get_seq_num(net);
-	mesh_net_transport_send(net, frnd->net_key_cur, false,
+	mesh_net_transport_send(net, frnd->net_key_cur, 0,
 			mesh_net_get_iv_index(net), 0,
 			net_seq, 0, frnd->lp_addr,
 			msg, sizeof(msg));
@@ -634,7 +625,7 @@ void friend_sub_del(struct mesh_net *net, struct mesh_friend *frnd,
 
 	print_packet("Tx-NET_OP_PROXY_SUB_CONFIRM", msg, sizeof(msg));
 	net_seq = mesh_net_get_seq_num(net);
-	mesh_net_transport_send(net, frnd->net_key_cur, false,
+	mesh_net_transport_send(net, frnd->net_key_cur, 0,
 			mesh_net_get_iv_index(net), 0,
 			net_seq, 0, frnd->lp_addr,
 			msg, sizeof(msg));

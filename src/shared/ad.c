@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2015  Google Inc.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -33,8 +20,6 @@
 #include "src/shared/queue.h"
 #include "src/shared/util.h"
 
-#define MAX_ADV_DATA_LEN 31
-
 struct bt_ad {
 	int ref_count;
 	char *name;
@@ -44,6 +29,12 @@ struct bt_ad {
 	struct queue *solicit_uuids;
 	struct queue *service_data;
 	struct queue *data;
+};
+
+struct pattern_match_info {
+	struct bt_ad *ad;
+	struct bt_ad_pattern *current_pattern;
+	struct bt_ad_pattern *matched_pattern;
 };
 
 struct bt_ad *bt_ad_new(void)
@@ -59,6 +50,65 @@ struct bt_ad *bt_ad_new(void)
 	ad->appearance = UINT16_MAX;
 
 	return bt_ad_ref(ad);
+}
+
+static bool ad_replace_data(struct bt_ad *ad, uint8_t type, const void *data,
+							size_t len);
+
+static bool ad_is_type_valid(uint8_t type)
+{
+	if (type > BT_AD_3D_INFO_DATA && type != BT_AD_MANUFACTURER_DATA)
+		return false;
+	if (type < BT_AD_FLAGS)
+		return false;
+
+	return true;
+}
+
+struct bt_ad *bt_ad_new_with_data(size_t len, const uint8_t *data)
+{
+	struct bt_ad *ad;
+	uint16_t parsed_len = 0;
+
+	if (data == NULL || !len)
+		return NULL;
+
+	ad = bt_ad_new();
+	if (!ad)
+		return NULL;
+
+	while (parsed_len < len - 1) {
+		uint8_t d_len;
+		uint8_t d_type;
+		const uint8_t *d;
+		uint8_t field_len = data[0];
+
+		if (field_len == 0)
+			break;
+
+		parsed_len += field_len + 1;
+
+		if (parsed_len > len)
+			break;
+
+		d = &data[2];
+		d_type = data[1];
+		d_len = field_len - 1;
+
+		if (!ad_is_type_valid(d_type))
+			goto failed;
+
+		if (!ad_replace_data(ad, d_type, d, d_len))
+			goto failed;
+
+		data += field_len + 1;
+	}
+
+	return ad;
+
+failed:
+	bt_ad_unref(ad);
+	return NULL;
 }
 
 struct bt_ad *bt_ad_ref(struct bt_ad *ad)
@@ -141,7 +191,7 @@ static bool data_type_match(const void *data, const void *user_data)
 	return a->type == type;
 }
 
-static bool ad_replace_data(struct bt_ad *ad, uint8_t type, void *data,
+static bool ad_replace_data(struct bt_ad *ad, uint8_t type, const void *data,
 							size_t len)
 {
 	struct bt_ad_data *new_data;
@@ -257,8 +307,8 @@ static size_t name_length(const char *name, size_t *pos)
 
 	len = 2 + strlen(name);
 
-	if (len > MAX_ADV_DATA_LEN - *pos)
-		len = MAX_ADV_DATA_LEN - *pos;
+	if (len > BT_AD_MAX_DATA_LEN - *pos)
+		len = BT_AD_MAX_DATA_LEN - *pos;
 
 	return len;
 }
@@ -426,9 +476,9 @@ static void serialize_name(const char *name, uint8_t *buf, uint8_t *pos)
 		return;
 
 	len = strlen(name);
-	if (len > MAX_ADV_DATA_LEN - (*pos + 2)) {
+	if (len > BT_AD_MAX_DATA_LEN - (*pos + 2)) {
 		type = BT_AD_NAME_SHORT;
-		len = MAX_ADV_DATA_LEN - (*pos + 2);
+		len = BT_AD_MAX_DATA_LEN - (*pos + 2);
 	}
 
 	buf[(*pos)++] = len + 1;
@@ -478,7 +528,7 @@ uint8_t *bt_ad_generate(struct bt_ad *ad, size_t *length)
 
 	*length = calculate_length(ad);
 
-	if (*length > MAX_ADV_DATA_LEN)
+	if (*length > BT_AD_MAX_DATA_LEN)
 		return NULL;
 
 	adv_data = malloc0(*length);
@@ -500,6 +550,23 @@ uint8_t *bt_ad_generate(struct bt_ad *ad, size_t *length)
 	serialize_data(ad->data, adv_data, &pos);
 
 	return adv_data;
+}
+
+bool bt_ad_is_empty(struct bt_ad *ad)
+{
+	/* If any of the bt_ad fields are non-empty or don't have the default
+	 * value, then bt_ad_generate will return a non-empty buffer
+	 */
+	if (!ad->name &&
+		ad->appearance == UINT16_MAX &&
+		queue_isempty(ad->service_uuids) &&
+		queue_isempty(ad->manufacturer_data) &&
+		queue_isempty(ad->solicit_uuids) &&
+		queue_isempty(ad->service_data) &&
+		queue_isempty(ad->data)) {
+		return true;
+	}
+	return false;
 }
 
 static bool queue_add_uuid(struct queue *queue, const bt_uuid_t *uuid)
@@ -586,7 +653,7 @@ bool bt_ad_add_manufacturer_data(struct bt_ad *ad, uint16_t manufacturer_id,
 	if (!ad)
 		return false;
 
-	if (len > (MAX_ADV_DATA_LEN - 2 - sizeof(uint16_t)))
+	if (len > (BT_AD_MAX_DATA_LEN - 2 - sizeof(uint16_t)))
 		return false;
 
 	new_data = queue_find(ad->manufacturer_data, manufacturer_id_data_match,
@@ -723,7 +790,7 @@ bool bt_ad_add_service_data(struct bt_ad *ad, const bt_uuid_t *uuid, void *data,
 	if (!ad)
 		return false;
 
-	if (len > (MAX_ADV_DATA_LEN - 2 - (size_t)bt_uuid_len(uuid)))
+	if (len > (BT_AD_MAX_DATA_LEN - 2 - (size_t)bt_uuid_len(uuid)))
 		return false;
 
 	new_data = queue_find(ad->service_data, service_uuid_match, uuid);
@@ -942,7 +1009,7 @@ bool bt_ad_add_data(struct bt_ad *ad, uint8_t type, void *data, size_t len)
 	if (!ad)
 		return false;
 
-	if (len > (MAX_ADV_DATA_LEN - 2))
+	if (len > (BT_AD_MAX_DATA_LEN - 2))
 		return false;
 
 	for (i = 0; i < sizeof(type_blacklist); i++) {
@@ -1008,4 +1075,88 @@ void bt_ad_clear_data(struct bt_ad *ad)
 		return;
 
 	queue_remove_all(ad->data, NULL, NULL, data_destroy);
+}
+
+struct bt_ad_pattern *bt_ad_pattern_new(uint8_t type, size_t offset, size_t len,
+							const uint8_t *data)
+{
+	struct bt_ad_pattern *pattern;
+
+	if (!data || !len || offset >= BT_AD_MAX_DATA_LEN ||
+		len > BT_AD_MAX_DATA_LEN || offset + len > BT_AD_MAX_DATA_LEN) {
+		return NULL;
+	}
+
+	if (!ad_is_type_valid(type))
+		return NULL;
+
+	pattern = new0(struct bt_ad_pattern, 1);
+	if (!pattern)
+		return NULL;
+
+	pattern->len = len;
+	pattern->type = type;
+	pattern->offset = offset;
+	memcpy(pattern->data, data, len);
+
+	return pattern;
+}
+
+static void pattern_ad_data_match(void *data, void *user_data)
+{
+	struct bt_ad_data *ad_data = data;
+	struct pattern_match_info *info = user_data;
+	struct bt_ad_pattern *pattern;
+
+	if (!ad_data || !info)
+		return;
+
+	if (info->matched_pattern)
+		return;
+
+	pattern = info->current_pattern;
+
+	if (!pattern || ad_data->type != pattern->type)
+		return;
+
+	if (ad_data->len < pattern->offset + pattern->len)
+		return;
+
+	if (!memcmp(ad_data->data + pattern->offset, pattern->data,
+								pattern->len)) {
+		info->matched_pattern = pattern;
+	}
+}
+
+static void pattern_match(void *data, void *user_data)
+{
+	struct bt_ad_pattern *pattern = data;
+	struct pattern_match_info *info = user_data;
+
+	if (!pattern || !info)
+		return;
+
+	if (info->matched_pattern)
+		return;
+
+	info->current_pattern = pattern;
+
+	bt_ad_foreach_data(info->ad, pattern_ad_data_match, info);
+}
+
+struct bt_ad_pattern *bt_ad_pattern_match(struct bt_ad *ad,
+							struct queue *patterns)
+{
+	struct pattern_match_info info;
+
+	if (!ad || queue_isempty(patterns))
+		return NULL;
+
+	info.ad = ad;
+	info.matched_pattern = NULL;
+	info.current_pattern = NULL;
+
+	queue_foreach(patterns, pattern_match, &info);
+
+	return info.matched_pattern;
 }

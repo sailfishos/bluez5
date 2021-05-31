@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -6,20 +7,6 @@
  *  Copyright (C) 2012  Nordic Semiconductor Inc.
  *  Copyright (C) 2012  Instituto Nokia de Tecnologia - INdT
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -49,15 +36,16 @@
 #include "src/shared/util.h"
 #include "src/shared/uhid.h"
 #include "src/shared/queue.h"
+#include "src/shared/att.h"
+#include "src/shared/gatt-client.h"
 #include "src/plugin.h"
 
+#include "device.h"
 #include "suspend.h"
 #include "attrib/att.h"
 #include "attrib/gattrib.h"
 #include "attrib/gatt.h"
 #include "hog-lib.h"
-
-#define HOG_UUID		"00001812-0000-1000-8000-00805f9b34fb"
 
 struct hog_device {
 	struct btd_device	*device;
@@ -65,7 +53,13 @@ struct hog_device {
 };
 
 static gboolean suspend_supported = FALSE;
+static bool auto_sec = true;
 static struct queue *devices = NULL;
+
+void input_set_auto_sec(bool state)
+{
+	auto_sec = state;
+}
 
 static void hog_device_accept(struct hog_device *dev, struct gatt_db *db)
 {
@@ -159,6 +153,7 @@ static int hog_probe(struct btd_service *service)
 		return -EINVAL;
 
 	btd_service_set_user_data(service, dev);
+	device_set_wake_support(device, true);
 	return 0;
 }
 
@@ -187,8 +182,17 @@ static int hog_accept(struct btd_service *service)
 	}
 
 	/* HOGP 1.0 Section 6.1 requires bonding */
-	if (!device_is_bonded(device, btd_device_get_bdaddr_type(device)))
-		return -ECONNREFUSED;
+	if (!device_is_bonded(device, btd_device_get_bdaddr_type(device))) {
+		struct bt_gatt_client *client;
+
+		if (!auto_sec)
+			return -ECONNREFUSED;
+
+		client = btd_device_get_gatt_client(device);
+		if (!bt_gatt_client_set_security(client,
+						BT_ATT_SECURITY_MEDIUM))
+			return -ECONNREFUSED;
+	}
 
 	/* TODO: Replace GAttrib with bt_gatt_client */
 	bt_hog_attach(dev->hog, attrib);
@@ -203,8 +207,6 @@ static int hog_disconnect(struct btd_service *service)
 	struct hog_device *dev = btd_service_get_user_data(service);
 
 	bt_hog_detach(dev->hog);
-	bt_hog_unref(dev->hog);
-	dev->hog = NULL;
 
 	btd_service_disconnecting_complete(service, 0);
 

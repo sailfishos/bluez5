@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2011-2017  Intel Corporation. All rights reserved.
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -521,6 +508,19 @@ static void reset_unreg_agent_reply(struct l_dbus_proxy *proxy,
 	ag.registered = false;
 }
 
+static void update_current_settings(struct btp_adapter *adapter,
+							uint32_t new_settings)
+{
+	struct btp_new_settings_ev ev;
+
+	adapter->current_settings = new_settings;
+
+	ev.current_settings = L_CPU_TO_LE32(adapter->current_settings);
+
+	btp_send(btp, BTP_GAP_SERVICE, BTP_EV_GAP_NEW_SETTINGS, adapter->index,
+							sizeof(ev), &ev);
+}
+
 static void btp_gap_reset(uint8_t index, const void *param, uint16_t length,
 								void *user_data)
 {
@@ -528,6 +528,7 @@ static void btp_gap_reset(uint8_t index, const void *param, uint16_t length,
 	const struct l_queue_entry *entry;
 	uint8_t status;
 	bool prop;
+	uint32_t default_settings;
 
 	if (!adapter) {
 		status = BTP_ERROR_INVALID_INDEX;
@@ -570,10 +571,13 @@ static void btp_gap_reset(uint8_t index, const void *param, uint16_t length,
 			goto failed;
 		}
 
-	adapter->current_settings = adapter->default_settings;
+	default_settings = adapter->default_settings;
+
+	update_current_settings(adapter, default_settings);
 
 	/* TODO for we assume all went well */
-	btp_send(btp, BTP_GAP_SERVICE, BTP_OP_GAP_RESET, index, 0, NULL);
+	btp_send(btp, BTP_GAP_SERVICE, BTP_OP_GAP_RESET, index,
+				sizeof(default_settings), &default_settings);
 	return;
 
 failed:
@@ -642,19 +646,6 @@ static void btp_gap_set_powered(uint8_t index, const void *param,
 
 failed:
 	btp_send_error(btp, BTP_GAP_SERVICE, index, status);
-}
-
-static void update_current_settings(struct btp_adapter *adapter,
-							uint32_t new_settings)
-{
-	struct btp_new_settings_ev ev;
-
-	adapter->current_settings = new_settings;
-
-	ev.current_settings = L_CPU_TO_LE32(adapter->current_settings);
-
-	btp_send(btp, BTP_GAP_SERVICE, BTP_EV_GAP_NEW_SETTINGS, adapter->index,
-							sizeof(ev), &ev);
 }
 
 static void btp_gap_set_connectable(uint8_t index, const void *param,

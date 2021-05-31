@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2010 GSyC/LibreSoft, Universidad Rey Juan Carlos.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -44,6 +31,7 @@
 #include "src/adapter.h"
 #include "src/device.h"
 #include "src/sdpd.h"
+#include "src/shared/timeout.h"
 #include "btio/btio.h"
 
 #include "hdp_types.h"
@@ -83,7 +71,7 @@ struct hdp_tmp_dc_data {
 struct hdp_echo_data {
 	gboolean		echo_done;	/* Is a echo was already done */
 	gpointer		buf;		/* echo packet sent */
-	guint			tid;		/* echo timeout */
+	unsigned int		tid;		/* echo timeout */
 };
 
 static struct hdp_channel *hdp_channel_ref(struct hdp_channel *chan)
@@ -543,9 +531,9 @@ static void hdp_get_dcpsm_cb(uint16_t dcpsm, gpointer user_data, GError *err)
 	}
 
 	if (hdp_chann->config == HDP_RELIABLE_DC)
-		mode = L2CAP_MODE_ERTM;
+		mode = BT_IO_MODE_ERTM;
 	else
-		mode = L2CAP_MODE_STREAMING;
+		mode = BT_IO_MODE_STREAMING;
 
 	if (mcap_connect_mdl(hdp_chann->mdl, mode, dcpsm, hdp_conn->cb,
 					hdp_tmp_dc_data_ref(hdp_conn),
@@ -696,7 +684,7 @@ static void free_echo_data(struct hdp_echo_data *edata)
 		return;
 
 	if (edata->tid > 0)
-		g_source_remove(edata->tid);
+		timeout_remove(edata->tid);
 
 	if (edata->buf != NULL)
 		g_free(edata->buf);
@@ -914,11 +902,11 @@ static gboolean check_channel_conf(struct hdp_channel *chan)
 
 	switch (chan->config) {
 	case HDP_RELIABLE_DC:
-		if (mode != L2CAP_MODE_ERTM)
+		if (mode != BT_IO_MODE_ERTM)
 			return FALSE;
 		break;
 	case HDP_STREAMING_DC:
-		if (mode != L2CAP_MODE_STREAMING)
+		if (mode != BT_IO_MODE_STREAMING)
 			return FALSE;
 		break;
 	default:
@@ -1057,8 +1045,8 @@ static void hdp_mcap_mdl_aborted_cb(struct mcap_mdl *mdl, void *data)
 
 static uint8_t hdp2l2cap_mode(uint8_t hdp_mode)
 {
-	return hdp_mode == HDP_STREAMING_DC ? L2CAP_MODE_STREAMING :
-								L2CAP_MODE_ERTM;
+	return hdp_mode == HDP_STREAMING_DC ? BT_IO_MODE_STREAMING :
+								BT_IO_MODE_ERTM;
 }
 
 static uint8_t hdp_mcap_mdl_conn_req_cb(struct mcap_mcl *mcl, uint8_t mdepid,
@@ -1089,7 +1077,7 @@ static uint8_t hdp_mcap_mdl_conn_req_cb(struct mcap_mcl *mcl, uint8_t mdepid,
 		}
 
 		if (!mcap_set_data_chan_mode(dev->hdp_adapter->mi,
-						L2CAP_MODE_ERTM, &err)) {
+						BT_IO_MODE_ERTM, &err)) {
 			error("Error: %s", err->message);
 			g_error_free(err);
 			return MCAP_MDL_BUSY;
@@ -1537,7 +1525,7 @@ end:
 	reply = g_dbus_create_reply(hdp_conn->msg, DBUS_TYPE_BOOLEAN, &value,
 							DBUS_TYPE_INVALID);
 	g_dbus_send_message(btd_get_dbus_connection(), reply);
-	g_source_remove(edata->tid);
+	timeout_remove(edata->tid);
 	edata->tid = 0;
 	g_free(edata->buf);
 	edata->buf = NULL;
@@ -1551,7 +1539,7 @@ end:
 	return FALSE;
 }
 
-static gboolean echo_timeout(gpointer data)
+static bool echo_timeout(gpointer data)
 {
 	struct hdp_channel *chan = data;
 	GIOChannel *io;
@@ -1619,10 +1607,9 @@ static void hdp_echo_connect_cb(struct mcap_mdl *mdl, GError *err,
 	g_io_add_watch(io, G_IO_ERR | G_IO_HUP | G_IO_NVAL | G_IO_IN,
 			check_echo, hdp_tmp_dc_data_ref(hdp_conn));
 
-	edata->tid = g_timeout_add_seconds_full(G_PRIORITY_DEFAULT,
-					ECHO_TIMEOUT, echo_timeout,
-					hdp_channel_ref(hdp_conn->hdp_chann),
-					(GDestroyNotify) hdp_channel_unref);
+	edata->tid = timeout_add_seconds(ECHO_TIMEOUT, echo_timeout,
+				hdp_channel_ref(hdp_conn->hdp_chann),
+				(timeout_destroy_func_t) hdp_channel_unref);
 
 	g_io_channel_unref(io);
 }

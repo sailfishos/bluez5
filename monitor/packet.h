@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2011-2014  Intel Corporation
  *  Copyright (C) 2002-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -34,6 +21,7 @@
 #define PACKET_FILTER_SHOW_ACL_DATA	(1 << 4)
 #define PACKET_FILTER_SHOW_SCO_DATA	(1 << 5)
 #define PACKET_FILTER_SHOW_A2DP_STREAM	(1 << 6)
+#define PACKET_FILTER_SHOW_MGMT_SOCKET	(1 << 7)
 
 bool packet_has_filter(unsigned long filter);
 void packet_set_filter(unsigned long filter);
@@ -51,10 +39,11 @@ void packet_print_version(const char *label, uint8_t version,
 void packet_print_company(const char *label, uint16_t company);
 void packet_print_addr(const char *label, const void *data, bool random);
 void packet_print_handle(uint16_t handle);
-void packet_print_rssi(int8_t rssi);
+void packet_print_rssi(const char *label, int8_t rssi);
 void packet_print_ad(const void *data, uint8_t size);
 void packet_print_features_lmp(const uint8_t *features, uint8_t page);
 void packet_print_features_ll(const uint8_t *features);
+void packet_print_features_msft(const uint8_t *features);
 void packet_print_channel_map_lmp(const uint8_t *map);
 void packet_print_channel_map_ll(const uint8_t *map);
 void packet_print_io_capability(uint8_t capability);

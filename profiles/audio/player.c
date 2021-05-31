@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2006-2007  Nokia Corporation
  *  Copyright (C) 2004-2009  Marcel Holtmann <marcel@holtmann.org>
  *  Copyright (C) 2012-2012  Intel Corporation
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -570,6 +557,67 @@ static DBusMessage *media_player_rewind(DBusConnection *conn, DBusMessage *msg,
 	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
 }
 
+static DBusMessage *media_player_press(DBusConnection *conn, DBusMessage *msg,
+								void *data)
+{
+	struct media_player *mp = data;
+	struct player_callback *cb = mp->cb;
+	int err;
+	uint8_t avc_key;
+
+	if (cb->cbs->press == NULL)
+		return btd_error_not_supported(msg);
+
+	if (!dbus_message_get_args(msg, NULL, DBUS_TYPE_BYTE, &avc_key,
+							DBUS_TYPE_INVALID))
+		return btd_error_invalid_args(msg);
+
+	err = cb->cbs->press(mp, avc_key, cb->user_data);
+	if (err < 0)
+		return btd_error_failed(msg, strerror(-err));
+
+	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
+}
+
+static DBusMessage *media_player_hold(DBusConnection *conn, DBusMessage *msg,
+								void *data)
+{
+	struct media_player *mp = data;
+	struct player_callback *cb = mp->cb;
+	int err;
+	uint8_t avc_key;
+
+	if (cb->cbs->hold == NULL)
+		return btd_error_not_supported(msg);
+
+	if (!dbus_message_get_args(msg, NULL, DBUS_TYPE_BYTE, &avc_key,
+							DBUS_TYPE_INVALID))
+		return btd_error_invalid_args(msg);
+
+	err = cb->cbs->hold(mp, avc_key, cb->user_data);
+	if (err < 0)
+		return btd_error_failed(msg, strerror(-err));
+
+	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
+}
+
+static DBusMessage *media_player_release(DBusConnection *conn, DBusMessage *msg,
+								void *data)
+{
+	struct media_player *mp = data;
+	struct player_callback *cb = mp->cb;
+	int err;
+
+	if (cb->cbs->release == NULL)
+		return btd_error_not_supported(msg);
+
+	err = cb->cbs->release(mp, cb->user_data);
+	if (err < 0)
+		return btd_error_failed(msg, strerror(-err));
+
+	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
+}
+
 static void parse_folder_list(gpointer data, gpointer user_data)
 {
 	struct media_item *item = data;
@@ -704,6 +752,11 @@ static const GDBusMethodTable media_player_methods[] = {
 	{ GDBUS_METHOD("Previous", NULL, NULL, media_player_previous) },
 	{ GDBUS_METHOD("FastForward", NULL, NULL, media_player_fast_forward) },
 	{ GDBUS_METHOD("Rewind", NULL, NULL, media_player_rewind) },
+	{ GDBUS_METHOD("Press", GDBUS_ARGS({"avc_key", "y"}), NULL,
+							media_player_press) },
+	{ GDBUS_METHOD("Hold", GDBUS_ARGS({"avc_key", "y"}), NULL,
+							media_player_hold) },
+	{ GDBUS_METHOD("Release", NULL, NULL, media_player_release) },
 	{ }
 };
 

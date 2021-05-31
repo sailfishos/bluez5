@@ -1,19 +1,9 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2018-2019  Intel Corporation. All rights reserved.
- *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
  *
  *
  */
@@ -35,6 +25,9 @@
 #define KEY_REFRESH_PHASE_ONE	0x01
 #define KEY_REFRESH_PHASE_TWO	0x02
 #define KEY_REFRESH_PHASE_THREE	0x03
+
+#define KEY_REFRESH_TRANS_TWO	0x02
+#define KEY_REFRESH_TRANS_THREE	0x03
 
 #define DEFAULT_TTL		0xff
 #define TTL_MASK		0x7f
@@ -105,11 +98,16 @@
 #define NET_IDX_INVALID	0xffff
 #define NET_NID_INVALID	0xff
 
+#define NET_IDX_MAX		0x0fff
+#define APP_IDX_MAX		0x0fff
+#define APP_AID_INVALID	0xff
+
 #define APP_IDX_MASK		0x0fff
 #define APP_IDX_DEV_REMOTE	0x6fff
 #define APP_IDX_DEV_LOCAL	0x7fff
 
 #define DEFAULT_SEQUENCE_NUMBER 0x000000
+#define SEQ_MASK		0xffffff
 
 #define IS_UNASSIGNED(x)	((x) == UNASSIGNED_ADDRESS)
 #define IS_UNICAST(x)		(((x) > UNASSIGNED_ADDRESS) && \

@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2012-2014  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -74,6 +61,8 @@ struct af_alg_iv {
 
 /* Maximum message length that can be passed to aes_cmac */
 #define CMAC_MSG_MAX	80
+
+#define ATT_SIGN_LEN	12
 
 struct bt_crypto {
 	int ref_count;
@@ -137,34 +126,40 @@ static int cmac_aes_setup(void)
 	return fd;
 }
 
+static struct bt_crypto *singleton;
+
 struct bt_crypto *bt_crypto_new(void)
 {
-	struct bt_crypto *crypto;
+	if (singleton)
+		return bt_crypto_ref(singleton);
 
-	crypto = new0(struct bt_crypto, 1);
+	singleton = new0(struct bt_crypto, 1);
 
-	crypto->ecb_aes = ecb_aes_setup();
-	if (crypto->ecb_aes < 0) {
-		free(crypto);
+	singleton->ecb_aes = ecb_aes_setup();
+	if (singleton->ecb_aes < 0) {
+		free(singleton);
+		singleton = NULL;
 		return NULL;
 	}
 
-	crypto->urandom = urandom_setup();
-	if (crypto->urandom < 0) {
-		close(crypto->ecb_aes);
-		free(crypto);
+	singleton->urandom = urandom_setup();
+	if (singleton->urandom < 0) {
+		close(singleton->ecb_aes);
+		free(singleton);
+		singleton = NULL;
 		return NULL;
 	}
 
-	crypto->cmac_aes = cmac_aes_setup();
-	if (crypto->cmac_aes < 0) {
-		close(crypto->urandom);
-		close(crypto->ecb_aes);
-		free(crypto);
+	singleton->cmac_aes = cmac_aes_setup();
+	if (singleton->cmac_aes < 0) {
+		close(singleton->urandom);
+		close(singleton->ecb_aes);
+		free(singleton);
+		singleton = NULL;
 		return NULL;
 	}
 
-	return bt_crypto_ref(crypto);
+	return bt_crypto_ref(singleton);
 }
 
 struct bt_crypto *bt_crypto_ref(struct bt_crypto *crypto)
@@ -190,6 +185,7 @@ void bt_crypto_unref(struct bt_crypto *crypto)
 	close(crypto->cmac_aes);
 
 	free(crypto);
+	singleton = NULL;
 }
 
 bool bt_crypto_random_bytes(struct bt_crypto *crypto,
@@ -265,7 +261,8 @@ static inline void swap_buf(const uint8_t *src, uint8_t *dst, uint16_t len)
 
 bool bt_crypto_sign_att(struct bt_crypto *crypto, const uint8_t key[16],
 				const uint8_t *m, uint16_t m_len,
-				uint32_t sign_cnt, uint8_t signature[12])
+				uint32_t sign_cnt,
+				uint8_t signature[ATT_SIGN_LEN])
 {
 	int fd;
 	int len;
@@ -319,10 +316,31 @@ bool bt_crypto_sign_att(struct bt_crypto *crypto, const uint8_t key[16],
 	 * 12 octets
 	 */
 	swap_buf(out, tmp, 16);
-	memcpy(signature, tmp + 4, 12);
+	memcpy(signature, tmp + 4, ATT_SIGN_LEN);
 
 	return true;
 }
+
+bool bt_crypto_verify_att_sign(struct bt_crypto *crypto, const uint8_t key[16],
+				const uint8_t *pdu, uint16_t pdu_len)
+{
+	uint8_t generated_sign[ATT_SIGN_LEN];
+	const uint8_t *sign;
+	uint32_t sign_cnt;
+
+	if (pdu_len < ATT_SIGN_LEN)
+		return false;
+
+	sign = pdu + pdu_len - ATT_SIGN_LEN;
+	sign_cnt = get_le32(sign);
+
+	if (!bt_crypto_sign_att(crypto, key, pdu, pdu_len - ATT_SIGN_LEN,
+						sign_cnt, generated_sign))
+		return false;
+
+	return memcmp(generated_sign, sign, ATT_SIGN_LEN) == 0;
+}
+
 /*
  * Security function e
  *

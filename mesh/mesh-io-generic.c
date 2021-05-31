@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2018-2019  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
  *
  */
 
@@ -173,7 +164,7 @@ static void event_callback(const void *buf, uint8_t size, void *user_data)
 		break;
 
 	default:
-		l_info("Other Meta Evt - %d", event);
+		l_debug("Other Meta Evt - %d", event);
 	}
 }
 
@@ -209,6 +200,7 @@ static void configure_hci(struct mesh_io_private *io)
 	struct bt_hci_cmd_le_set_scan_parameters cmd;
 	struct bt_hci_cmd_set_event_mask cmd_sem;
 	struct bt_hci_cmd_le_set_event_mask cmd_slem;
+	struct bt_hci_cmd_le_set_random_address cmd_raddr;
 
 	/* Set scan parameters */
 	cmd.type = 0x00; /* Passive Scanning. No scanning PDUs shall be sent */
@@ -261,6 +253,10 @@ static void configure_hci(struct mesh_io_private *io)
 	cmd_slem.mask[6] = 0x00;
 	cmd_slem.mask[7] = 0x00;
 
+	/* Set LE random address */
+	l_getrandom(cmd_raddr.addr, 6);
+	cmd_raddr.addr[5] |= 0xc0;
+
 	/* TODO: Move to suitable place. Set suitable masks */
 	/* Reset Command */
 	bt_hci_send(io->hci, BT_HCI_CMD_RESET, NULL, 0, hci_generic_callback,
@@ -282,15 +278,119 @@ static void configure_hci(struct mesh_io_private *io)
 	bt_hci_send(io->hci, BT_HCI_CMD_LE_SET_EVENT_MASK, &cmd_slem,
 			sizeof(cmd_slem), hci_generic_callback, NULL, NULL);
 
+	/* Set LE random address */
+	bt_hci_send(io->hci, BT_HCI_CMD_LE_SET_RANDOM_ADDRESS, &cmd_raddr,
+			sizeof(cmd_raddr), hci_generic_callback, NULL, NULL);
+
 	/* Scan Params */
 	bt_hci_send(io->hci, BT_HCI_CMD_LE_SET_SCAN_PARAMETERS, &cmd,
 				sizeof(cmd), hci_generic_callback, NULL, NULL);
+}
+
+static void scan_enable_rsp(const void *buf, uint8_t size,
+							void *user_data)
+{
+	uint8_t status = *((uint8_t *) buf);
+
+	if (status)
+		l_error("LE Scan enable failed (0x%02x)", status);
+}
+
+static void set_recv_scan_enable(const void *buf, uint8_t size,
+							void *user_data)
+{
+	struct mesh_io_private *pvt = user_data;
+	struct bt_hci_cmd_le_set_scan_enable cmd;
+
+	cmd.enable = 0x01;	/* Enable scanning */
+	cmd.filter_dup = 0x00;	/* Report duplicates */
+	bt_hci_send(pvt->hci, BT_HCI_CMD_LE_SET_SCAN_ENABLE,
+			&cmd, sizeof(cmd), scan_enable_rsp, pvt, NULL);
+}
+
+static void scan_disable_rsp(const void *buf, uint8_t size,
+							void *user_data)
+{
+	struct bt_hci_cmd_le_set_scan_parameters cmd;
+	struct mesh_io_private *pvt = user_data;
+	uint8_t status = *((uint8_t *) buf);
+
+	if (status)
+		l_error("LE Scan disable failed (0x%02x)", status);
+
+	cmd.type = pvt->active ? 0x01 : 0x00;	/* Passive/Active scanning */
+	cmd.interval = L_CPU_TO_LE16(0x0010);	/* 10 ms */
+	cmd.window = L_CPU_TO_LE16(0x0010);	/* 10 ms */
+	cmd.own_addr_type = 0x01;		/* ADDR_TYPE_RANDOM */
+	cmd.filter_policy = 0x00;		/* Accept all */
+
+	bt_hci_send(pvt->hci, BT_HCI_CMD_LE_SET_SCAN_PARAMETERS,
+			&cmd, sizeof(cmd),
+			set_recv_scan_enable, pvt, NULL);
+}
+
+static bool simple_match(const void *a, const void *b)
+{
+	return a == b;
+}
+
+static bool find_by_ad_type(const void *a, const void *b)
+{
+	const struct tx_pkt *tx = a;
+	uint8_t ad_type = L_PTR_TO_UINT(b);
+
+	return !ad_type || ad_type == tx->pkt[0];
+}
+
+static bool find_by_pattern(const void *a, const void *b)
+{
+	const struct tx_pkt *tx = a;
+	const struct tx_pattern *pattern = b;
+
+	if (tx->len < pattern->len)
+		return false;
+
+	return (!memcmp(tx->pkt, pattern->data, pattern->len));
+}
+
+static bool find_active(const void *a, const void *b)
+{
+	const struct pvt_rx_reg *rx_reg = a;
+
+	/* Mesh specific AD types do *not* require active scanning,
+	 * so do not turn on Active Scanning on their account.
+	 */
+	if (rx_reg->filter[0] < MESH_AD_TYPE_PROVISION ||
+			rx_reg->filter[0] > MESH_AD_TYPE_BEACON)
+		return true;
+
+	return false;
+}
+
+static void restart_scan(struct mesh_io_private *pvt)
+{
+	struct bt_hci_cmd_le_set_scan_enable cmd;
+
+	if (l_queue_isempty(pvt->rx_regs))
+		return;
+
+	pvt->active = l_queue_find(pvt->rx_regs, find_active, NULL);
+	cmd.enable = 0x00;	/* Disable scanning */
+	cmd.filter_dup = 0x00;	/* Report duplicates */
+	bt_hci_send(pvt->hci, BT_HCI_CMD_LE_SET_SCAN_ENABLE,
+				&cmd, sizeof(cmd), scan_disable_rsp, pvt, NULL);
 }
 
 static void hci_init(void *user_data)
 {
 	struct mesh_io *io = user_data;
 	bool result = true;
+	bool restarted = false;
+
+	if (io->pvt->hci) {
+		restarted = true;
+		bt_hci_unref(io->pvt->hci);
+	}
 
 	io->pvt->hci = bt_hci_new_user_channel(io->pvt->index);
 	if (!io->pvt->hci) {
@@ -306,6 +406,9 @@ static void hci_init(void *user_data)
 						event_callback, io, NULL);
 
 		l_debug("Started mesh on hci %u", io->pvt->index);
+
+		if (restarted)
+			restart_scan(io->pvt);
 	}
 
 	if (io->pvt->ready_callback)
@@ -454,8 +557,10 @@ static void set_send_adv_data(const void *buf, uint8_t size,
 					&cmd, sizeof(cmd),
 					set_send_adv_enable, pvt, NULL);
 done:
-	if (tx->delete)
+	if (tx->delete) {
+		l_queue_remove_if(pvt->tx_pkts, simple_match, tx);
 		l_free(tx);
+	}
 
 	pvt->tx = NULL;
 }
@@ -490,6 +595,12 @@ static void send_pkt(struct mesh_io_private *pvt, struct tx_pkt *tx,
 {
 	struct bt_hci_cmd_le_set_adv_enable cmd;
 
+	/* Delete superseded packet in favor of new packet */
+	if (pvt->tx && pvt->tx != tx && pvt->tx->delete) {
+		l_queue_remove_if(pvt->tx_pkts, simple_match, pvt->tx);
+		l_free(pvt->tx);
+	}
+
 	pvt->tx = tx;
 	pvt->interval = interval;
 
@@ -504,7 +615,7 @@ static void send_pkt(struct mesh_io_private *pvt, struct tx_pkt *tx,
 				set_send_adv_params, pvt, NULL);
 }
 
-static void tx_timeout(struct l_timeout *timeout, void *user_data)
+static void tx_to(struct l_timeout *timeout, void *user_data)
 {
 	struct mesh_io_private *pvt = user_data;
 	struct tx_pkt *tx;
@@ -537,8 +648,9 @@ static void tx_timeout(struct l_timeout *timeout, void *user_data)
 	send_pkt(pvt, tx, ms);
 
 	if (count == 1) {
-		/* send_pkt will delete when done */
+		/* Recalculate wakeup if we are responding to POLL */
 		tx = l_queue_peek_head(pvt->tx_pkts);
+
 		if (tx && tx->info.type == MESH_IO_TIMING_TYPE_POLL_RSP) {
 			ms = instant_remaining_ms(tx->info.u.poll_rsp.instant +
 						tx->info.u.poll_rsp.delay);
@@ -550,8 +662,7 @@ static void tx_timeout(struct l_timeout *timeout, void *user_data)
 		pvt->tx_timeout = timeout;
 		l_timeout_modify_ms(timeout, ms);
 	} else
-		pvt->tx_timeout = l_timeout_create_ms(ms, tx_timeout,
-								pvt, NULL);
+		pvt->tx_timeout = l_timeout_create_ms(ms, tx_to, pvt, NULL);
 }
 
 static void tx_worker(void *user_data)
@@ -600,12 +711,11 @@ static void tx_worker(void *user_data)
 	}
 
 	if (!delay)
-		tx_timeout(pvt->tx_timeout, pvt);
+		tx_to(pvt->tx_timeout, pvt);
 	else if (pvt->tx_timeout)
 		l_timeout_modify_ms(pvt->tx_timeout, delay);
 	else
-		pvt->tx_timeout = l_timeout_create_ms(delay, tx_timeout,
-								pvt, NULL);
+		pvt->tx_timeout = l_timeout_create_ms(delay, tx_to, pvt, NULL);
 }
 
 static bool send_tx(struct mesh_io *io, struct mesh_io_send_info *info,
@@ -619,8 +729,6 @@ static bool send_tx(struct mesh_io *io, struct mesh_io_send_info *info,
 		return false;
 
 	tx = l_new(struct tx_pkt, 1);
-	if (!tx)
-		return false;
 
 	memcpy(&tx->info, info, sizeof(tx->info));
 	memcpy(&tx->pkt, data, len);
@@ -629,8 +737,20 @@ static bool send_tx(struct mesh_io *io, struct mesh_io_send_info *info,
 	if (info->type == MESH_IO_TIMING_TYPE_POLL_RSP)
 		l_queue_push_head(pvt->tx_pkts, tx);
 	else {
-		sending = !l_queue_isempty(pvt->tx_pkts);
+		if (pvt->tx)
+			sending = true;
+		else
+			sending = !l_queue_isempty(pvt->tx_pkts);
+
 		l_queue_push_tail(pvt->tx_pkts, tx);
+
+		/*
+		 * If transmitter is idle, send packets at least twice to
+		 * guard against in-line cancelation of HCI command chain.
+		 */
+		if (info->type == MESH_IO_TIMING_TYPE_GENERAL && !sending &&
+							tx->info.u.gen.cnt == 1)
+			tx->info.u.gen.cnt++;
 	}
 
 	if (!sending) {
@@ -640,25 +760,6 @@ static bool send_tx(struct mesh_io *io, struct mesh_io_send_info *info,
 	}
 
 	return true;
-}
-
-static bool find_by_ad_type(const void *a, const void *b)
-{
-	const struct tx_pkt *tx = a;
-	uint8_t ad_type = L_PTR_TO_UINT(b);
-
-	return !ad_type || ad_type == tx->pkt[0];
-}
-
-static bool find_by_pattern(const void *a, const void *b)
-{
-	const struct tx_pkt *tx = a;
-	const struct tx_pattern *pattern = b;
-
-	if (tx->len < pattern->len)
-		return false;
-
-	return (!memcmp(tx->pkt, pattern->data, pattern->len));
 }
 
 static bool tx_cancel(struct mesh_io *io, const uint8_t *data, uint8_t len)
@@ -713,62 +814,6 @@ static bool find_by_filter(const void *a, const void *b)
 	return !memcmp(rx_reg->filter, filter, rx_reg->len);
 }
 
-static void scan_enable_rsp(const void *buf, uint8_t size,
-							void *user_data)
-{
-	uint8_t status = *((uint8_t *) buf);
-
-	if (status)
-		l_error("LE Scan enable failed (0x%02x)", status);
-}
-
-static void set_recv_scan_enable(const void *buf, uint8_t size,
-							void *user_data)
-{
-	struct mesh_io_private *pvt = user_data;
-	struct bt_hci_cmd_le_set_scan_enable cmd;
-
-	cmd.enable = 0x01;	/* Enable scanning */
-	cmd.filter_dup = 0x00;	/* Report duplicates */
-	bt_hci_send(pvt->hci, BT_HCI_CMD_LE_SET_SCAN_ENABLE,
-			&cmd, sizeof(cmd), scan_enable_rsp, pvt, NULL);
-}
-
-static void scan_disable_rsp(const void *buf, uint8_t size,
-							void *user_data)
-{
-	struct bt_hci_cmd_le_set_scan_parameters cmd;
-	struct mesh_io_private *pvt = user_data;
-	uint8_t status = *((uint8_t *) buf);
-
-	if (status)
-		l_error("LE Scan disable failed (0x%02x)", status);
-
-	cmd.type = pvt->active ? 0x01 : 0x00;	/* Passive/Active scanning */
-	cmd.interval = L_CPU_TO_LE16(0x0010);	/* 10 ms */
-	cmd.window = L_CPU_TO_LE16(0x0010);	/* 10 ms */
-	cmd.own_addr_type = 0x01;		/* ADDR_TYPE_RANDOM */
-	cmd.filter_policy = 0x00;		/* Accept all */
-
-	bt_hci_send(pvt->hci, BT_HCI_CMD_LE_SET_SCAN_PARAMETERS,
-			&cmd, sizeof(cmd),
-			set_recv_scan_enable, pvt, NULL);
-}
-
-static bool find_active(const void *a, const void *b)
-{
-	const struct pvt_rx_reg *rx_reg = a;
-
-	/* Mesh specific AD types do *not* require active scanning,
-	 * so do not turn on Active Scanning on their account.
-	 */
-	if (rx_reg->filter[0] < MESH_AD_TYPE_PROVISION ||
-			rx_reg->filter[0] > MESH_AD_TYPE_BEACON)
-		return true;
-
-	return false;
-}
-
 static bool recv_register(struct mesh_io *io, const uint8_t *filter,
 			uint8_t len, mesh_io_recv_func_t cb, void *user_data)
 {
@@ -781,7 +826,6 @@ static bool recv_register(struct mesh_io *io, const uint8_t *filter,
 	if (!cb || !filter || !len)
 		return false;
 
-	l_info("%s %2.2x", __func__, filter[0]);
 	rx_reg = l_queue_remove_if(pvt->rx_regs, find_by_filter, filter);
 
 	l_free(rx_reg);

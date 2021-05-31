@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,29 +6,17 @@
  *  Copyright (C) 2012-2014  Intel Corporation. All rights reserved.
  *
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
- *
  */
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <alloca.h>
 #include <byteswap.h>
 #include <string.h>
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+#define BIT(n)  (1 << (n))
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 #define le16_to_cpu(val) (val)
@@ -100,6 +89,9 @@ int strsuffix(const char *str, const char *suffix);
 void *btd_malloc(size_t size);
 
 typedef void (*util_debug_func_t)(const char *str, void *user_data);
+
+void util_debug_va(util_debug_func_t function, void *user_data,
+				const char *format, va_list va);
 
 void util_debug(util_debug_func_t function, void *user_data,
 						const char *format, ...)

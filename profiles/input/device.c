@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
  *  Copyright (C) 2014       Google Inc.
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -52,6 +39,7 @@
 #include "src/dbus-common.h"
 #include "src/error.h"
 #include "src/sdp-client.h"
+#include "src/shared/timeout.h"
 #include "src/shared/uhid.h"
 
 #include "device.h"
@@ -81,13 +69,14 @@ struct input_device {
 	struct hidp_connadd_req *req;
 	bool			disable_sdp;
 	enum reconnect_mode_t	reconnect_mode;
-	guint			reconnect_timer;
+	unsigned int		reconnect_timer;
 	uint32_t		reconnect_attempt;
 	struct bt_uhid		*uhid;
 	bool			uhid_created;
 	uint8_t			report_req_pending;
-	guint			report_req_timer;
+	unsigned int		report_req_timer;
 	uint32_t		report_rsp_id;
+	bool			virtual_cable_unplug;
 };
 
 static int idle_timeout = 0;
@@ -109,6 +98,11 @@ void input_set_classic_bonded_only(bool state)
 	classic_bonded_only = state;
 }
 
+bool input_get_classic_bonded_only(void)
+{
+	return classic_bonded_only;
+}
+
 void input_autodetect_hidp(void)
 {
 	int ctl;
@@ -123,6 +117,13 @@ void input_autodetect_hidp(void)
 
 static void input_device_enter_reconnect_mode(struct input_device *idev);
 static int connection_disconnect(struct input_device *idev, uint32_t flags);
+static int uhid_disconnect(struct input_device *idev);
+
+static bool input_device_bonded(struct input_device *idev)
+{
+	return device_is_bonded(idev->device,
+				btd_device_get_bdaddr_type(idev->device));
+}
 
 static void input_device_free(struct input_device *idev)
 {
@@ -152,12 +153,20 @@ static void input_device_free(struct input_device *idev)
 	}
 
 	if (idev->reconnect_timer > 0)
-		g_source_remove(idev->reconnect_timer);
+		timeout_remove(idev->reconnect_timer);
 
 	if (idev->report_req_timer > 0)
-		g_source_remove(idev->report_req_timer);
+		timeout_remove(idev->report_req_timer);
 
 	g_free(idev);
+}
+
+static void virtual_cable_unplug(struct input_device *idev)
+{
+	device_remove_bonding(idev->device,
+				btd_device_get_bdaddr_type(idev->device));
+
+	idev->virtual_cable_unplug = false;
 }
 
 static bool hidp_send_message(GIOChannel *chan, uint8_t hdr,
@@ -200,6 +209,9 @@ static bool hidp_send_message(GIOChannel *chan, uint8_t hdr,
 static bool hidp_send_ctrl_message(struct input_device *idev, uint8_t hdr,
 					const uint8_t *data, size_t size)
 {
+	if (hdr == (HIDP_TRANS_HID_CONTROL | HIDP_CTRL_VIRTUAL_CABLE_UNPLUG))
+		idev->virtual_cable_unplug = true;
+
 	return hidp_send_message(idev->ctrl_io, hdr, data, size);
 }
 
@@ -209,7 +221,7 @@ static bool hidp_send_intr_message(struct input_device *idev, uint8_t hdr,
 	return hidp_send_message(idev->intr_io, hdr, data, size);
 }
 
-static bool uhid_send_feature_answer(struct input_device *idev,
+static bool uhid_send_get_report_reply(struct input_device *idev,
 					const uint8_t *data, size_t size,
 					uint32_t id, uint16_t err)
 {
@@ -219,8 +231,8 @@ static bool uhid_send_feature_answer(struct input_device *idev,
 	if (data == NULL)
 		size = 0;
 
-	if (size > sizeof(ev.u.feature_answer.data))
-		size = sizeof(ev.u.feature_answer.data);
+	if (size > sizeof(ev.u.get_report_reply.data))
+		size = sizeof(ev.u.get_report_reply.data);
 
 	if (!idev->uhid_created) {
 		DBG("HID report (%zu bytes) dropped", size);
@@ -228,13 +240,13 @@ static bool uhid_send_feature_answer(struct input_device *idev,
 	}
 
 	memset(&ev, 0, sizeof(ev));
-	ev.type = UHID_FEATURE_ANSWER;
-	ev.u.feature_answer.id = id;
-	ev.u.feature_answer.err = err;
-	ev.u.feature_answer.size = size;
+	ev.type = UHID_GET_REPORT_REPLY;
+	ev.u.get_report_reply.id = id;
+	ev.u.get_report_reply.err = err;
+	ev.u.get_report_reply.size = size;
 
 	if (size > 0)
-		memcpy(ev.u.feature_answer.data, data, size);
+		memcpy(ev.u.get_report_reply.data, data, size);
 
 	ret = bt_uhid_send(idev->uhid, &ev);
 	if (ret < 0) {
@@ -243,6 +255,29 @@ static bool uhid_send_feature_answer(struct input_device *idev,
 	}
 
 	DBG("HID report (%zu bytes)", size);
+
+	return true;
+}
+
+static bool uhid_send_set_report_reply(struct input_device *idev,
+					uint32_t id, uint16_t err)
+{
+	struct uhid_event ev;
+	int ret;
+
+	if (!idev->uhid_created)
+		return false;
+
+	memset(&ev, 0, sizeof(ev));
+	ev.type = UHID_SET_REPORT_REPLY;
+	ev.u.set_report_reply.id = id;
+	ev.u.set_report_reply.err = err;
+
+	ret = bt_uhid_send(idev->uhid, &ev);
+	if (ret < 0) {
+		error("bt_uhid_send: %s (%d)", strerror(-ret), -ret);
+		return false;
+	}
 
 	return true;
 }
@@ -345,14 +380,23 @@ static gboolean intr_watch_cb(GIOChannel *chan, GIOCondition cond, gpointer data
 		idev->intr_io = NULL;
 	}
 
-	/* Close control channel */
-	if (idev->ctrl_io)
+	/* Close control channel if the closing of interrupt channel is not
+	 * initiated by the other party
+	 */
+	if (idev->ctrl_io && !(cond & (G_IO_NVAL | G_IO_ERR)))
 		g_io_channel_shutdown(idev->ctrl_io, TRUE, NULL);
 
 	btd_service_disconnecting_complete(idev->service, 0);
 
 	/* Enter the auto-reconnect mode if needed */
 	input_device_enter_reconnect_mode(idev);
+
+	if (!idev->ctrl_io && idev->virtual_cable_unplug)
+		virtual_cable_unplug(idev);
+
+	/* If connection abruptly ended, uhid might be not yet disconnected */
+	if (idev->uhid_created)
+		uhid_disconnect(idev);
 
 	return FALSE;
 }
@@ -383,11 +427,13 @@ static void hidp_recv_ctrl_handshake(struct input_device *idev, uint8_t param)
 	case HIDP_HSHK_ERR_FATAL:
 		if (pending_req_type == HIDP_TRANS_GET_REPORT) {
 			DBG("GET_REPORT failed (%u)", param);
-			uhid_send_feature_answer(idev, NULL, 0,
+			uhid_send_get_report_reply(idev, NULL, 0,
 						idev->report_rsp_id, EIO);
 			pending_req_complete = true;
 		} else if (pending_req_type == HIDP_TRANS_SET_REPORT) {
 			DBG("SET_REPORT failed (%u)", param);
+			uhid_send_set_report_reply(idev, idev->report_rsp_id,
+							EIO);
 			pending_req_complete = true;
 		} else
 			DBG("Spurious HIDP_HSHK_ERR");
@@ -406,7 +452,7 @@ static void hidp_recv_ctrl_handshake(struct input_device *idev, uint8_t param)
 	if (pending_req_complete) {
 		idev->report_req_pending = 0;
 		if (idev->report_req_timer > 0) {
-			g_source_remove(idev->report_req_timer);
+			timeout_remove(idev->report_req_timer);
 			idev->report_req_timer = 0;
 		}
 		idev->report_rsp_id = 0;
@@ -418,7 +464,7 @@ static void hidp_recv_ctrl_hid_control(struct input_device *idev, uint8_t param)
 	DBG("");
 
 	if (param == HIDP_CTRL_VIRTUAL_CABLE_UNPLUG)
-		connection_disconnect(idev, 0);
+		connection_disconnect(idev, (1 << HIDP_VIRTUAL_CABLE_UNPLUG));
 }
 
 static void hidp_recv_ctrl_data(struct input_device *idev, uint8_t param,
@@ -430,7 +476,8 @@ static void hidp_recv_ctrl_data(struct input_device *idev, uint8_t param,
 	DBG("");
 
 	pending_req_type = idev->report_req_pending & HIDP_HEADER_TRANS_MASK;
-	if (pending_req_type != HIDP_TRANS_GET_REPORT) {
+	if (pending_req_type != HIDP_TRANS_GET_REPORT &&
+				pending_req_type != HIDP_TRANS_SET_REPORT) {
 		DBG("Spurious DATA on control channel");
 		return;
 	}
@@ -444,9 +491,13 @@ static void hidp_recv_ctrl_data(struct input_device *idev, uint8_t param,
 	switch (param) {
 	case HIDP_DATA_RTYPE_FEATURE:
 	case HIDP_DATA_RTYPE_INPUT:
-	case HIDP_DATA_RTYPE_OUPUT:
-		uhid_send_feature_answer(idev, data + 1, size - 1,
+	case HIDP_DATA_RTYPE_OUTPUT:
+		if (pending_req_type == HIDP_TRANS_GET_REPORT)
+			uhid_send_get_report_reply(idev, data + 1, size - 1,
 							idev->report_rsp_id, 0);
+		else
+			uhid_send_set_report_reply(idev, idev->report_rsp_id,
+							0);
 		break;
 
 	case HIDP_DATA_RTYPE_OTHER:
@@ -461,7 +512,7 @@ static void hidp_recv_ctrl_data(struct input_device *idev, uint8_t param,
 
 	idev->report_req_pending = 0;
 	if (idev->report_req_timer > 0) {
-		g_source_remove(idev->report_req_timer);
+		timeout_remove(idev->report_req_timer);
 		idev->report_req_timer = 0;
 	}
 	idev->report_rsp_id = 0;
@@ -539,15 +590,18 @@ static gboolean ctrl_watch_cb(GIOChannel *chan, GIOCondition cond, gpointer data
 	}
 
 	/* Close interrupt channel */
-	if (idev->intr_io)
+	if (idev->intr_io && !(cond & G_IO_NVAL))
 		g_io_channel_shutdown(idev->intr_io, TRUE, NULL);
+
+	if (!idev->intr_io && idev->virtual_cable_unplug)
+		virtual_cable_unplug(idev);
 
 	return FALSE;
 }
 
 #define REPORT_REQ_TIMEOUT  3
 
-static gboolean hidp_report_req_timeout(gpointer data)
+static bool hidp_report_req_timeout(gpointer data)
 {
 	struct input_device *idev = data;
 	uint8_t pending_req_type;
@@ -560,9 +614,13 @@ static gboolean hidp_report_req_timeout(gpointer data)
 	switch (pending_req_type) {
 	case HIDP_TRANS_GET_REPORT:
 		req_type_str = "GET_REPORT";
+		uhid_send_get_report_reply(idev, NULL, 0, idev->report_rsp_id,
+								ETIMEDOUT);
 		break;
 	case HIDP_TRANS_SET_REPORT:
 		req_type_str = "SET_REPORT";
+		uhid_send_set_report_reply(idev, idev->report_rsp_id,
+								ETIMEDOUT);
 		break;
 	default:
 		/* Should never happen */
@@ -579,6 +637,17 @@ static gboolean hidp_report_req_timeout(gpointer data)
 	return FALSE;
 }
 
+static void hidp_send_output(struct uhid_event *ev, void *user_data)
+{
+	struct input_device *idev = user_data;
+	uint8_t hdr = HIDP_TRANS_DATA | HIDP_DATA_RTYPE_OUTPUT;
+
+	DBG("");
+
+	hidp_send_intr_message(idev, hdr, ev->u.output.data,
+						ev->u.output.size);
+}
+
 static void hidp_send_set_report(struct uhid_event *ev, void *user_data)
 {
 	struct input_device *idev = user_data;
@@ -587,34 +656,37 @@ static void hidp_send_set_report(struct uhid_event *ev, void *user_data)
 
 	DBG("");
 
-	switch (ev->u.output.rtype) {
+	switch (ev->u.set_report.rtype) {
 	case UHID_FEATURE_REPORT:
-		/* Send SET_REPORT on control channel */
-		if (idev->report_req_pending) {
-			DBG("Old GET_REPORT or SET_REPORT still pending");
-			return;
-		}
-
 		hdr = HIDP_TRANS_SET_REPORT | HIDP_DATA_RTYPE_FEATURE;
-		sent = hidp_send_ctrl_message(idev, hdr, ev->u.output.data,
-							ev->u.output.size);
-		if (sent) {
-			idev->report_req_pending = hdr;
-			idev->report_req_timer =
-				g_timeout_add_seconds(REPORT_REQ_TIMEOUT,
-						hidp_report_req_timeout, idev);
-		}
+		break;
+	case UHID_INPUT_REPORT:
+		hdr = HIDP_TRANS_SET_REPORT | HIDP_DATA_RTYPE_INPUT;
 		break;
 	case UHID_OUTPUT_REPORT:
-		/* Send DATA on interrupt channel */
-		hdr = HIDP_TRANS_DATA | HIDP_DATA_RTYPE_OUPUT;
-		hidp_send_intr_message(idev, hdr, ev->u.output.data,
-							ev->u.output.size);
+		hdr = HIDP_TRANS_SET_REPORT | HIDP_DATA_RTYPE_OUTPUT;
 		break;
 	default:
-		DBG("Unsupported HID report type %u", ev->u.output.rtype);
+		DBG("Unsupported HID report type %u", ev->u.set_report.rtype);
 		return;
 	}
+
+	if (idev->report_req_pending) {
+		DBG("Old GET_REPORT or SET_REPORT still pending");
+		uhid_send_set_report_reply(idev, ev->u.set_report.id, EBUSY);
+		return;
+	}
+
+	sent = hidp_send_ctrl_message(idev, hdr, ev->u.set_report.data,
+						ev->u.set_report.size);
+	if (sent) {
+		idev->report_req_pending = hdr;
+		idev->report_req_timer =
+			timeout_add_seconds(REPORT_REQ_TIMEOUT,
+					hidp_report_req_timeout, idev, NULL);
+		idev->report_rsp_id = ev->u.set_report.id;
+	} else
+		uhid_send_set_report_reply(idev, ev->u.set_report.id, EIO);
 }
 
 static void hidp_send_get_report(struct uhid_event *ev, void *user_data)
@@ -627,13 +699,13 @@ static void hidp_send_get_report(struct uhid_event *ev, void *user_data)
 
 	if (idev->report_req_pending) {
 		DBG("Old GET_REPORT or SET_REPORT still pending");
-		uhid_send_feature_answer(idev, NULL, 0, ev->u.feature.id,
+		uhid_send_get_report_reply(idev, NULL, 0, ev->u.get_report.id,
 									EBUSY);
 		return;
 	}
 
 	/* Send GET_REPORT on control channel */
-	switch (ev->u.feature.rtype) {
+	switch (ev->u.get_report.rtype) {
 	case UHID_FEATURE_REPORT:
 		hdr = HIDP_TRANS_GET_REPORT | HIDP_DATA_RTYPE_FEATURE;
 		break;
@@ -641,22 +713,25 @@ static void hidp_send_get_report(struct uhid_event *ev, void *user_data)
 		hdr = HIDP_TRANS_GET_REPORT | HIDP_DATA_RTYPE_INPUT;
 		break;
 	case UHID_OUTPUT_REPORT:
-		hdr = HIDP_TRANS_GET_REPORT | HIDP_DATA_RTYPE_OUPUT;
+		hdr = HIDP_TRANS_GET_REPORT | HIDP_DATA_RTYPE_OUTPUT;
 		break;
 	default:
-		DBG("Unsupported HID report type %u", ev->u.feature.rtype);
+		DBG("Unsupported HID report type %u", ev->u.get_report.rtype);
 		return;
 	}
 
-	sent = hidp_send_ctrl_message(idev, hdr, &ev->u.feature.rnum,
-						sizeof(ev->u.feature.rnum));
+	sent = hidp_send_ctrl_message(idev, hdr, &ev->u.get_report.rnum,
+						sizeof(ev->u.get_report.rnum));
 	if (sent) {
 		idev->report_req_pending = hdr;
 		idev->report_req_timer =
-			g_timeout_add_seconds(REPORT_REQ_TIMEOUT,
-						hidp_report_req_timeout, idev);
-		idev->report_rsp_id = ev->u.feature.id;
-	}
+			timeout_add_seconds(REPORT_REQ_TIMEOUT,
+						hidp_report_req_timeout, idev,
+						NULL);
+		idev->report_rsp_id = ev->u.get_report.id;
+	} else
+		uhid_send_get_report_reply(idev, NULL, 0, ev->u.get_report.id,
+									EIO);
 }
 
 static void epox_endian_quirk(unsigned char *data, int size)
@@ -889,10 +964,37 @@ static int uhid_connadd(struct input_device *idev, struct hidp_connadd_req *req)
 		return err;
 	}
 
-	bt_uhid_register(idev->uhid, UHID_OUTPUT, hidp_send_set_report, idev);
-	bt_uhid_register(idev->uhid, UHID_FEATURE, hidp_send_get_report, idev);
+	bt_uhid_register(idev->uhid, UHID_OUTPUT, hidp_send_output, idev);
+	bt_uhid_register(idev->uhid, UHID_GET_REPORT, hidp_send_get_report,
+									idev);
+	bt_uhid_register(idev->uhid, UHID_SET_REPORT, hidp_send_set_report,
+									idev);
 
 	idev->uhid_created = true;
+
+	return err;
+}
+
+static int uhid_disconnect(struct input_device *idev)
+{
+	int err;
+	struct uhid_event ev;
+
+	if (!idev->uhid_created)
+		return 0;
+
+	bt_uhid_unregister_all(idev->uhid);
+
+	memset(&ev, 0, sizeof(ev));
+	ev.type = UHID_DESTROY;
+
+	err = bt_uhid_send(idev->uhid, &ev);
+	if (err < 0) {
+		error("bt_uhid_send: %s", strerror(-err));
+		return err;
+	}
+
+	idev->uhid_created = false;
 
 	return err;
 }
@@ -989,8 +1091,7 @@ static int hidp_add_connection(struct input_device *idev)
 		device_get_name(idev->device, req->name, sizeof(req->name));
 
 	/* Make sure the device is bonded if required */
-	if (classic_bonded_only && !device_is_bonded(idev->device,
-				btd_device_get_bdaddr_type(idev->device))) {
+	if (classic_bonded_only && !input_device_bonded(idev)) {
 		error("Rejected connection from !bonded device %s", dst_addr);
 		goto cleanup;
 	}
@@ -1038,21 +1139,25 @@ static bool is_connected(struct input_device *idev)
 
 static int connection_disconnect(struct input_device *idev, uint32_t flags)
 {
+	int sock;
+
 	if (!is_connected(idev))
 		return -ENOTCONN;
 
-	/* Don't auto-reconnect if disconnecting locally */
-	idev->reconnect_mode = RECONNECT_NONE;
+	/* Standard HID disconnect
+	 * Intr channel must be disconnected before ctrl channel, so only
+	 * disconnect intr here, ctrl is disconnected in intr_watch_cb.
+	 */
+	if (idev->intr_io) {
+		sock = g_io_channel_unix_get_fd(idev->intr_io);
+		shutdown(sock, SHUT_WR);
+	}
 
-	/* Standard HID disconnect; disconnect control after intr has
-	   disconnected, if intr channel exists */
-	if (idev->intr_io)
-		g_io_channel_shutdown(idev->intr_io, TRUE, NULL);
-	else if (idev->ctrl_io)
-		g_io_channel_shutdown(idev->ctrl_io, TRUE, NULL);
+	if (flags & (1 << HIDP_VIRTUAL_CABLE_UNPLUG))
+		idev->virtual_cable_unplug = true;
 
 	if (idev->uhid)
-		return 0;
+		return uhid_disconnect(idev);
 	else
 		return ioctl_disconnect(idev, flags);
 }
@@ -1162,16 +1267,23 @@ static int dev_connect(struct input_device *idev)
 {
 	GError *err = NULL;
 	GIOChannel *io;
+	BtIOSecLevel sec_level;
 
 	if (idev->disable_sdp)
 		bt_clear_cached_session(&idev->src, &idev->dst);
+
+	/* encrypt connection if device is bonded */
+	if (input_device_bonded(idev))
+		sec_level = BT_IO_SEC_MEDIUM;
+	else
+		sec_level = BT_IO_SEC_LOW;
 
 	io = bt_io_connect(control_connect_cb, idev,
 				NULL, &err,
 				BT_IO_OPT_SOURCE_BDADDR, &idev->src,
 				BT_IO_OPT_DEST_BDADDR, &idev->dst,
 				BT_IO_OPT_PSM, L2CAP_PSM_HIDP_CTRL,
-				BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_LOW,
+				BT_IO_OPT_SEC_LEVEL, sec_level,
 				BT_IO_OPT_INVALID);
 	idev->ctrl_io = io;
 
@@ -1184,7 +1296,7 @@ static int dev_connect(struct input_device *idev)
 	return -EIO;
 }
 
-static gboolean input_device_auto_reconnect(gpointer user_data)
+static bool input_device_auto_reconnect(gpointer user_data)
 {
 	struct input_device *idev = user_data;
 
@@ -1236,8 +1348,7 @@ static void input_device_enter_reconnect_mode(struct input_device *idev)
 				reconnect_mode_to_string(idev->reconnect_mode));
 
 	/* Make sure the device is bonded if required */
-	if (classic_bonded_only && !device_is_bonded(idev->device,
-				btd_device_get_bdaddr_type(idev->device)))
+	if (classic_bonded_only && !input_device_bonded(idev))
 		return;
 
 	/* Only attempt an auto-reconnect when the device is required to
@@ -1255,12 +1366,13 @@ static void input_device_enter_reconnect_mode(struct input_device *idev)
 		return;
 
 	if (idev->reconnect_timer > 0)
-		g_source_remove(idev->reconnect_timer);
+		timeout_remove(idev->reconnect_timer);
 
 	DBG("registering auto-reconnect");
 	idev->reconnect_attempt = 0;
-	idev->reconnect_timer = g_timeout_add_seconds(30,
-					input_device_auto_reconnect, idev);
+	idev->reconnect_timer = timeout_add_seconds(30,
+					input_device_auto_reconnect, idev,
+					NULL);
 
 }
 
@@ -1366,6 +1478,9 @@ static struct input_device *input_device_new(struct btd_service *service)
 	/* Initialize device properties */
 	extract_hid_props(idev, rec);
 
+	if (idev->disable_sdp)
+		device_set_refresh_discovery(device, false);
+
 	return idev;
 }
 
@@ -1418,6 +1533,7 @@ int input_device_register(struct btd_service *service)
 	}
 
 	btd_service_set_user_data(service, idev);
+	device_set_wake_support(device, true);
 
 	return 0;
 }

@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2012-2014  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -185,21 +172,29 @@ static void process_response(struct bt_hci *hci, uint16_t opcode,
 {
 	struct cmd *cmd;
 
-	if (opcode == BT_HCI_CMD_NOP)
-		goto done;
+	if (opcode == BT_HCI_CMD_NOP) {
+		wakeup_writer(hci);
+		return;
+	}
 
 	cmd = queue_remove_if(hci->rsp_queue, match_cmd_opcode,
 						UINT_TO_PTR(opcode));
 	if (!cmd)
 		return;
 
+	/* Take a reference before calling the callback since that can unref
+	 * its reference destroying the instance.
+	 */
+	bt_hci_ref(hci);
+
 	if (cmd->callback)
 		cmd->callback(data, size, cmd->user_data);
 
 	cmd_free(cmd);
 
-done:
 	wakeup_writer(hci);
+
+	bt_hci_unref(hci);
 }
 
 static void process_notify(void *data, void *user_data)

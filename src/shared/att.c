@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2014  Google Inc.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -84,11 +71,13 @@ struct bt_att {
 	struct queue *req_queue;	/* Queued ATT protocol requests */
 	struct queue *ind_queue;	/* Queued ATT protocol indications */
 	struct queue *write_queue;	/* Queue of PDUs ready to send */
+	bool in_disc;			/* Cleanup queues on disconnect_cb */
 
 	bt_att_timeout_func_t timeout_callback;
 	bt_att_destroy_func_t timeout_destroy;
 	void *timeout_data;
 
+	uint8_t debug_level;
 	bt_att_debug_func_t debug_callback;
 	bt_att_destroy_func_t debug_destroy;
 	void *debug_data;
@@ -222,8 +211,10 @@ static void destroy_att_send_op(void *data)
 	free(op);
 }
 
-static void cancel_att_send_op(struct att_send_op *op)
+static void cancel_att_send_op(void *data)
 {
+	struct att_send_op *op = data;
+
 	if (op->destroy)
 		op->destroy(op->user_data);
 
@@ -284,6 +275,34 @@ static bool match_disconn_id(const void *a, const void *b)
 	return disconn->id == id;
 }
 
+static void att_log(struct bt_att *att, uint8_t level, const char *format,
+								...)
+{
+	va_list va;
+
+	if (att->debug_level < level)
+		return;
+
+	va_start(va, format);
+	util_debug_va(att->debug_callback, att->debug_data, format, va);
+	va_end(va);
+}
+
+#define att_debug(_att, _format, _arg...) \
+	att_log(_att, BT_ATT_DEBUG, _format, ## _arg)
+
+#define att_verbose(_att, _format, _arg...) \
+	att_log(_att, BT_ATT_DEBUG_VERBOSE, _format, ## _arg)
+
+static void att_hexdump(struct bt_att *att, char dir, const void *data,
+							size_t len)
+{
+	if (att->debug_level < 2)
+		return;
+
+	util_hexdump(dir, data, len, att->debug_callback, att->debug_data);
+}
+
 static bool encode_pdu(struct bt_att *att, struct att_send_op *op,
 					const void *pdu, uint16_t length)
 {
@@ -319,8 +338,7 @@ static bool encode_pdu(struct bt_att *att, struct att_send_op *op,
 				sign_cnt, &((uint8_t *) op->pdu)[1 + length])))
 		return true;
 
-	util_debug(att->debug_callback, att->debug_data,
-					"ATT unable to generate signature");
+	att_debug(att, "ATT unable to generate signature");
 
 fail:
 	free(op->pdu);
@@ -442,9 +460,8 @@ static bool timeout_cb(void *user_data)
 	if (!op)
 		return false;
 
-	util_debug(att->debug_callback, att->debug_data,
-				"(chan %p) Operation timed out: 0x%02x",
-				chan, op->opcode);
+	att_debug(att, "(chan %p) Operation timed out: 0x%02x", chan,
+						op->opcode);
 
 	if (att->timeout_callback)
 		att->timeout_callback(op->id, op->opcode, att->timeout_data);
@@ -479,20 +496,18 @@ static ssize_t bt_att_chan_write(struct bt_att_chan *chan, uint8_t opcode,
 	iov.iov_base = (void *) pdu;
 	iov.iov_len = len;
 
-	util_debug(att->debug_callback, att->debug_data,
-					"(chan %p) ATT op 0x%02x",
-					chan, opcode);
+	att_verbose(att, "(chan %p) ATT op 0x%02x", chan, opcode);
 
 	ret = io_send(chan->io, &iov, 1);
 	if (ret < 0) {
-		util_debug(att->debug_callback, att->debug_data,
-					"(chan %p) write failed: %s",
-					chan, strerror(-ret));
-
+		att_debug(att, "(chan %p) write failed: %s", chan,
+						strerror(-ret));
 		return ret;
 	}
 
-	util_hexdump('<', pdu, ret, att->debug_callback, att->debug_data);
+	if (att->debug_level)
+		util_hexdump('<', pdu, ret, att->debug_callback,
+						att->debug_data);
 
 	return ret;
 }
@@ -618,23 +633,15 @@ static bool disconnect_cb(struct io *io, void *user_data)
 	len = sizeof(err);
 
 	if (getsockopt(chan->fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0) {
-		util_debug(chan->att->debug_callback, chan->att->debug_data,
-					"(chan %p) Failed to obtain disconnect"
-					" error: %s", chan, strerror(errno));
+		att_debug(att, "(chan %p) Failed to obtain disconnect "
+				"error: %s", chan, strerror(errno));
 		err = 0;
 	}
 
-	util_debug(chan->att->debug_callback, chan->att->debug_data,
-					"Channel %p disconnected: %s",
-					chan, strerror(err));
+	att_debug(att, "Channel %p disconnected: %s", chan, strerror(err));
 
 	/* Dettach channel */
 	queue_remove(att->chans, chan);
-
-	/* Notify request callbacks */
-	queue_remove_all(att->req_queue, NULL, NULL, disc_att_send_op);
-	queue_remove_all(att->ind_queue, NULL, NULL, disc_att_send_op);
-	queue_remove_all(att->write_queue, NULL, NULL, disc_att_send_op);
 
 	if (chan->pending_req) {
 		disc_att_send_op(chan->pending_req);
@@ -653,6 +660,15 @@ static bool disconnect_cb(struct io *io, void *user_data)
 		return false;
 
 	bt_att_ref(att);
+
+	att->in_disc = true;
+
+	/* Notify request callbacks */
+	queue_remove_all(att->req_queue, NULL, NULL, disc_att_send_op);
+	queue_remove_all(att->ind_queue, NULL, NULL, disc_att_send_op);
+	queue_remove_all(att->write_queue, NULL, NULL, disc_att_send_op);
+
+	att->in_disc = false;
 
 	queue_foreach(att->disconn_list, disconn_handler, INT_TO_PTR(err));
 
@@ -751,9 +767,7 @@ static bool handle_error_rsp(struct bt_att_chan *chan, uint8_t *pdu,
 		op->timeout_id = 0;
 	}
 
-	util_debug(att->debug_callback, att->debug_data,
-						"(chan %p) Retrying operation "
-						"%p", chan, op);
+	att_debug(att, "(chan %p) Retrying operation %p", chan, op);
 
 	chan->pending_req = NULL;
 
@@ -776,9 +790,8 @@ static void handle_rsp(struct bt_att_chan *chan, uint8_t opcode, uint8_t *pdu,
 	 * the bearer.
 	 */
 	if (!op) {
-		util_debug(att->debug_callback, att->debug_data,
-					"(chan %p) Received unexpected ATT "
-					"response", chan);
+		att_debug(att, "(chan %p) Received unexpected ATT response",
+								chan);
 		io_shutdown(chan->io);
 		return;
 	}
@@ -809,8 +822,7 @@ static void handle_rsp(struct bt_att_chan *chan, uint8_t opcode, uint8_t *pdu,
 	goto done;
 
 fail:
-	util_debug(att->debug_callback, att->debug_data,
-			"(chan %p) Failed to handle response PDU; opcode: "
+	att_debug(att, "(chan %p) Failed to handle response PDU; opcode: "
 			"0x%02x", chan, opcode);
 
 	rsp_opcode = BT_ATT_OP_ERROR_RSP;
@@ -835,8 +847,7 @@ static void handle_conf(struct bt_att_chan *chan, uint8_t *pdu, ssize_t pdu_len)
 	 * invalid.
 	 */
 	if (!op || pdu_len) {
-		util_debug(att->debug_callback, att->debug_data,
-				"(chan %p) Received unexpected/invalid ATT "
+		att_debug(att, "(chan %p) Received unexpected/invalid ATT "
 				"confirmation", chan);
 		io_shutdown(chan->io);
 		return;
@@ -881,15 +892,15 @@ static void respond_not_supported(struct bt_att *att, uint8_t opcode)
 									NULL);
 }
 
-static bool handle_signed(struct bt_att *att, uint8_t opcode, uint8_t *pdu,
-								ssize_t pdu_len)
+static bool handle_signed(struct bt_att *att, uint8_t *pdu, ssize_t pdu_len)
 {
 	uint8_t *signature;
 	uint32_t sign_cnt;
 	struct sign_info *sign;
+	uint8_t opcode = pdu[0];
 
 	/* Check if there is enough data for a signature */
-	if (pdu_len < 2 + BT_ATT_SIGNATURE_LEN)
+	if (pdu_len < 3 + BT_ATT_SIGNATURE_LEN)
 		goto fail;
 
 	sign = att->remote_sign;
@@ -903,33 +914,25 @@ static bool handle_signed(struct bt_att *att, uint8_t opcode, uint8_t *pdu,
 	if (!sign->counter(&sign_cnt, sign->user_data))
 		goto fail;
 
-	/* Generate signature and verify it */
-	if (!bt_crypto_sign_att(att->crypto, sign->key, pdu,
-				pdu_len - BT_ATT_SIGNATURE_LEN, sign_cnt,
-				signature))
+	/* Verify received signature */
+	if (!bt_crypto_verify_att_sign(att->crypto, sign->key, pdu, pdu_len))
 		goto fail;
 
 	return true;
 
 fail:
-	util_debug(att->debug_callback, att->debug_data,
-			"ATT failed to verify signature: 0x%02x", opcode);
+	att_debug(att, "ATT failed to verify signature: 0x%02x", opcode);
 
 	return false;
 }
 
-static void handle_notify(struct bt_att_chan *chan, uint8_t opcode,
-						uint8_t *pdu, ssize_t pdu_len)
+static void handle_notify(struct bt_att_chan *chan, uint8_t *pdu,
+							ssize_t pdu_len)
 {
 	struct bt_att *att = chan->att;
 	const struct queue_entry *entry;
 	bool found;
-
-	if ((opcode & ATT_OP_SIGNED_MASK) && !att->crypto) {
-		if (!handle_signed(att, opcode, pdu, pdu_len))
-			return;
-		pdu_len -= BT_ATT_SIGNATURE_LEN;
-	}
+	uint8_t opcode = pdu[0];
 
 	bt_att_ref(att);
 
@@ -943,6 +946,12 @@ static void handle_notify(struct bt_att_chan *chan, uint8_t opcode,
 
 		if (!opcode_match(notify->opcode, opcode))
 			continue;
+
+		if ((opcode & ATT_OP_SIGNED_MASK) && att->crypto) {
+			if (!handle_signed(att, pdu, pdu_len))
+				return;
+			pdu_len -= BT_ATT_SIGNATURE_LEN;
+		}
 
 		/* BLUETOOTH CORE SPECIFICATION Version 5.1 | Vol 3, Part G
 		 * page 2370
@@ -963,7 +972,7 @@ static void handle_notify(struct bt_att_chan *chan, uint8_t opcode,
 		found = true;
 
 		if (notify->callback)
-			notify->callback(chan, opcode, pdu, pdu_len,
+			notify->callback(chan, opcode, pdu + 1, pdu_len - 1,
 							notify->user_data);
 
 		/* callback could remove all entries from notify list */
@@ -994,12 +1003,9 @@ static bool can_read_data(struct io *io, void *user_data)
 	if (bytes_read < 0)
 		return false;
 
-	util_debug(att->debug_callback, att->debug_data,
-				"(chan %p) ATT received: %zd",
-				chan, bytes_read);
+	att_verbose(att, "(chan %p) ATT received: %zd", chan, bytes_read);
 
-	util_hexdump('>', chan->buf, bytes_read,
-				att->debug_callback, att->debug_data);
+	att_hexdump(att, '>', chan->buf, bytes_read);
 
 	if (bytes_read < ATT_MIN_PDU_LEN)
 		return true;
@@ -1012,14 +1018,12 @@ static bool can_read_data(struct io *io, void *user_data)
 	/* Act on the received PDU based on the opcode type */
 	switch (get_op_type(opcode)) {
 	case ATT_OP_TYPE_RSP:
-		util_debug(att->debug_callback, att->debug_data,
-				"(chan %p) ATT response received: 0x%02x",
+		att_verbose(att, "(chan %p) ATT response received: 0x%02x",
 				chan, opcode);
 		handle_rsp(chan, opcode, pdu + 1, bytes_read - 1);
 		break;
 	case ATT_OP_TYPE_CONF:
-		util_debug(att->debug_callback, att->debug_data,
-				"(chan %p) ATT confirmation received: 0x%02x",
+		att_verbose(att, "(chan %p) ATT confirmation received: 0x%02x",
 				chan, opcode);
 		handle_conf(chan, pdu + 1, bytes_read - 1);
 		break;
@@ -1030,8 +1034,7 @@ static bool can_read_data(struct io *io, void *user_data)
 		 * promptly notify the upper layer via disconnect handlers.
 		 */
 		if (chan->in_req) {
-			util_debug(att->debug_callback, att->debug_data,
-					"(chan %p) Received request while "
+			att_debug(att, "(chan %p) Received request while "
 					"another is pending: 0x%02x",
 					chan, opcode);
 			io_shutdown(chan->io);
@@ -1051,10 +1054,9 @@ static bool can_read_data(struct io *io, void *user_data)
 		/* For all other opcodes notify the upper layer of the PDU and
 		 * let them act on it.
 		 */
-		util_debug(att->debug_callback, att->debug_data,
-					"(chan %p) ATT PDU received: 0x%02x",
-					chan, opcode);
-		handle_notify(chan, opcode, pdu + 1, bytes_read - 1);
+		att_debug(att, "(chan %p) ATT PDU received: 0x%02x", chan,
+							opcode);
+		handle_notify(chan, pdu, bytes_read);
 		break;
 	}
 
@@ -1205,8 +1207,7 @@ static void bt_att_attach_chan(struct bt_att *att, struct bt_att_chan *chan)
 
 	io_set_close_on_destroy(chan->io, att->close_on_unref);
 
-	util_debug(att->debug_callback, att->debug_data, "Channel %p attached",
-									chan);
+	att_debug(att, "Channel %p attached", chan);
 
 	wakeup_chan_writer(chan, NULL);
 }
@@ -1322,8 +1323,9 @@ int bt_att_get_channels(struct bt_att *att)
 	return queue_length(att->chans);
 }
 
-bool bt_att_set_debug(struct bt_att *att, bt_att_debug_func_t callback,
-				void *user_data, bt_att_destroy_func_t destroy)
+bool bt_att_set_debug(struct bt_att *att, uint8_t level,
+			bt_att_debug_func_t callback, void *user_data,
+			bt_att_destroy_func_t destroy)
 {
 	if (!att)
 		return false;
@@ -1331,6 +1333,7 @@ bool bt_att_set_debug(struct bt_att *att, bt_att_debug_func_t callback,
 	if (att->debug_destroy)
 		att->debug_destroy(att->debug_data);
 
+	att->debug_level = level;
 	att->debug_callback = callback;
 	att->debug_destroy = destroy;
 	att->debug_data = user_data;
@@ -1575,6 +1578,30 @@ bool bt_att_chan_cancel(struct bt_att_chan *chan, unsigned int id)
 	return true;
 }
 
+static bool bt_att_disc_cancel(struct bt_att *att, unsigned int id)
+{
+	struct att_send_op *op;
+
+	op = queue_find(att->req_queue, match_op_id, UINT_TO_PTR(id));
+	if (op)
+		goto done;
+
+	op = queue_find(att->ind_queue, match_op_id, UINT_TO_PTR(id));
+	if (op)
+		goto done;
+
+	op = queue_find(att->write_queue, match_op_id, UINT_TO_PTR(id));
+
+done:
+	if (!op)
+		return false;
+
+	/* Just cancel since disconnect_cb will be cleaning up */
+	cancel_att_send_op(op);
+
+	return true;
+}
+
 bool bt_att_cancel(struct bt_att *att, unsigned int id)
 {
 	const struct queue_entry *entry;
@@ -1591,6 +1618,9 @@ bool bt_att_cancel(struct bt_att *att, unsigned int id)
 		if (bt_att_chan_cancel(chan, id))
 			return true;
 	}
+
+	if (att->in_disc)
+		return bt_att_disc_cancel(att, id);
 
 	op = queue_remove_if(att->req_queue, match_op_id, UINT_TO_PTR(id));
 	if (op)

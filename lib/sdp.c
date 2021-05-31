@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -7,20 +8,6 @@
  *  Copyright (C) 2002-2010  Marcel Holtmann <marcel@holtmann.org>
  *  Copyright (C) 2002-2003  Stephen Crane <steve.crane@rococosoft.com>
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -358,12 +345,11 @@ sdp_data_t *sdp_data_alloc_with_length(uint8_t dtd, const void *value,
 							uint32_t length)
 {
 	sdp_data_t *seq;
-	sdp_data_t *d = malloc(sizeof(sdp_data_t));
+	sdp_data_t *d = bt_malloc0(sizeof(sdp_data_t));
 
 	if (!d)
 		return NULL;
 
-	memset(d, 0, sizeof(sdp_data_t));
 	d->dtd = dtd;
 	d->unitSize = sizeof(uint8_t);
 
@@ -919,11 +905,10 @@ int sdp_gen_record_pdu(const sdp_record_t *rec, sdp_buf_t *buf)
 	memset(buf, 0, sizeof(sdp_buf_t));
 	sdp_list_foreach(rec->attrlist, sdp_attr_size, buf);
 
-	buf->data = malloc(buf->buf_size);
+	buf->data = bt_malloc0(buf->buf_size);
 	if (!buf->data)
 		return -ENOMEM;
 	buf->data_size = 0;
-	memset(buf->data, 0, buf->buf_size);
 
 	sdp_list_foreach(rec->attrlist, sdp_attr_pdu, buf);
 
@@ -1043,12 +1028,11 @@ static sdp_data_t *extract_int(const void *p, int bufsize, int *len)
 		return NULL;
 	}
 
-	d = malloc(sizeof(sdp_data_t));
+	d = bt_malloc0(sizeof(sdp_data_t));
 	if (!d)
 		return NULL;
 
 	SDPDBG("Extracting integer");
-	memset(d, 0, sizeof(sdp_data_t));
 	d->dtd = *(uint8_t *) p;
 	p += sizeof(uint8_t);
 	*len += sizeof(uint8_t);
@@ -1118,13 +1102,12 @@ static sdp_data_t *extract_int(const void *p, int bufsize, int *len)
 static sdp_data_t *extract_uuid(const uint8_t *p, int bufsize, int *len,
 							sdp_record_t *rec)
 {
-	sdp_data_t *d = malloc(sizeof(sdp_data_t));
+	sdp_data_t *d = bt_malloc0(sizeof(sdp_data_t));
 
 	if (!d)
 		return NULL;
 
 	SDPDBG("Extracting UUID");
-	memset(d, 0, sizeof(sdp_data_t));
 	if (sdp_uuid_extract(p, bufsize, &d->val.uuid, len) < 0) {
 		free(d);
 		return NULL;
@@ -1149,11 +1132,10 @@ static sdp_data_t *extract_str(const void *p, int bufsize, int *len)
 		return NULL;
 	}
 
-	d = malloc(sizeof(sdp_data_t));
+	d = bt_malloc0(sizeof(sdp_data_t));
 	if (!d)
 		return NULL;
 
-	memset(d, 0, sizeof(sdp_data_t));
 	d->dtd = *(uint8_t *) p;
 	p += sizeof(uint8_t);
 	*len += sizeof(uint8_t);
@@ -1196,13 +1178,12 @@ static sdp_data_t *extract_str(const void *p, int bufsize, int *len)
 		return NULL;
 	}
 
-	s = malloc(n + 1);
+	s = bt_malloc0(n + 1);
 	if (!s) {
 		SDPERR("Not enough memory for incoming string");
 		free(d);
 		return NULL;
 	}
-	memset(s, 0, n + 1);
 	memcpy(s, p, n);
 
 	*len += n;
@@ -1273,13 +1254,12 @@ static sdp_data_t *extract_seq(const void *p, int bufsize, int *len,
 {
 	int seqlen, n = 0;
 	sdp_data_t *curr, *prev;
-	sdp_data_t *d = malloc(sizeof(sdp_data_t));
+	sdp_data_t *d = bt_malloc0(sizeof(sdp_data_t));
 
 	if (!d)
 		return NULL;
 
 	SDPDBG("Extracting SEQ");
-	memset(d, 0, sizeof(sdp_data_t));
 	*len = sdp_extract_seqtype(p, bufsize, &d->dtd, &seqlen);
 	SDPDBG("Sequence Type : 0x%x length : 0x%x", d->dtd, seqlen);
 
@@ -2753,12 +2733,11 @@ void sdp_uuid32_to_uuid128(uuid_t *uuid128, const uuid_t *uuid32)
 
 uuid_t *sdp_uuid_to_uuid128(const uuid_t *uuid)
 {
-	uuid_t *uuid128 = bt_malloc(sizeof(uuid_t));
+	uuid_t *uuid128 = bt_malloc0(sizeof(uuid_t));
 
 	if (!uuid128)
 		return NULL;
 
-	memset(uuid128, 0, sizeof(uuid_t));
 	switch (uuid->type) {
 	case SDP_UUID128:
 		*uuid128 = *uuid;
@@ -3204,12 +3183,11 @@ int sdp_record_update(sdp_session_t *session, const sdp_record_t *rec)
 
 sdp_record_t *sdp_record_alloc(void)
 {
-	sdp_record_t *rec = malloc(sizeof(sdp_record_t));
+	sdp_record_t *rec = bt_malloc0(sizeof(sdp_record_t));
 
 	if (!rec)
 		return NULL;
 
-	memset(rec, 0, sizeof(sdp_record_t));
 	rec->handle = 0xffffffff;
 	return rec;
 }
@@ -3431,6 +3409,12 @@ int sdp_service_search_req(sdp_session_t *session, const sdp_list_t *search,
 
 	/* add service class IDs for search */
 	seqlen = gen_searchseq_pdu(pdata, search);
+
+	if (seqlen < 0) {
+		errno = EINVAL;
+		status = -1;
+		goto end;
+	}
 
 	SDPDBG("Data seq added : %d", seqlen);
 
@@ -3738,23 +3722,21 @@ sdp_session_t *sdp_create(int sk, uint32_t flags)
 	sdp_session_t *session;
 	struct sdp_transaction *t;
 
-	session = malloc(sizeof(sdp_session_t));
+	session = bt_malloc0(sizeof(sdp_session_t));
 	if (!session) {
 		errno = ENOMEM;
 		return NULL;
 	}
-	memset(session, 0, sizeof(*session));
 
 	session->flags = flags;
 	session->sock = sk;
 
-	t = malloc(sizeof(struct sdp_transaction));
+	t = bt_malloc0(sizeof(struct sdp_transaction));
 	if (!t) {
 		errno = ENOMEM;
 		free(session);
 		return NULL;
 	}
-	memset(t, 0, sizeof(*t));
 
 	session->priv = t;
 
@@ -3853,6 +3835,11 @@ int sdp_service_search_async(sdp_session_t *session, const sdp_list_t *search, u
 
 	/* add service class IDs for search */
 	seqlen = gen_searchseq_pdu(pdata, search);
+
+	if (seqlen < 0) {
+		t->err = EINVAL;
+		goto end;
+	}
 
 	SDPDBG("Data seq added : %d", seqlen);
 
@@ -4067,6 +4054,11 @@ int sdp_service_search_attr_async(sdp_session_t *session, const sdp_list_t *sear
 	/* add service class IDs for search */
 	seqlen = gen_searchseq_pdu(pdata, search);
 
+	if (seqlen < 0) {
+		t->err = EINVAL;
+		goto end;
+	}
+
 	SDPDBG("Data seq added : %d", seqlen);
 
 	/* now set the length and increment the pointer */
@@ -4170,13 +4162,12 @@ int sdp_process(sdp_session_t *session)
 		return -1;
 	}
 
-	rspbuf = malloc(SDP_RSP_BUFFER_SIZE);
+	rspbuf = bt_malloc0(SDP_RSP_BUFFER_SIZE);
 	if (!rspbuf) {
 		SDPERR("Response buffer alloc failure:%m (%d)", errno);
 		return -1;
 	}
 
-	memset(rspbuf, 0, SDP_RSP_BUFFER_SIZE);
 
 	t = session->priv;
 	reqhdr = (sdp_pdu_hdr_t *)t->reqbuf;
@@ -4714,7 +4705,8 @@ static int sdp_connect_l2cap(const bdaddr_t *src,
 
 	if (flags & SDP_WAIT_ON_CLOSE) {
 		struct linger l = { .l_onoff = 1, .l_linger = 1 };
-		setsockopt(sk, SOL_SOCKET, SO_LINGER, &l, sizeof(l));
+		if (setsockopt(sk, SOL_SOCKET, SO_LINGER, &l, sizeof(l)) < 0)
+			return -1;
 	}
 
 	if ((flags & SDP_LARGE_MTU) &&

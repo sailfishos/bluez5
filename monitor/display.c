@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2011-2014  Intel Corporation
  *  Copyright (C) 2002-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -41,15 +28,31 @@
 #include "display.h"
 
 static pid_t pager_pid = 0;
+int default_pager_num_columns = FALLBACK_TERMINAL_WIDTH;
+enum monitor_color setting_monitor_color = COLOR_AUTO;
+
+void set_monitor_color(enum monitor_color color)
+{
+	setting_monitor_color = color;
+}
 
 bool use_color(void)
 {
 	static int cached_use_color = -1;
 
-	if (__builtin_expect(!!(cached_use_color < 0), 0))
+	if (setting_monitor_color == COLOR_ALWAYS)
+		cached_use_color = 1;
+	else if (setting_monitor_color == COLOR_NEVER)
+		cached_use_color = 0;
+	else if (__builtin_expect(!!(cached_use_color < 0), 0))
 		cached_use_color = isatty(STDOUT_FILENO) > 0 || pager_pid > 0;
 
 	return cached_use_color;
+}
+
+void set_default_pager_num_columns(int num_columns)
+{
+	default_pager_num_columns = num_columns;
 }
 
 int num_columns(void)
@@ -61,7 +64,7 @@ int num_columns(void)
 
 		if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) < 0 ||
 								ws.ws_col == 0)
-			cached_num_columns = FALLBACK_TERMINAL_WIDTH;
+			cached_num_columns = default_pager_num_columns;
 		else
 			cached_num_columns = ws.ws_col;
 	}

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2011-2014  Intel Corporation
  *  Copyright (C) 2002-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -54,6 +41,7 @@
 #include "l2cap.h"
 #include "control.h"
 #include "vendor.h"
+#include "msft.h"
 #include "intel.h"
 #include "broadcom.h"
 #include "packet.h"
@@ -97,8 +85,11 @@
 #define COLOR_UNKNOWN_SETTINGS_BIT	COLOR_WHITE_BG
 #define COLOR_UNKNOWN_ADDRESS_TYPE	COLOR_WHITE_BG
 #define COLOR_UNKNOWN_DEVICE_FLAG	COLOR_WHITE_BG
+#define COLOR_UNKNOWN_EXP_FEATURE_FLAG	COLOR_WHITE_BG
 #define COLOR_UNKNOWN_ADV_FLAG		COLOR_WHITE_BG
 #define COLOR_UNKNOWN_PHY		COLOR_WHITE_BG
+#define COLOR_UNKNOWN_ADDED_DEVICE_FLAG	COLOR_WHITE_BG
+#define COLOR_UNKNOWN_ADVMON_FEATURES	COLOR_WHITE_BG
 
 #define COLOR_PHY_PACKET		COLOR_BLUE
 
@@ -274,7 +265,8 @@ struct index_data {
 	uint8_t  type;
 	uint8_t  bdaddr[6];
 	uint16_t manufacturer;
-	size_t	frame;
+	uint16_t msft_opcode;
+	size_t   frame;
 };
 
 static struct index_data index_list[MAX_INDEX];
@@ -1314,7 +1306,7 @@ static void print_air_mode(uint8_t mode)
 	print_field("Air mode: %s (0x%2.2x)", str, mode);
 }
 
-static void print_codec(const char *label, uint8_t codec)
+static void print_codec_id(const char *label, uint8_t codec)
 {
 	const char *str;
 
@@ -1346,6 +1338,26 @@ static void print_codec(const char *label, uint8_t codec)
 	}
 
 	print_field("%s: %s (0x%2.2x)", label, str, codec);
+}
+
+static const struct bitfield_data codec_transport_table[] = {
+	{  0, "Codec supported over BR/EDR ACL"		},
+	{  1, "Codec supported over BR/EDR SCO and eSCO"},
+	{  2, "Codec supported over LE CIS"		},
+	{  3, "Codec supported over LE BIS"		},
+	{ }
+};
+
+static void print_codec(const char *label, const struct bt_hci_codec *codec)
+{
+	uint8_t mask;
+
+	print_codec_id(label, codec->id);
+	print_field("  Logical Transport Type: 0x%02x", codec->transport);
+	mask = print_bitfield(4, codec->transport, codec_transport_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_SERVICE_CLASS,
+				"  Unknown transport (0x%2.2x)", mask);
 }
 
 static void print_inquiry_mode(uint8_t mode)
@@ -2173,10 +2185,7 @@ static void print_adv_filter_policy(const char *label, uint8_t value)
 
 static void print_rssi(int8_t rssi)
 {
-	if ((uint8_t) rssi == 0x99 || rssi == 127)
-		print_field("RSSI: invalid (0x%2.2x)", (uint8_t) rssi);
-	else
-		print_field("RSSI: %d dBm (0x%2.2x)", rssi, (uint8_t) rssi);
+	packet_print_rssi("RSSI", rssi);
 }
 
 static void print_slot_625(const char *label, uint16_t value)
@@ -2626,6 +2635,16 @@ static const struct bitfield_data features_le[] = {
 	{ }
 };
 
+static const struct bitfield_data features_msft[] = {
+	{  0, "RSSI Monitoring feature for BR/EDR"		},
+	{  1, "RSSI Monitoring feature for LE connections"	},
+	{  2, "RSSI Monitoring of LE advertisements"		},
+	{  3, "Advertising Monitoring of LE advertisements"	},
+	{  4, "Verifying the validity of P-192 and P-256 keys"	},
+	{  5, "Continuous Advertising Monitoring"		},
+	{ }
+};
+
 static void print_features(uint8_t page, const uint8_t *features_array,
 								uint8_t type)
 {
@@ -2662,6 +2681,13 @@ static void print_features(uint8_t page, const uint8_t *features_array,
 			break;
 		}
 		break;
+	case 0xf0:
+		switch (page) {
+		case 0:
+			features_table = features_msft;
+			break;
+		}
+		break;
 	}
 
 	if (!features_table)
@@ -2681,6 +2707,11 @@ void packet_print_features_lmp(const uint8_t *features, uint8_t page)
 void packet_print_features_ll(const uint8_t *features)
 {
 	print_features(0, features, 0x01);
+}
+
+void packet_print_features_msft(const uint8_t *features)
+{
+	print_features(0, features, 0xf0);
 }
 
 #define LE_STATE_SCAN_ADV		0x0001
@@ -3764,9 +3795,13 @@ void packet_print_handle(uint16_t handle)
 	print_handle_native(handle);
 }
 
-void packet_print_rssi(int8_t rssi)
+void packet_print_rssi(const char *label, int8_t rssi)
 {
-	print_rssi(rssi);
+	if ((uint8_t) rssi == 0x99 || rssi == 127)
+		print_field("%s: invalid (0x%2.2x)", label, (uint8_t) rssi);
+	else
+		print_field("%s: %d dBm (0x%2.2x)", label, rssi,
+							(uint8_t) rssi);
 }
 
 void packet_print_ad(const void *data, uint8_t size)
@@ -3888,7 +3923,7 @@ void packet_monitor(struct timeval *tv, struct ucred *cred,
 		index_current = index;
 	}
 
-	if (index != HCI_DEV_NONE && index > MAX_INDEX) {
+	if (index != HCI_DEV_NONE && index >= MAX_INDEX) {
 		print_field("Invalid index (%d)", index);
 		return;
 	}
@@ -3904,6 +3939,7 @@ void packet_monitor(struct timeval *tv, struct ucred *cred,
 			index_list[index].type = ni->type;
 			memcpy(index_list[index].bdaddr, ni->bdaddr, 6);
 			index_list[index].manufacturer = fallback_manufacturer;
+			index_list[index].msft_opcode = BT_HCI_CMD_NOP;
 		}
 
 		addr2str(ni->bdaddr, str);
@@ -3964,6 +4000,25 @@ void packet_monitor(struct timeval *tv, struct ucred *cred,
 		if (index < MAX_INDEX) {
 			memcpy(index_list[index].bdaddr, ii->bdaddr, 6);
 			index_list[index].manufacturer = manufacturer;
+
+			switch (manufacturer) {
+			case 2:
+				/*
+				 * Intel controllers that support the
+				 * Microsoft vendor extension are using
+				 * 0xFC1E for VsMsftOpCode.
+				 */
+				index_list[index].msft_opcode = 0xFC1E;
+				break;
+			case 93:
+				/*
+				 * Realtek controllers that support the
+				 * Microsoft vendor extenions are using
+				 * 0xFCF0 for VsMsftOpCode.
+				 */
+				index_list[index].msft_opcode = 0xFCF0;
+				break;
+			}
 		}
 
 		addr2str(ii->bdaddr, str);
@@ -5885,7 +5940,7 @@ static void read_local_codecs_rsp(const void *data, uint8_t size)
 	print_field("Number of supported codecs: %d", rsp->num_codecs);
 
 	for (i = 0; i < rsp->num_codecs; i++)
-		print_codec("  Codec", rsp->codec[i]);
+		print_codec_id("  Codec", rsp->codec[i]);
 
 	num_vnd_codecs = rsp->codec[rsp->num_codecs];
 
@@ -5893,6 +5948,189 @@ static void read_local_codecs_rsp(const void *data, uint8_t size)
 
 	packet_hexdump(data + rsp->num_codecs + 3,
 					size - rsp->num_codecs - 3);
+}
+
+static void print_codecs(const void *data, int i)
+{
+	const struct bt_hci_codec *codec = data;
+
+	print_codec("  Codec", codec);
+}
+
+typedef void (*print_list_func_t)(const void *data, int i);
+
+static void print_list(const void *data, uint8_t size, int num_items,
+				size_t item_size, print_list_func_t func)
+{
+	int i;
+
+	for (i = 0; size >= item_size && num_items; i++) {
+		if (func)
+			func(data, i);
+		data += item_size;
+		size -= item_size;
+		num_items--;
+	}
+
+	if (num_items)
+		print_hex_field("", data, size);
+}
+
+static void read_local_codecs_rsp_v2(const void *data, uint8_t size)
+{
+	const struct bt_hci_rsp_read_local_codecs_v2 *rsp = data;
+	uint8_t num_vnd_codecs;
+
+	if (rsp->num_codecs + 3 > size) {
+		print_field("Invalid number of codecs.");
+		return;
+	}
+
+	print_status(rsp->status);
+	print_field("Number of supported codecs: %d", rsp->num_codecs);
+
+	size -= sizeof(*rsp);
+
+	if (size < rsp->num_codecs * sizeof(*rsp->codec)) {
+		print_field("Invalid number of codecs.");
+		return;
+	}
+
+	print_list(rsp->codec, size, rsp->num_codecs, sizeof(*rsp->codec),
+							print_codecs);
+
+	size -= rsp->num_codecs * sizeof(*rsp->codec);
+
+	if (size < sizeof(uint8_t)) {
+		print_field("Invalid number of vendor codecs.");
+		return;
+	}
+
+	num_vnd_codecs = rsp->codec[rsp->num_codecs].id;
+
+	print_field("Number of vendor codecs: %d", num_vnd_codecs);
+}
+
+static void print_path_direction(const char *prefix, uint8_t dir)
+{
+	const char *str;
+
+	switch (dir) {
+	case 0x00:
+		str = "Input (Host to Controller)";
+		break;
+	case 0x01:
+		str = "Output (Controller to Host)";
+		break;
+	default:
+		str = "Reserved";
+		break;
+	}
+
+	print_field("%s: %s (0x%2.2x)", prefix, str, dir);
+}
+
+static void print_vnd_codec(const char *label,
+				const struct bt_hci_vnd_codec *codec)
+{
+	uint8_t mask;
+
+	print_codec_id(label, codec->id);
+
+	if (codec->id == 0xff) {
+		packet_print_company("Company Codec ID",
+					le16_to_cpu(codec->cid));
+		print_field("Vendor Codec ID: %d", le16_to_cpu(codec->vid));
+	}
+
+	print_field("Logical Transport Type: 0x%02x", codec->transport);
+	mask = print_bitfield(2, codec->transport, codec_transport_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_SERVICE_CLASS,
+				"  Unknown transport (0x%2.2x)", mask);
+}
+
+static void read_local_codec_caps_cmd(const void *data, uint8_t size)
+{
+	const struct bt_hci_cmd_read_local_codec_caps *cmd = data;
+
+	print_vnd_codec("Codec", &cmd->codec);
+	print_path_direction("Direction", cmd->dir);
+}
+
+static void read_local_codec_caps_rsp(const void *data, uint8_t size)
+{
+	const struct bt_hci_rsp_read_local_codec_caps *rsp = data;
+	uint8_t i;
+
+	print_status(rsp->status);
+	print_field("Number of codec capabilities: %d", rsp->num);
+
+	data += sizeof(*rsp);
+	size -= sizeof(*rsp);
+
+	for (i = 0; i < rsp->num; i++) {
+		const struct bt_hci_codec_caps *caps = data;
+
+		if (size < sizeof(*caps)) {
+			print_field("Invalid capabilities: %u < %zu",
+						size, sizeof(*caps));
+			return;
+		}
+
+		print_field(" Capabilities #%u:", i);
+		packet_hexdump(caps->data, caps->len);
+
+		data += 1 + caps->len;
+		size -= 1 + caps->len;
+	}
+}
+
+static void read_local_ctrl_delay_cmd(const void *data, uint8_t size)
+{
+	const struct bt_hci_cmd_read_local_ctrl_delay *cmd = data;
+
+	print_vnd_codec("Codec", &cmd->codec);
+	print_path_direction("Direction", cmd->dir);
+	print_field("Length Codec Configuration: %u", cmd->codec_cfg_len);
+}
+
+static void config_data_path_cmd(const void *data, uint8_t size)
+{
+	const struct bt_hci_cmd_config_data_path *cmd = data;
+
+	print_path_direction("Direction", cmd->dir);
+	print_field("ID: %u", cmd->id);
+	print_field("Vendor Specific Config Length: %u", cmd->vnd_config_len);
+	print_hex_field("Vendor Specific Config", cmd->vnd_config,
+						cmd->vnd_config_len);
+}
+
+static void print_usec_interval(const char *prefix, const uint8_t interval[3])
+{
+	uint32_t u24 = 0;
+
+	memcpy(&u24, interval, 3);
+	print_field("%s: %u us (0x%6.6x)", prefix, le32_to_cpu(u24),
+						le32_to_cpu(u24));
+}
+
+static void read_local_ctrl_delay_rsp(const void *data, uint8_t size)
+{
+	const struct bt_hci_rsp_read_local_ctrl_delay *rsp = data;
+
+	print_status(rsp->status);
+	print_usec_interval("Minimum Controller delay", rsp->min_delay);
+	print_usec_interval("Maximum Controller delay", rsp->max_delay);
+}
+
+static void read_local_pairing_options_rsp(const void *data, uint8_t size)
+{
+	const struct bt_hci_rsp_read_local_pairing_options *rsp = data;
+
+	print_status(rsp->status);
+	print_field("Pairing options: 0x%2.2x", rsp->pairing_options);
+	print_field("Max encryption key size: %u octets", rsp->max_key_size);
 }
 
 static void read_failed_contact_counter_cmd(const void *data, uint8_t size)
@@ -6874,7 +7112,7 @@ static void le_set_adv_set_rand_addr(const void *data, uint8_t size)
 	const struct bt_hci_cmd_le_set_adv_set_rand_addr *cmd = data;
 
 	print_field("Advertising handle: 0x%2.2x", cmd->handle);
-	print_addr("Advertising random address", cmd->bdaddr, 0x00);
+	print_addr("Advertising random address", cmd->bdaddr, 0x01);
 }
 
 static const struct bitfield_data ext_adv_properties_table[] = {
@@ -6970,8 +7208,8 @@ static void le_set_ext_adv_params_cmd(const void *data, uint8_t size)
 	print_peer_addr_type("Peer address type", cmd->peer_addr_type);
 	print_addr("Peer address", cmd->peer_addr, cmd->peer_addr_type);
 	print_adv_filter_policy("Filter policy", cmd->filter_policy);
-	if (cmd->tx_power == 0xff)
-		print_field("TX power: Host has no preference (0xff)");
+	if (cmd->tx_power == 0x7f)
+		print_field("TX power: Host has no preference (0x7f)");
 	else
 		print_power_level(cmd->tx_power, NULL);
 
@@ -7785,7 +8023,7 @@ static void le_read_iso_tx_sync_rsp(const void *data, uint8_t size)
 	print_field("Offset: %d", le32_to_cpu(offset));
 }
 
-static void print_cis_params(const void *data)
+static void print_cis_params(const void *data, int i)
 {
 	const struct bt_hci_cis_params *cis = data;
 
@@ -7800,29 +8038,6 @@ static void print_cis_params(const void *data)
 							cis->m_rtn);
 	print_field("Slave to Master Retransmission attempts: 0x%2.2x",
 							cis->s_rtn);
-}
-
-static void print_list(const void *data, uint8_t size, int num_items,
-			size_t item_size, void (*callback)(const void *data))
-{
-	while (size >= item_size && num_items) {
-		callback(data);
-		data += item_size;
-		size -= item_size;
-		num_items--;
-	}
-
-	if (num_items)
-		print_hex_field("", data, size);
-}
-
-static void print_usec_interval(const char *prefix, const uint8_t interval[3])
-{
-	uint32_t u24 = 0;
-
-	memcpy(&u24, interval, 3);
-	print_field("%s: %u us (0x%6.6x)", prefix, le32_to_cpu(u24),
-						le32_to_cpu(u24));
 }
 
 static void le_set_cig_params_cmd(const void *data, uint8_t size)
@@ -7847,7 +8062,7 @@ static void le_set_cig_params_cmd(const void *data, uint8_t size)
 						print_cis_params);
 }
 
-static void print_cis_params_test(const void *data)
+static void print_cis_params_test(const void *data, int i)
 {
 	const struct bt_hci_cis_params_test *cis = data;
 
@@ -7888,7 +8103,7 @@ static void le_set_cig_params_test_cmd(const void *data, uint8_t size)
 						print_cis_params_test);
 }
 
-static void print_cig_handle(const void *data)
+static void print_cig_handle(const void *data, int i)
 {
 	const uint16_t *handle = data;
 
@@ -7913,7 +8128,7 @@ static void le_set_cig_params_rsp(const void *data, uint8_t size)
 						print_cig_handle);
 }
 
-static void print_cis(const void *data)
+static void print_cis(const void *data, int i)
 {
 	const struct bt_hci_cis *cis = data;
 
@@ -7939,6 +8154,18 @@ static void le_remove_cig_cmd(const void *data, uint8_t size)
 	print_field("CIG ID: 0x%02x", cmd->cig_id);
 }
 
+static void le_remove_cig_rsp(const void *data, uint8_t size)
+{
+	const struct bt_hci_rsp_le_remove_cig *rsp = data;
+
+	print_status(rsp->status);
+
+	if (size == 1)
+		return;
+
+	print_field("CIG ID: 0x%2.2x", rsp->cig_id);
+}
+
 static void le_accept_cis_req_cmd(const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_accept_cis *cmd = data;
@@ -7954,7 +8181,7 @@ static void le_reject_cis_req_cmd(const void *data, uint8_t size)
 	print_reason(cmd->reason);
 }
 
-static void print_bis(const void *data)
+static void print_bis(const void *data, int i)
 {
 	const struct bt_hci_bis *bis = data;
 
@@ -7974,7 +8201,7 @@ static void le_create_big_cmd(const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_create_big *cmd = data;
 
-	print_field("BIG ID: 0x%2.2x", cmd->big_id);
+	print_field("Handle: 0x%2.2x", cmd->handle);
 	print_field("Advertising Handle: 0x%2.2x", cmd->adv_handle);
 	print_field("Number of BIS: %u", cmd->num_bis);
 
@@ -7983,7 +8210,7 @@ static void le_create_big_cmd(const void *data, uint8_t size)
 	print_list(cmd->bis, size, cmd->num_bis, sizeof(*cmd->bis), print_bis);
 }
 
-static void print_bis_test(const void *data)
+static void print_bis_test(const void *data, int i)
 {
 	const struct bt_hci_bis_test *bis = data;
 
@@ -8022,11 +8249,11 @@ static void le_terminate_big_cmd(const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_term_big *cmd = data;
 
-	print_field("BIG ID: 0x%2.2x", cmd->big_id);
+	print_field("BIG Handle: 0x%2.2x", cmd->handle);
 	print_reason(cmd->reason);
 }
 
-static void print_bis_sync(const void *data)
+static void print_bis_sync(const void *data, int i)
 {
 	const uint8_t *bis_id = data;
 
@@ -8037,13 +8264,16 @@ static void le_big_create_sync_cmd(const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_big_create_sync *cmd = data;
 
-	print_field("BIG ID: 0x%2.2x", cmd->big_id);
-	print_field("Number of BIS: %u", cmd->num_bis);
-	print_field("Encryption: 0x%2.2x", cmd->encryption);
+	print_field("BIG Handle: 0x%2.2x", cmd->handle);
+	print_field("BIG Sync Handle: 0x%4.4x", le16_to_cpu(cmd->sync_handle));
+	print_field("Encryption: %s (0x%2.2x)",
+			cmd->encryption ? "Unencrypted" : "Encrypted",
+			cmd->encryption);
 	print_hex_field("Broadcast Code", cmd->bcode, 16);
-	print_field("Number Subevents: 0x%2.2x", cmd->mse);
+	print_field("Maximum Number Subevents: 0x%2.2x", cmd->mse);
 	print_field("Timeout: %d ms (0x%4.4x)", le16_to_cpu(cmd->timeout) * 10,
 						le16_to_cpu(cmd->timeout));
+	print_field("Number of BIS: %u", cmd->num_bis);
 
 	size -= sizeof(*cmd);
 
@@ -8055,24 +8285,20 @@ static void le_big_term_sync_cmd(const void *data, uint8_t size)
 {
 	const struct bt_hci_cmd_le_big_term_sync *cmd = data;
 
-	print_field("BIG ID: 0x%2.2x", cmd->big_id);
+	print_field("BIG Handle: 0x%2.2x", cmd->handle);
 }
 
 static void print_iso_path(const char *prefix, uint8_t path)
 {
 	switch (path) {
 	case 0x00:
-		print_field("%s Data Path: Disabled (0x%2.2x)", prefix, path);
-		return;
-	case 0x01:
-		print_field("%s Data Path: HCI (0x%2.2x)", prefix, path);
+		print_field("%s: HCI (0x%2.2x)", prefix, path);
 		return;
 	case 0xff:
-		print_field("%s Data Path: Test Mode (0x%2.2x)", prefix, path);
+		print_field("%s: Disabled (0x%2.2x)", prefix, path);
 		return;
 	default:
-		print_field("%s Data Path: Logical Channel Number (0x%2.2x)",
-							prefix, path);
+		print_field("%s: Logical Channel Number %u", prefix, path);
 	}
 }
 
@@ -8081,23 +8307,27 @@ static void le_setup_iso_path_cmd(const void *data, uint8_t size)
 	const struct bt_hci_cmd_le_setup_iso_path *cmd = data;
 
 	print_field("Handle: %d", le16_to_cpu(cmd->handle));
-	print_iso_path("Input", cmd->input_path);
-	print_iso_path("Output", cmd->output_path);
+	print_path_direction("Data Path Direction", cmd->direction);
+	print_iso_path("Data Path", cmd->path);
+	print_codec_id("Coding Format", cmd->codec);
+	packet_print_company("Company Codec ID", le16_to_cpu(cmd->codec_cid));
+	print_field("Vendor Codec ID: %d", le16_to_cpu(cmd->codec_vid));
+	print_usec_interval("Controller Delay", cmd->delay);
+	print_field("Codec Configuration Length: %d", cmd->codec_cfg_len);
+	print_hex_field("Codec Configuration", cmd->codec_cfg,
+						cmd->codec_cfg_len);
 }
 
-static void print_iso_dir(uint8_t path_dir)
+static void le_setup_iso_path_rsp(const void *data, uint8_t size)
 {
-	switch (path_dir) {
-	case 0x00:
-		print_field("Data Path Direction: Input (0x%2.2x)", path_dir);
+	const struct bt_hci_rsp_le_setup_iso_path *rsp = data;
+
+	print_status(rsp->status);
+
+	if (size == 1)
 		return;
-	case 0x01:
-		print_field("Data Path Direction: Output (0x%2.2x)", path_dir);
-		return;
-	default:
-		print_field("Data Path Direction: Reserved (0x%2.2x)",
-							path_dir);
-	}
+
+	print_field("Handle: %d", le16_to_cpu(rsp->handle));
 }
 
 static void le_remove_iso_path_cmd(const void *data, uint8_t size)
@@ -8105,7 +8335,7 @@ static void le_remove_iso_path_cmd(const void *data, uint8_t size)
 	const struct bt_hci_cmd_le_remove_iso_path *cmd = data;
 
 	print_field("Connection Handle: %d", le16_to_cpu(cmd->handle));
-	print_iso_dir(cmd->path_dir);
+	print_path_direction("Data Path Direction", cmd->direction);
 }
 
 static void le_req_peer_sca_cmd(const void *data, uint8_t size)
@@ -8113,6 +8343,22 @@ static void le_req_peer_sca_cmd(const void *data, uint8_t size)
 	const struct bt_hci_cmd_le_req_peer_sca *cmd = data;
 
 	print_field("Connection Handle: %d", le16_to_cpu(cmd->handle));
+}
+
+static void le_set_host_feature_cmd(const void *data, uint8_t size)
+{
+	const struct bt_hci_cmd_le_set_host_feature *cmd = data;
+	uint64_t mask;
+
+	print_field("Bit Number: %u", cmd->bit_number);
+
+	mask = print_bitfield(2, (((uint64_t) 1) << cmd->bit_number),
+							features_le);
+	if (mask)
+		print_text(COLOR_UNKNOWN_FEATURE_BIT, "  Unknown features "
+						"(0x%16.16" PRIx64 ")", mask);
+
+	print_field("Bit Value: %u", cmd->bit_value);
 }
 
 struct opcode_data {
@@ -8620,6 +8866,35 @@ static const struct opcode_data opcode_table[] = {
 	{ 0x100b, 237, "Read Local Supported Codecs",
 				null_cmd, 0, true,
 				read_local_codecs_rsp, 3, false },
+	{ 0x100c, 331, "Read Local Simple Pairing Options",
+				null_cmd, 0, true,
+				read_local_pairing_options_rsp, 3, true },
+	{ BT_HCI_CMD_READ_LOCAL_CODECS_V2, BT_HCI_BIT_READ_LOCAL_CODECS_V2,
+		"Read Local Supported Codecs V2",
+		null_cmd, 0, true,
+		read_local_codecs_rsp_v2,
+		sizeof(struct bt_hci_rsp_read_local_codecs_v2), false
+	},
+	{ BT_HCI_CMD_READ_LOCAL_CODEC_CAPS, BT_HCI_BIT_READ_LOCAL_CODEC_CAPS,
+		"Read Local Supported Codec Capabilities",
+		read_local_codec_caps_cmd,
+		sizeof(struct bt_hci_cmd_read_local_codec_caps), true,
+		read_local_codec_caps_rsp,
+		sizeof(struct bt_hci_rsp_read_local_codec_caps), false
+	},
+	{ BT_HCI_CMD_READ_LOCAL_CTRL_DELAY, BT_HCI_BIT_READ_LOCAL_CTRL_DELAY,
+		"Read Local Supported Controller Delay",
+		read_local_ctrl_delay_cmd,
+		sizeof(struct bt_hci_cmd_read_local_ctrl_delay), false,
+		read_local_ctrl_delay_rsp,
+		sizeof(struct bt_hci_rsp_read_local_ctrl_delay), true
+	},
+	{ BT_HCI_CMD_CONFIG_DATA_PATH, BT_HCI_BIT_CONFIG_DATA_PATH,
+		"Configure Data Path",
+		config_data_path_cmd,
+		sizeof(struct bt_hci_cmd_config_data_path), false,
+		status_rsp, 1, true
+	},
 
 	/* OGF 5 - Status Parameter */
 	{ 0x1401, 122, "Read Failed Contact Counter",
@@ -8967,7 +9242,9 @@ static const struct opcode_data opcode_table[] = {
 				"LE Remove Connected Isochronous Group",
 				le_remove_cig_cmd,
 				sizeof(struct bt_hci_cmd_le_remove_cig), false,
-				status_rsp, 1, true },
+				le_remove_cig_rsp,
+				sizeof(struct bt_hci_rsp_le_remove_cig),
+				false },
 	{ BT_HCI_CMD_LE_ACCEPT_CIS, BT_HCI_BIT_LE_ACCEPT_CIS,
 				"LE Accept Connected Isochronous Stream Request",
 				le_accept_cis_req_cmd,
@@ -8992,7 +9269,7 @@ static const struct opcode_data opcode_table[] = {
 				"LE Broadcast Isochronous Group Create Sync",
 				le_big_create_sync_cmd,
 				sizeof(struct bt_hci_cmd_le_big_create_sync),
-				true },
+				false },
 	{ BT_HCI_CMD_LE_BIG_TERM_SYNC, BT_HCI_BIT_LE_BIG_TERM_SYNC,
 				"LE Broadcast Isochronous Group Terminate Sync",
 				le_big_term_sync_cmd,
@@ -9006,7 +9283,9 @@ static const struct opcode_data opcode_table[] = {
 				"LE Setup Isochronous Data Path",
 				le_setup_iso_path_cmd,
 				sizeof(struct bt_hci_cmd_le_setup_iso_path),
-				true, status_rsp, 1, true },
+				true, le_setup_iso_path_rsp,
+				sizeof(struct bt_hci_rsp_le_setup_iso_path),
+				true },
 	{ BT_HCI_CMD_LE_REMOVE_ISO_PATH, BT_HCI_BIT_LE_REMOVE_ISO_PATH,
 				"LE Remove Isochronous Data Path",
 				le_remove_iso_path_cmd,
@@ -9025,6 +9304,10 @@ static const struct opcode_data opcode_table[] = {
 	{ BT_HCI_CMD_LE_ISO_TEST_END, BT_HCI_BIT_LE_ISO_TEST_END,
 				"LE Isochronous Read Test Counters", NULL, 0,
 				false },
+	{ BT_HCI_CMD_LE_SET_HOST_FEATURE, BT_HCI_BIT_LE_SET_HOST_FEATURE,
+				"LE Set Host Feature", le_set_host_feature_cmd,
+				sizeof(struct bt_hci_cmd_le_set_host_feature),
+				true, status_rsp, 1, true },
 	{ }
 };
 
@@ -9042,18 +9325,26 @@ static const char *get_supported_command(int bit)
 
 static const char *current_vendor_str(void)
 {
-	uint16_t manufacturer;
+	uint16_t manufacturer, msft_opcode;
 
-	if (index_current < MAX_INDEX)
+	if (index_current < MAX_INDEX) {
 		manufacturer = index_list[index_current].manufacturer;
-	else
+		msft_opcode = index_list[index_current].msft_opcode;
+	} else {
 		manufacturer = fallback_manufacturer;
+		msft_opcode = BT_HCI_CMD_NOP;
+	}
+
+	if (msft_opcode != BT_HCI_CMD_NOP)
+		return "Microsoft";
 
 	switch (manufacturer) {
 	case 2:
 		return "Intel";
 	case 15:
 		return "Broadcom";
+	case 93:
+		return "Realtek";
 	}
 
 	return NULL;
@@ -9061,12 +9352,19 @@ static const char *current_vendor_str(void)
 
 static const struct vendor_ocf *current_vendor_ocf(uint16_t ocf)
 {
-	uint16_t manufacturer;
+	uint16_t manufacturer, msft_opcode;
 
-	if (index_current < MAX_INDEX)
+	if (index_current < MAX_INDEX) {
 		manufacturer = index_list[index_current].manufacturer;
-	else
+		msft_opcode = index_list[index_current].msft_opcode;
+	} else {
 		manufacturer = fallback_manufacturer;
+		msft_opcode = BT_HCI_CMD_NOP;
+	}
+
+	if (msft_opcode != BT_HCI_CMD_NOP &&
+				cmd_opcode_ocf(msft_opcode) == ocf)
+		return msft_vendor_ocf();
 
 	switch (manufacturer) {
 	case 2:
@@ -9080,12 +9378,18 @@ static const struct vendor_ocf *current_vendor_ocf(uint16_t ocf)
 
 static const struct vendor_evt *current_vendor_evt(uint8_t evt)
 {
-	uint16_t manufacturer;
+	uint16_t manufacturer, msft_opcode;
 
-	if (index_current < MAX_INDEX)
+	if (index_current < MAX_INDEX) {
 		manufacturer = index_list[index_current].manufacturer;
-	else
+		msft_opcode = index_list[index_current].msft_opcode;
+	} else {
 		manufacturer = fallback_manufacturer;
+		msft_opcode = BT_HCI_CMD_NOP;
+	}
+
+	if (msft_opcode != BT_HCI_CMD_NOP)
+		return NULL;
 
 	switch (manufacturer) {
 	case 2:
@@ -10494,7 +10798,7 @@ static void le_req_cis_evt(const void *data, uint8_t size)
 	print_field("CIS ID: 0x%2.2x", evt->cis_id);
 }
 
-static void print_bis_handle(const void *data)
+static void print_bis_handle(const void *data, int i)
 {
 	const uint16_t *handle = data;
 
@@ -10506,20 +10810,26 @@ static void le_big_complete_evt(const void *data, uint8_t size)
 	const struct bt_hci_evt_le_big_complete *evt = data;
 
 	print_status(evt->status);
-	print_field("BIG ID: 0x%2.2x", evt->big_id);
+	print_field("Handle: 0x%2.2x", evt->handle);
 	print_usec_interval("BIG Synchronization Delay", evt->sync_delay);
 	print_usec_interval("Transport Latency", evt->latency);
 	print_le_phy("PHY", evt->phy);
-	print_list(evt->handle, size, evt->num_bis, sizeof(*evt->handle),
-						print_bis_handle);
+	print_field("NSE: %u", evt->nse);
+	print_field("BN: %u", evt->bn);
+	print_field("PTO: %u", evt->bn);
+	print_field("IRC: %u", evt->irc);
+	print_field("Maximum PDU: %u", evt->max_pdu);
+	print_slot_125("ISO Interval", evt->interval);
+	print_list(evt->bis_handle, size, evt->num_bis,
+				sizeof(*evt->bis_handle), print_bis_handle);
 }
 
 static void le_big_terminate_evt(const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_big_terminate *evt = data;
 
+	print_field("BIG Handle: 0x%2.2x", evt->handle);
 	print_reason(evt->reason);
-	print_field("BIG ID: 0x%2.2x", evt->big_id);
 }
 
 static void le_big_sync_estabilished_evt(const void *data, uint8_t size)
@@ -10527,9 +10837,15 @@ static void le_big_sync_estabilished_evt(const void *data, uint8_t size)
 	const struct bt_hci_evt_le_big_sync_estabilished *evt = data;
 
 	print_status(evt->status);
-	print_field("BIG ID: 0x%2.2x", evt->big_id);
+	print_field("BIG Handle: 0x%2.2x", evt->handle);
 	print_usec_interval("Transport Latency", evt->latency);
-	print_list(evt->handle, size, evt->num_bis, sizeof(*evt->handle),
+	print_field("NSE: %u", evt->nse);
+	print_field("BN: %u", evt->bn);
+	print_field("PTO: %u", evt->bn);
+	print_field("IRC: %u", evt->irc);
+	print_field("Maximum PDU: %u", evt->max_pdu);
+	print_slot_125("ISO Interval", evt->interval);
+	print_list(evt->bis, size, evt->num_bis, sizeof(*evt->bis),
 						print_bis_handle);
 }
 
@@ -11045,7 +11361,7 @@ void packet_user_logging(struct timeval *tv, struct ucred *cred,
 			label = "Message";
 	}
 
-	if (ident[0] == '<' || ident[0] == '>') {
+	if (ident && (ident[0] == '<' || ident[0] == '>')) {
 		packet_decode(tv, cred, ident[0], index, color,
 				label == ident ? &ident[2] : label,
 				data, size);
@@ -11068,7 +11384,7 @@ void packet_hci_command(struct timeval *tv, struct ucred *cred, uint16_t index,
 	char extra_str[25], vendor_str[150];
 	int i;
 
-	if (index > MAX_INDEX) {
+	if (index >= MAX_INDEX) {
 		print_field("Invalid index (%d).", index);
 		return;
 	}
@@ -11175,7 +11491,7 @@ void packet_hci_event(struct timeval *tv, struct ucred *cred, uint16_t index,
 	char extra_str[25];
 	int i;
 
-	if (index > MAX_INDEX) {
+	if (index >= MAX_INDEX) {
 		print_field("Invalid index (%d).", index);
 		return;
 	}
@@ -11255,7 +11571,7 @@ void packet_hci_acldata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	uint8_t flags = acl_flags(handle);
 	char handle_str[16], extra_str[32];
 
-	if (index > MAX_INDEX) {
+	if (index >= MAX_INDEX) {
 		print_field("Invalid index (%d).", index);
 		return;
 	}
@@ -11304,7 +11620,7 @@ void packet_hci_scodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	uint8_t flags = acl_flags(handle);
 	char handle_str[16], extra_str[32];
 
-	if (index > MAX_INDEX) {
+	if (index >= MAX_INDEX) {
 		print_field("Invalid index (%d).", index);
 		return;
 	}
@@ -11351,7 +11667,7 @@ void packet_hci_isodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	uint8_t flags = acl_flags(handle);
 	char handle_str[16], extra_str[32];
 
-	if (index > MAX_INDEX) {
+	if (index >= MAX_INDEX) {
 		print_field("Invalid index (%d).", index);
 		return;
 	}
@@ -11668,6 +11984,7 @@ static const struct bitfield_data mgmt_settings_table[] = {
 	{ 14, "Controller Configuration"},
 	{ 15, "Static Address"		},
 	{ 16, "PHY Configuration"	},
+	{ 17, "Wideband Speech"		},
 	{ }
 };
 
@@ -11779,8 +12096,16 @@ static const struct bitfield_data mgmt_adv_flags_table[] = {
 	{  7, "Advertise in 1M on Secondary channel"	},
 	{  8, "Advertise in 2M on Secondary channel"	},
 	{  9, "Advertise in CODED on Secondary channel"	},
+	{  12, "Use provided duration parameter"	},
+	{  13, "Use provided timeout parameter"		},
+	{  14, "Use provided interval parameters"	},
+	{  15, "Use provided tx power parameter"	},
 	{ }
 };
+#define MGMT_ADV_PARAM_DURATION		(1 << 12)
+#define MGMT_ADV_PARAM_TIMEOUT		(1 << 13)
+#define MGMT_ADV_PARAM_INTERVALS	(1 << 14)
+#define MGMT_ADV_PARAM_TX_POWER		(1 << 15)
 
 static void mgmt_print_adv_flags(uint32_t flags)
 {
@@ -11923,6 +12248,26 @@ static void mgmt_print_oob_data(const void *data)
 	print_randomizer_p192(data + 16);
 	print_hash_p256(data + 32);
 	print_randomizer_p256(data + 48);
+}
+
+static const struct bitfield_data mgmt_exp_feature_flags_table[] = {
+	{  0, "Active"		},
+	{  1, "Settings change"	},
+	{ }
+};
+
+static void mgmt_print_exp_feature(const void *data)
+{
+	uint32_t flags = get_le32(data + 16);
+	uint32_t mask;
+
+	mgmt_print_uuid(data);
+	print_field("Flags: 0x%8.8x", flags);
+
+	mask = print_bitfield(2, flags, mgmt_exp_feature_flags_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_EXP_FEATURE_FLAG,
+				"  Unknown feature flag (0x%8.8x)", mask);
 }
 
 static void mgmt_null_cmd(const void *data, uint16_t size)
@@ -12151,7 +12496,7 @@ static void mgmt_load_link_keys_cmd(const void *data, uint16_t size)
 
 static void mgmt_load_long_term_keys_cmd(const void *data, uint16_t size)
 {
-	uint16_t num_keys = get_le16(data + 1);
+	uint16_t num_keys = get_le16(data);
 	int i;
 
 	print_field("Keys: %u", num_keys);
@@ -12581,7 +12926,7 @@ static void mgmt_set_privacy_cmd(const void *data, uint16_t size)
 
 static void mgmt_load_identity_resolving_keys_cmd(const void *data, uint16_t size)
 {
-	uint16_t num_keys = get_le16(data + 1);
+	uint16_t num_keys = get_le16(data);
 	int i;
 
 	print_field("Keys: %u", num_keys);
@@ -12987,6 +13332,263 @@ static void mgmt_set_phy_cmd(const void *data, uint16_t size)
 	mgmt_print_phys("Selected PHYs", selected_phys);
 }
 
+static void mgmt_read_exp_features_info_rsp(const void *data, uint16_t size)
+{
+	uint16_t num_features = get_le16(data);
+	int i;
+
+	print_field("Features: %u", num_features);
+
+	if (size - 2 != num_features * 20) {
+		packet_hexdump(data + 2, size - 2);
+		return;
+	}
+
+	for (i = 0; i < num_features; i++)
+		mgmt_print_exp_feature(data + 2 + (i * 20));
+}
+
+static void mgmt_set_exp_feature_cmd(const void *data, uint16_t size)
+{
+	uint8_t enable = get_u8(data + 16);
+
+	mgmt_print_uuid(data);
+	print_enable("Action", enable);
+}
+
+static void mgmt_set_exp_feature_rsp(const void *data, uint16_t size)
+{
+	mgmt_print_exp_feature(data);
+}
+
+static const struct bitfield_data mgmt_added_device_flags_table[] = {
+	{ 0, "Remote Wakeup"	},
+	{ }
+};
+
+static void mgmt_print_added_device_flags(char *label, uint32_t flags)
+{
+	uint32_t mask;
+
+	print_field("%s: 0x%8.8x", label, flags);
+	mask = print_bitfield(2, flags, mgmt_added_device_flags_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_ADDED_DEVICE_FLAG,
+			   "  Unknown Flags (0x%8.8x)", mask);
+}
+
+static void mgmt_get_device_flags_cmd(const void *data, uint16_t size)
+{
+	uint8_t type = get_u8(data + 6);
+
+	mgmt_print_address(data, type);
+}
+
+static void mgmt_get_device_flags_rsp(const void *data, uint16_t size)
+{
+	uint8_t type = get_u8(data + 6);
+	uint32_t supported_flags = get_le32(data + 7);
+	uint32_t current_flags = get_le32(data + 11);
+
+	mgmt_print_address(data, type);
+	mgmt_print_added_device_flags("Supported Flags", supported_flags);
+	mgmt_print_added_device_flags("Current Flags", current_flags);
+}
+
+static void mgmt_set_device_flags_cmd(const void *data, uint16_t size)
+{
+	uint8_t type = get_u8(data + 6);
+	uint32_t current_flags = get_le32(data + 7);
+
+	mgmt_print_address(data, type);
+	mgmt_print_added_device_flags("Current Flags", current_flags);
+}
+
+static void mgmt_set_device_flags_rsp(const void *data, uint16_t size)
+{
+	uint8_t type = get_u8(data + 6);
+
+	mgmt_print_address(data, type);
+}
+static void mgmt_add_ext_adv_params_cmd(const void *data, uint16_t size)
+{
+	uint8_t instance = get_u8(data);
+	uint32_t flags = get_le32(data + 1);
+	uint16_t duration = get_le16(data + 5);
+	uint16_t timeout = get_le16(data + 7);
+	uint8_t *min_interval = (uint8_t *)(data + 9);
+	uint8_t *max_interval = (uint8_t *)(data + 13);
+	int8_t tx_power = get_s8(data + 17);
+
+	print_field("Instance: %u", instance);
+	mgmt_print_adv_flags(flags);
+	print_field("Duration: %u", duration);
+	print_field("Timeout: %u", timeout);
+	print_ext_slot_625("Min advertising interval", min_interval);
+	print_ext_slot_625("Max advertising interval", max_interval);
+	print_power_level(tx_power, NULL);
+}
+
+static void mgmt_add_ext_adv_params_rsp(const void *data, uint16_t size)
+{
+	uint8_t instance = get_u8(data);
+	int8_t tx_power = get_s8(data + 1);
+	uint8_t max_adv_data_len = get_u8(data+2);
+	uint8_t max_scan_rsp_len = get_u8(data+3);
+
+	print_field("Instance: %u", instance);
+	print_power_level(tx_power, NULL);
+	print_field("Available adv data len: %u", max_adv_data_len);
+	print_field("Available scan rsp data len: %u", max_scan_rsp_len);
+}
+
+static void mgmt_add_ext_adv_data_cmd(const void *data, uint16_t size)
+{
+	uint8_t instance = get_u8(data);
+	uint8_t adv_data_len = get_u8(data + 1);
+	uint8_t scan_rsp_len = get_u8(data + 2);
+
+	print_field("Instance: %u", instance);
+	print_field("Advertising data length: %u", adv_data_len);
+	print_eir(data + 3, adv_data_len, false);
+	print_field("Scan response length: %u", scan_rsp_len);
+	print_eir(data + 3 + adv_data_len, scan_rsp_len, false);
+}
+
+static void mgmt_add_ext_adv_data_rsp(const void *data, uint16_t size)
+{
+	uint8_t instance = get_u8(data);
+
+	print_field("Instance: %u", instance);
+}
+
+static const struct bitfield_data mgmt_adv_monitor_features_table[] = {
+	{ 1, "OR Patterns"	},
+	{ }
+};
+
+static void mgmt_print_adv_monitor_features(char *label, uint32_t flags)
+{
+	uint32_t mask;
+
+	print_field("%s: 0x%8.8x", label, flags);
+	mask = print_bitfield(2, flags, mgmt_adv_monitor_features_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_ADVMON_FEATURES,
+			   "  Unknown Flags (0x%8.8x)", mask);
+}
+
+static void mgmt_print_adv_monitor_handles(const void *data, uint8_t len)
+{
+	uint8_t idx = 0;
+
+	while (idx + 2 <= len) {
+		print_field("  Handle: %d", get_le16(data + idx));
+		idx += 2;
+	}
+}
+
+static void mgmt_read_adv_monitor_features_rsp(const void *data, uint16_t size)
+{
+	uint32_t supported_features = get_le32(data);
+	uint32_t enabled_features = get_le32(data + 4);
+	uint16_t max_num_handles = get_le16(data + 8);
+	uint8_t max_num_patterns = get_u8(data + 10);
+	uint16_t num_handles = get_le16(data + 11);
+
+	mgmt_print_adv_monitor_features("Supported Features",
+							supported_features);
+	mgmt_print_adv_monitor_features("Enabled Features",
+							enabled_features);
+	print_field("Max number of handles: %d", max_num_handles);
+	print_field("Max number of patterns: %d", max_num_patterns);
+	print_field("Number of handles: %d", num_handles);
+	mgmt_print_adv_monitor_handles(data + 13, size - 13);
+}
+
+static void mgmt_print_adv_monitor_patterns(const void *data, uint8_t len)
+{
+	uint8_t data_idx = 0, pattern_idx = 1;
+
+	/* Reference: struct mgmt_adv_pattern in lib/mgmt.h. */
+	while (data_idx + 34 <= len) {
+		uint8_t ad_type = get_u8(data);
+		uint8_t offset = get_u8(data + 1);
+		uint8_t length = get_u8(data + 2);
+
+		print_field("  Pattern %d:", pattern_idx);
+		print_field("    AD type: %d", ad_type);
+		print_field("    Offset: %d", offset);
+		print_field("    Length: %d", length);
+		if (length <= 31)
+			print_hex_field("    Value ", data + 3, length);
+		else
+			print_text(COLOR_ERROR, "    invalid length");
+
+		pattern_idx += 1;
+		data_idx += 34;
+		data += 34;
+	}
+}
+
+static void mgmt_add_adv_monitor_patterns_cmd(const void *data, uint16_t size)
+{
+	uint8_t pattern_count = get_u8(data);
+
+	print_field("Number of patterns: %d", pattern_count);
+	mgmt_print_adv_monitor_patterns(data + 1, size - 1);
+}
+
+static void mgmt_add_adv_monitor_patterns_rssi_cmd(const void *data,
+								uint16_t size)
+{
+	int8_t high_rssi = get_s8(data);
+	uint16_t high_rssi_timeout = get_le16(data + 1);
+	int8_t low_rssi = get_s8(data + 3);
+	uint16_t low_rssi_timeout = get_le16(data + 4);
+	uint8_t sampling_period = get_u8(data + 6);
+	uint8_t pattern_count = get_u8(data + 7);
+
+	print_field("RSSI data:");
+	print_field("  high threshold: %d dBm", high_rssi);
+	print_field("  high timeout: %d seconds", high_rssi_timeout);
+	print_field("  low threshold: %d dBm", low_rssi);
+	print_field("  low timeout: %d seconds", low_rssi_timeout);
+
+	if (sampling_period == 0)
+		print_field("  sampling: propagate all (0x00)");
+	else if (sampling_period == 0xff)
+		print_field("  sampling: just once (0xFF)");
+	else
+		print_field("  sampling: every %d ms", 100 * sampling_period);
+
+	print_field("Number of patterns: %d", pattern_count);
+	mgmt_print_adv_monitor_patterns(data + 8, size - 8);
+}
+
+static void mgmt_add_adv_monitor_patterns_rsp(const void *data, uint16_t size)
+{
+	uint16_t handle = get_le16(data);
+
+	print_field("Handle: %d", handle);
+}
+
+static void mgmt_remove_adv_monitor_patterns_cmd(const void *data,
+								uint16_t size)
+{
+	uint16_t handle = get_le16(data);
+
+	print_field("Handle: %d", handle);
+}
+
+static void mgmt_remove_adv_monitor_patterns_rsp(const void *data,
+								uint16_t size)
+{
+	uint16_t handle = get_le16(data);
+
+	print_field("Handle: %d", handle);
+}
+
 struct mgmt_data {
 	uint16_t opcode;
 	const char *str;
@@ -13206,6 +13808,44 @@ static const struct mgmt_data mgmt_command_table[] = {
 	{ 0x0045, "Set PHY Configuration",
 				mgmt_set_phy_cmd, 4, true,
 				mgmt_null_rsp, 0, true },
+	{ 0x0046, "Load Blocked Keys" },
+	{ 0x0047, "Set Wideband Speech" },
+	{ 0x0048, "Read Controller Capabilities" },
+	{ 0x0049, "Read Experimental Features Information",
+				mgmt_null_cmd, 0, true,
+				mgmt_read_exp_features_info_rsp, 2, false },
+	{ 0x004a, "Set Experimental Feature",
+				mgmt_set_exp_feature_cmd, 17, true,
+				mgmt_set_exp_feature_rsp, 20, true },
+	{ 0x004b, "Read Default System Configuration" },
+	{ 0x004c, "Set Default System Configuration" },
+	{ 0x004d, "Read Default Runtime Configuration" },
+	{ 0x004e, "Set Default Runtime Configuration" },
+	{ 0x004f, "Get Device Flags",
+				mgmt_get_device_flags_cmd, 7, true,
+				mgmt_get_device_flags_rsp, 15, true},
+	{ 0x0050, "Set Device Flags",
+				mgmt_set_device_flags_cmd, 11, true,
+				mgmt_set_device_flags_rsp, 7, true},
+	{ 0x0051, "Read Advertisement Monitor Features",
+				mgmt_null_cmd, 0, true,
+				mgmt_read_adv_monitor_features_rsp, 13, false},
+	{ 0x0052, "Add Advertisement Patterns Monitor",
+				mgmt_add_adv_monitor_patterns_cmd, 1, false,
+				mgmt_add_adv_monitor_patterns_rsp, 2, true},
+	{ 0x0053, "Remove Advertisement Monitor",
+				mgmt_remove_adv_monitor_patterns_cmd, 2, true,
+				mgmt_remove_adv_monitor_patterns_rsp, 2, true},
+	{ 0x0054, "Add Extended Advertising Parameters",
+				mgmt_add_ext_adv_params_cmd, 18, false,
+				mgmt_add_ext_adv_params_rsp, 4, true },
+	{ 0x0055, "Add Extended Advertising Data",
+				mgmt_add_ext_adv_data_cmd, 3, false,
+				mgmt_add_ext_adv_data_rsp, 1, true },
+	{ 0x0056, "Add Advertisement Patterns Monitor With RSSI Threshold",
+				mgmt_add_adv_monitor_patterns_rssi_cmd, 8,
+									false,
+				mgmt_add_adv_monitor_patterns_rsp, 2, true},
 	{ }
 };
 
@@ -13379,6 +14019,9 @@ static void mgmt_device_disconnected_evt(const void *data, uint16_t size)
 		break;
 	case 0x04:
 		str = "Connection terminated due to authentication failure";
+		break;
+	case 0x05:
+		str = "Connection terminated by local host for suspend";
 		break;
 	default:
 		str = "Reserved";
@@ -13591,6 +14234,84 @@ static void mgmt_phy_changed_evt(const void *data, uint16_t size)
 	mgmt_print_phys("Selected PHYs", selected_phys);
 }
 
+static void mgmt_exp_feature_changed_evt(const void *data, uint16_t size)
+{
+	mgmt_print_exp_feature(data);
+}
+
+static void mgmt_device_flags_changed_evt(const void *data, uint16_t size)
+{
+	uint8_t type = get_u8(data + 6);
+	uint32_t supported_flags = get_le32(data + 7);
+	uint32_t current_flags = get_le32(data + 11);
+
+	mgmt_print_address(data, type);
+	mgmt_print_added_device_flags("Supported Flags", supported_flags);
+	mgmt_print_added_device_flags("Current Flags", current_flags);
+}
+
+static void mgmt_adv_monitor_added_evt(const void *data, uint16_t size)
+{
+	uint16_t handle = get_le16(data);
+
+	print_field("Handle: %d", handle);
+}
+
+static void mgmt_adv_monitor_removed_evt(const void *data, uint16_t size)
+{
+	uint16_t handle = get_le16(data);
+
+	print_field("Handle: %d", handle);
+}
+
+static void mgmt_controller_suspend_evt(const void *data, uint16_t size)
+{
+	uint8_t state = get_u8(data);
+	char *str;
+
+	switch (state) {
+	case 0x0:
+		str = "Controller running (failed to suspend)";
+		break;
+	case 0x1:
+		str = "Disconnected and not scanning";
+		break;
+	case 0x2:
+		str = "Page scanning and/or passive scanning";
+		break;
+	default:
+		str = "Unknown suspend state";
+		break;
+	}
+
+	print_field("Suspend state: %s (%d)", str, state);
+}
+
+static void mgmt_controller_resume_evt(const void *data, uint16_t size)
+{
+	uint8_t addr_type = get_u8(data + 6);
+	uint8_t wake_reason = get_u8(data + 7);
+	char *str;
+
+	switch (wake_reason) {
+	case 0x0:
+		str = "Resume from non-Bluetooth wake source";
+		break;
+	case 0x1:
+		str = "Wake due to unexpected event";
+		break;
+	case 0x2:
+		str = "Remote wake due to peer device connection";
+		break;
+	default:
+		str = "Unknown wake reason";
+		break;
+	}
+
+	print_field("Wake reason: %s (%d)", str, wake_reason);
+	mgmt_print_address(data, addr_type);
+}
+
 static const struct mgmt_data mgmt_event_table[] = {
 	{ 0x0001, "Command Complete",
 			mgmt_command_complete_evt, 3, false },
@@ -13668,6 +14389,18 @@ static const struct mgmt_data mgmt_event_table[] = {
 			mgmt_ext_controller_info_changed_evt, 2, false },
 	{ 0x0026, "PHY Configuration Changed",
 			mgmt_phy_changed_evt, 4, true },
+	{ 0x0027, "Experimental Feature Changed",
+			mgmt_exp_feature_changed_evt, 20, true },
+	{ 0x002a, "Device Flags Changed",
+			mgmt_device_flags_changed_evt, 15, true },
+	{ 0x002b, "Advertisement Monitor Added",
+			mgmt_adv_monitor_added_evt, 2, true },
+	{ 0x002c, "Advertisement Monitor Removed",
+			mgmt_adv_monitor_removed_evt, 2, true },
+	{ 0x002d, "Controller Suspended",
+			mgmt_controller_suspend_evt, 1, true },
+	{ 0x002e, "Controller Resumed",
+			mgmt_controller_resume_evt, 8, true },
 	{ }
 };
 

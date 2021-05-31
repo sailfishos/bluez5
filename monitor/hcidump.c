@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2011-2014  Intel Corporation
  *  Copyright (C) 2002-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -197,7 +184,11 @@ static void open_device(uint16_t index)
 		return;
 	}
 
-	mainloop_add_fd(data->fd, EPOLLIN, device_callback, data, free_data);
+	if (mainloop_add_fd(data->fd, EPOLLIN, device_callback,
+						data, free_data) < 0) {
+		close(data->fd);
+		free(data);
+	}
 }
 
 static void device_info(int fd, uint16_t index, uint8_t *type, uint8_t *bus,
@@ -406,8 +397,12 @@ int hcidump_tracing(void)
 		return -1;
 	}
 
-	mainloop_add_fd(data->fd, EPOLLIN, stack_internal_callback,
-							data, free_data);
+	if (mainloop_add_fd(data->fd, EPOLLIN, stack_internal_callback,
+							data, free_data) < 0) {
+		close(data->fd);
+		free(data);
+		return -1;
+	}
 
 	return 0;
 }

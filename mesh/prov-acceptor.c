@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2018-2019  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
  *
  */
 
@@ -120,7 +111,18 @@ static void acceptor_free(void)
 
 static void acp_prov_close(void *user_data, uint8_t reason)
 {
-	/* TODO: Handle Close */
+	struct mesh_prov_acceptor *rx_prov = user_data;
+
+	if (rx_prov != prov)
+		return;
+
+	if (reason == PROV_ERR_SUCCESS)
+		reason = PROV_ERR_UNEXPECTED_ERR;
+
+	if (prov->cmplt)
+		prov->cmplt(prov->caller_data, reason, NULL);
+
+	prov->cmplt = NULL;
 	acceptor_free();
 }
 
@@ -132,6 +134,7 @@ static void prov_to(struct l_timeout *timeout, void *user_data)
 	if (rx_prov != prov)
 		return;
 
+	l_timeout_remove(prov->timeout);
 	prov->timeout = NULL;
 
 	if (prov->cmplt && prov->trans_tx) {
@@ -180,7 +183,7 @@ static void swap_u256_bytes(uint8_t *u256)
 	}
 }
 
-static void prov_calc_secret(const uint8_t *pub, const uint8_t *priv,
+static bool prov_calc_secret(const uint8_t *pub, const uint8_t *priv,
 							uint8_t *secret)
 {
 	uint8_t tmp[64];
@@ -190,22 +193,31 @@ static void prov_calc_secret(const uint8_t *pub, const uint8_t *priv,
 	swap_u256_bytes(tmp);
 	swap_u256_bytes(tmp + 32);
 
-	ecdh_shared_secret(tmp, priv, secret);
+	if (!ecdh_shared_secret(tmp, priv, secret))
+		return false;
 
 	/* Convert to Mesh byte order */
 	swap_u256_bytes(secret);
+	return true;
 }
 
-static void acp_credentials(struct mesh_prov_acceptor *prov)
+static bool acp_credentials(struct mesh_prov_acceptor *prov)
 {
-	prov_calc_secret(prov->conf_inputs.prv_pub_key,
-			prov->private_key, prov->secret);
+	if (!memcmp(prov->conf_inputs.prv_pub_key,
+					prov->conf_inputs.dev_pub_key, 64))
+		return false;
 
-	mesh_crypto_s1(&prov->conf_inputs,
-			sizeof(prov->conf_inputs), prov->salt);
+	if (!prov_calc_secret(prov->conf_inputs.prv_pub_key,
+			prov->private_key, prov->secret))
+		return false;
 
-	mesh_crypto_prov_conf_key(prov->secret, prov->salt,
-			prov->calc_key);
+	if (!mesh_crypto_s1(&prov->conf_inputs,
+			sizeof(prov->conf_inputs), prov->salt))
+		return false;
+
+	if (!mesh_crypto_prov_conf_key(prov->secret, prov->salt,
+			prov->calc_key))
+		return false;
 
 	l_getrandom(prov->rand_auth_workspace, 16);
 
@@ -218,6 +230,7 @@ static void acp_credentials(struct mesh_prov_acceptor *prov)
 	print_packet("LocalRandom", prov->rand_auth_workspace, 16);
 	print_packet("ConfirmationSalt", prov->salt, 16);
 	print_packet("ConfirmationKey", prov->calc_key, 16);
+	return true;
 }
 
 static uint32_t digit_mod(uint8_t power)
@@ -272,6 +285,11 @@ static void static_cb(void *user_data, int err, uint8_t *key, uint32_t len)
 	memcpy(prov->rand_auth_workspace + 16, key, 16);
 	memcpy(prov->rand_auth_workspace + 32, key, 16);
 	prov->material |= MAT_RAND_AUTH;
+
+	if (prov->conf_inputs.start.auth_action == PROV_ACTION_IN_ALPHA) {
+		msg.opcode = PROV_INP_CMPLT;
+		prov->trans_tx(prov->trans_data, &msg.opcode, 1);
+	}
 }
 
 static void priv_key_cb(void *user_data, int err, uint8_t *key, uint32_t len)
@@ -298,8 +316,13 @@ static void priv_key_cb(void *user_data, int err, uint8_t *key, uint32_t len)
 	swap_u256_bytes(prov->conf_inputs.dev_pub_key + 32);
 
 	prov->material |= MAT_LOCAL_PRIVATE;
-	if ((prov->material & MAT_SECRET) == MAT_SECRET)
-		acp_credentials(prov);
+	if ((prov->material & MAT_SECRET) == MAT_SECRET) {
+		if (!acp_credentials(prov)) {
+			msg.opcode = PROV_FAILED;
+			msg.reason = PROV_ERR_UNEXPECTED_ERR;
+			prov->trans_tx(prov->trans_data, &msg, sizeof(msg));
+		}
+	}
 }
 
 static void send_caps(struct mesh_prov_acceptor *prov)
@@ -423,7 +446,10 @@ static void acp_prov_rx(void *user_data, const uint8_t *data, uint16_t len)
 		if ((prov->material & MAT_SECRET) != MAT_SECRET)
 			return;
 
-		acp_credentials(prov);
+		if (!acp_credentials(prov)) {
+			fail.reason = PROV_ERR_UNEXPECTED_ERR;
+			goto failure;
+		}
 
 		if (!prov->conf_inputs.start.pub_key)
 			send_pub_key(prov);
@@ -507,6 +533,13 @@ static void acp_prov_rx(void *user_data, const uint8_t *data, uint16_t len)
 		break;
 
 	case PROV_RANDOM: /* Random Value */
+
+		/* Disallow matching random values */
+		if (!memcmp(prov->rand_auth_workspace, data, 16)) {
+			fail.reason = PROV_ERR_INVALID_PDU;
+			goto failure;
+		}
+
 		/* Calculate Session key (needed later) while data is fresh */
 		mesh_crypto_prov_prov_salt(prov->salt, data,
 						prov->rand_auth_workspace,

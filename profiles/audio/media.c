@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -6,20 +7,6 @@
  *  Copyright (C) 2004-2009  Marcel Holtmann <marcel@holtmann.org>
  *  Copyright (C) 2011  BMW Car IT GmbH. All rights reserved.
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -86,6 +73,7 @@ struct media_adapter {
 
 struct endpoint_request {
 	struct media_endpoint	*endpoint;
+	struct media_transport	*transport;
 	DBusMessage		*msg;
 	DBusPendingCall		*call;
 	media_endpoint_cb_t	cb;
@@ -122,7 +110,7 @@ struct media_player {
 	char			*status;
 	uint32_t		position;
 	uint32_t		duration;
-	uint8_t			volume;
+	int8_t			volume;
 	GTimer			*timer;
 	bool			play;
 	bool			pause;
@@ -242,6 +230,20 @@ static void media_endpoint_exit(DBusConnection *connection, void *user_data)
 	media_endpoint_remove(endpoint);
 }
 
+static struct media_adapter *find_adapter(struct btd_device *device)
+{
+	GSList *l;
+
+	for (l = adapters; l; l = l->next) {
+		struct media_adapter *adapter = l->data;
+
+		if (adapter->btd_adapter == device_get_adapter(device))
+			return adapter;
+	}
+
+	return NULL;
+}
+
 static void clear_configuration(struct media_endpoint *endpoint,
 					struct media_transport *transport)
 {
@@ -300,6 +302,15 @@ static void endpoint_reply(DBusPendingCall *call, void *user_data)
 			return;
 		}
 
+		if (dbus_message_is_method_call(request->msg,
+					MEDIA_ENDPOINT_INTERFACE,
+					"SetConfiguration")) {
+			if (request->transport == NULL)
+				error("Expected to destroy transport");
+			else
+				media_transport_destroy(request->transport);
+		}
+
 		dbus_error_free(&err);
 		goto done;
 	}
@@ -339,6 +350,7 @@ done:
 
 static gboolean media_endpoint_async_call(DBusMessage *msg,
 					struct media_endpoint *endpoint,
+					struct media_transport *transport,
 					media_endpoint_cb_t cb,
 					void *user_data,
 					GDestroyNotify destroy)
@@ -360,6 +372,7 @@ static gboolean media_endpoint_async_call(DBusMessage *msg,
 									NULL);
 
 	request->endpoint = endpoint;
+	request->transport = transport;
 	request->msg = msg;
 	request->cb = cb;
 	request->destroy = destroy;
@@ -395,7 +408,8 @@ static gboolean select_configuration(struct media_endpoint *endpoint,
 					&capabilities, length,
 					DBUS_TYPE_INVALID);
 
-	return media_endpoint_async_call(msg, endpoint, cb, user_data, destroy);
+	return media_endpoint_async_call(msg, endpoint, NULL,
+						cb, user_data, destroy);
 }
 
 static int transport_device_cmp(gconstpointer data, gconstpointer user_data)
@@ -429,6 +443,33 @@ struct a2dp_config_data {
 	a2dp_endpoint_config_t cb;
 };
 
+int8_t media_player_get_device_volume(struct btd_device *device)
+{
+	struct avrcp_player *target_player;
+	struct media_adapter *adapter;
+	GSList *l;
+
+	if (!device)
+		return -1;
+
+	target_player = avrcp_get_target_player_by_device(device);
+	if (!target_player)
+		return -1;
+
+	adapter = find_adapter(device);
+	if (!adapter)
+		return -1;
+
+	for (l = adapter->players; l; l = l->next) {
+		struct media_player *mp = l->data;
+
+		if (mp->player == target_player)
+			return mp->volume;
+	}
+
+	return -1;
+}
+
 static gboolean set_configuration(struct media_endpoint *endpoint,
 					uint8_t *configuration, size_t size,
 					media_endpoint_cb_t cb,
@@ -442,6 +483,7 @@ static gboolean set_configuration(struct media_endpoint *endpoint,
 	const char *path;
 	DBusMessageIter iter;
 	struct media_transport *transport;
+	int8_t init_volume;
 
 	transport = find_device_transport(endpoint, device);
 
@@ -453,6 +495,9 @@ static gboolean set_configuration(struct media_endpoint *endpoint,
 					configuration, size, endpoint);
 	if (transport == NULL)
 		return FALSE;
+
+	init_volume = media_player_get_device_volume(device);
+	media_transport_update_volume(transport, init_volume);
 
 	msg = dbus_message_new_method_call(endpoint->sender, endpoint->path,
 						MEDIA_ENDPOINT_INTERFACE,
@@ -472,7 +517,8 @@ static gboolean set_configuration(struct media_endpoint *endpoint,
 
 	g_dbus_get_properties(conn, path, "org.bluez.MediaTransport1", &iter);
 
-	return media_endpoint_async_call(msg, endpoint, cb, user_data, destroy);
+	return media_endpoint_async_call(msg, endpoint, transport,
+						cb, user_data, destroy);
 }
 
 static void release_endpoint(struct media_endpoint *endpoint)
@@ -647,20 +693,6 @@ static gboolean endpoint_init_a2dp_sink(struct media_endpoint *endpoint,
 		return FALSE;
 
 	return TRUE;
-}
-
-static struct media_adapter *find_adapter(struct btd_device *device)
-{
-	GSList *l;
-
-	for (l = adapters; l; l = l->next) {
-		struct media_adapter *adapter = l->data;
-
-		if (adapter->btd_adapter == device_get_adapter(device))
-			return adapter;
-	}
-
-	return NULL;
 }
 
 static bool endpoint_properties_exists(const char *uuid,
@@ -1202,30 +1234,14 @@ static uint32_t get_duration(void *user_data)
 	return mp->duration;
 }
 
-static void set_volume(uint8_t volume, struct btd_device *dev, void *user_data)
+static void set_volume(int8_t volume, struct btd_device *dev, void *user_data)
 {
 	struct media_player *mp = user_data;
-	GSList *l;
 
 	if (mp->volume == volume)
 		return;
 
 	mp->volume = volume;
-
-	for (l = mp->adapter->endpoints; l; l = l->next) {
-		struct media_endpoint *endpoint = l->data;
-		struct media_transport *transport;
-
-		/* Volume is A2DP only */
-		if (endpoint->sep == NULL)
-			continue;
-
-		transport = find_device_transport(endpoint, dev);
-		if (transport == NULL)
-			continue;
-
-		media_transport_update_volume(transport, volume);
-	}
 }
 
 static bool media_player_send(struct media_player *mp, const char *name)
@@ -1850,6 +1866,7 @@ static struct media_player *media_player_create(struct media_adapter *adapter,
 	mp->sender = g_strdup(sender);
 	mp->path = g_strdup(path);
 	mp->timer = g_timer_new();
+	mp->volume = -1;
 
 	mp->watch = g_dbus_add_disconnect_watch(conn, sender,
 						media_player_exit, mp,

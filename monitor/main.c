@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2011-2014  Intel Corporation
  *  Copyright (C) 2002-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -43,6 +30,7 @@
 #include "analyze.h"
 #include "ellisys.h"
 #include "control.h"
+#include "display.h"
 
 static void signal_callback(int signum, void *user_data)
 {
@@ -69,6 +57,7 @@ static void usage(void)
 		"\t-d, --tty <tty>        Read data from TTY\n"
 		"\t-B, --tty-speed <rate> Set TTY speed (default 115200)\n"
 		"\t-V, --vendor <compid>  Set default company identifier\n"
+		"\t-M, --mgmt             Open channel for mgmt events\n"
 		"\t-t, --time             Show time instead of time offset\n"
 		"\t-T, --date             Show time and date information\n"
 		"\t-S, --sco              Dump SCO traffic\n"
@@ -79,6 +68,8 @@ static void usage(void)
 		"\t                       Read data from RTT\n"
 		"\t-R  --rtt [<address>],[<area>],[<name>]\n"
 		"\t                       RTT control block parameters\n"
+		"\t-C, --columns [width]  Output width if not a terminal\n"
+		"\t-c, --color [mode]     Output color: auto/always/never\n"
 		"\t-h, --help             Show help options\n");
 }
 
@@ -92,6 +83,8 @@ static const struct option main_options[] = {
 	{ "tty",       required_argument, NULL, 'd' },
 	{ "tty-speed", required_argument, NULL, 'B' },
 	{ "vendor",    required_argument, NULL, 'V' },
+	{ "mgmt",      no_argument,       NULL, 'M' },
+	{ "no-time",   no_argument,       NULL, 'N' },
 	{ "time",      no_argument,       NULL, 't' },
 	{ "date",      no_argument,       NULL, 'T' },
 	{ "sco",       no_argument,       NULL, 'S' },
@@ -100,6 +93,8 @@ static const struct option main_options[] = {
 	{ "no-pager",  no_argument,       NULL, 'P' },
 	{ "jlink",     required_argument, NULL, 'J' },
 	{ "rtt",       required_argument, NULL, 'R' },
+	{ "columns",   required_argument, NULL, 'C' },
+	{ "color",     required_argument, NULL, 'c' },
 	{ "todo",      no_argument,       NULL, '#' },
 	{ "version",   no_argument,       NULL, 'v' },
 	{ "help",      no_argument,       NULL, 'h' },
@@ -130,8 +125,9 @@ int main(int argc, char *argv[])
 		int opt;
 		struct sockaddr_un addr;
 
-		opt = getopt_long(argc, argv, "r:w:a:s:p:i:d:B:V:tTSAE:PJ:R:vh",
-							main_options, NULL);
+		opt = getopt_long(argc, argv,
+					"r:w:a:s:p:i:d:B:V:MNtTSAE:PJ:R:C:c:vh",
+					main_options, NULL);
 		if (opt < 0)
 			break;
 
@@ -180,6 +176,12 @@ int main(int argc, char *argv[])
 			str = optarg;
 			packet_set_fallback_manufacturer(atoi(str));
 			break;
+		case 'M':
+			filter_mask |= PACKET_FILTER_SHOW_MGMT_SOCKET;
+			break;
+		case 'N':
+			filter_mask &= ~PACKET_FILTER_SHOW_TIME_OFFSET;
+			break;
 		case 't':
 			filter_mask &= ~PACKET_FILTER_SHOW_TIME_OFFSET;
 			filter_mask |= PACKET_FILTER_SHOW_TIME;
@@ -207,6 +209,22 @@ int main(int argc, char *argv[])
 			break;
 		case 'R':
 			rtt = optarg;
+			break;
+		case 'C':
+			set_default_pager_num_columns(atoi(optarg));
+			break;
+		case 'c':
+			if (strcmp("always", optarg) == 0)
+				set_monitor_color(COLOR_ALWAYS);
+			else if (strcmp("never", optarg) == 0)
+				set_monitor_color(COLOR_NEVER);
+			else if (strcmp("auto", optarg) == 0)
+				set_monitor_color(COLOR_AUTO);
+			else {
+				fprintf(stderr, "Color option must be one of "
+						"auto/always/never\n");
+				return EXIT_FAILURE;
+			}
 			break;
 		case '#':
 			packet_todo();

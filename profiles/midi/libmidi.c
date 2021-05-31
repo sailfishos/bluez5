@@ -1,24 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2015,2016 Felipe F. Tonello <eu@felipetonello.com>
  *  Copyright (C) 2016 ROLI Ltd.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
- *
  *
  */
 
@@ -77,8 +63,13 @@ inline static void append_timestamp_high_maybe(struct midi_write_parser *parser)
 	if (midi_write_has_data(parser))
 		return;
 
-	parser->rtime = g_get_monotonic_time() / 1000; /* convert µs to ms */
-	timestamp_high |= (parser->rtime & 0x1F80) >> 7;
+	/* Make sure timesampt_high is assigned a non-zero value */
+	do {
+		/* convert µs to ms */
+		parser->rtime = g_get_monotonic_time() / 1000;
+		timestamp_high |= (parser->rtime & 0x1F80) >> 7;
+	} while (timestamp_high == 0x80);
+
 	/* set timestampHigh */
 	buffer_append_byte(&parser->midi_stream, timestamp_high);
 }
@@ -331,6 +322,30 @@ static size_t handle_end_of_sysex(struct midi_read_parser *parser,
 	return sysex_length + 1; /* +1 because of timestampLow */
 }
 
+/* Searches the end of a SysEx message that contains a timestampLow
+ * before the SysEx end byte. Returns the number of bytes of valid
+ * SysEx payload in the buffer.
+ */
+static size_t sysex_eox_len(const uint8_t *data, size_t size)
+{
+	size_t i = 0;
+
+	MIDI_ASSERT(size > 0);
+
+	if (data[i] == 0xF0)
+		i++;
+
+	/* Search for timestamp low */
+	while (i < size) {
+		if ((data[i] & 0x80)) {
+			i++;
+			break;
+		}
+		i++;
+	}
+
+	return (i < size && data[i] == 0xF7) ? i : 0;
+}
 
 
 size_t midi_read_raw(struct midi_read_parser *parser, const uint8_t *data,
@@ -368,14 +383,14 @@ size_t midi_read_raw(struct midi_read_parser *parser, const uint8_t *data,
 
 		/* System Common Messages */
 	case 0xF0: /* SysEx Start */ {
-		uint8_t *pos;
+		size_t sysex_length;
 
 		/* cleanup Running Status Message */
 		parser->rstatus = 0;
 
-		/* Avoid parsing if SysEx is contained in one BLE packet */
-		if ((pos = memchr(data + i, 0xF7, size - i))) {
-			const size_t sysex_length = pos - (data + i);
+		sysex_length = sysex_eox_len(data + i, size - i);
+		/* Search for End of SysEx message in one BLE message */
+		if (sysex_length > 0) {
 			midi_size = handle_end_of_sysex(parser, ev, data + i,
 			                                sysex_length);
 		} else {
@@ -424,10 +439,10 @@ size_t midi_read_raw(struct midi_read_parser *parser, const uint8_t *data,
 
 		/* Check for SysEx messages */
 		if (parser->sysex_stream.len > 0) {
-			uint8_t *pos;
+			size_t sysex_length;
 
-			if ((pos = memchr(data + i, 0xF7, size - i))) {
-				const size_t sysex_length = pos - (data + i);
+			sysex_length = sysex_eox_len(data + i, size - i);
+			if (sysex_length > 0) {
 				midi_size = handle_end_of_sysex(parser, ev, data + i,
 				                                sysex_length);
 			} else {

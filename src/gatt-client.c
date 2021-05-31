@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2014  Google Inc.
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
  *
  */
 
@@ -39,7 +30,7 @@
 
 #include "log.h"
 #include "error.h"
-#include "hcid.h"
+#include "btd.h"
 #include "adapter.h"
 #include "device.h"
 #include "src/shared/io.h"
@@ -1050,8 +1041,8 @@ static DBusMessage *characteristic_write_value(DBusConnection *conn,
 			return NULL;
 	}
 
-	if ((type && strcasecmp(type, "command")) || offset ||
-			!(chrc->props & BT_GATT_CHRC_PROP_WRITE_WITHOUT_RESP))
+	if ((type && strcasecmp(type, "command")) || offset || (!type &&
+			!(chrc->props & BT_GATT_CHRC_PROP_WRITE_WITHOUT_RESP)))
 		goto fail;
 
 	supported = true;
@@ -1545,6 +1536,12 @@ static DBusMessage *characteristic_start_notify(DBusConnection *conn,
 	const char *sender = dbus_message_get_sender(msg);
 	struct async_dbus_op *op;
 	struct notify_client *client;
+	struct btd_device *device = chrc->service->client->device;
+
+	if (device_is_disconnecting(device)) {
+		error("Device is disconnecting. StartNotify is not allowed.");
+		return btd_error_not_connected(msg);
+	}
 
 	if (chrc->notify_io)
 		return btd_error_not_permitted(msg, "Notify acquired");
@@ -2177,15 +2174,38 @@ static void eatt_connect(struct btd_gatt_client *client)
 	char addr[18];
 	int i;
 
-	if (bt_att_get_channels(att) == main_opts.gatt_channels)
+	if (bt_att_get_channels(att) == btd_opts.gatt_channels)
 		return;
 
 	ba2str(device_get_address(dev), addr);
 
-	DBG("Connection attempt to: %s", addr);
+	for (i = bt_att_get_channels(att); i < btd_opts.gatt_channels; i++) {
+		int defer_timeout = i + 1 < btd_opts.gatt_channels ? 1 : 0;
 
-	for (i = bt_att_get_channels(att); i < main_opts.gatt_channels; i++) {
+		DBG("Connection attempt to: %s defer %s", addr,
+					defer_timeout ? "true" : "false");
+
+		/* Attempt to connect using the Ext-Flowctl */
 		io = bt_io_connect(eatt_connect_cb, client, NULL, &gerr,
+					BT_IO_OPT_SOURCE_BDADDR,
+					btd_adapter_get_address(adapter),
+					BT_IO_OPT_SOURCE_TYPE,
+					btd_adapter_get_address_type(adapter),
+					BT_IO_OPT_DEST_BDADDR,
+					device_get_address(dev),
+					BT_IO_OPT_DEST_TYPE,
+					device_get_le_address_type(dev),
+					BT_IO_OPT_MODE, BT_IO_MODE_EXT_FLOWCTL,
+					BT_IO_OPT_PSM, BT_ATT_EATT_PSM,
+					BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_LOW,
+					BT_IO_OPT_MTU, btd_opts.gatt_mtu,
+					BT_IO_OPT_DEFER_TIMEOUT, defer_timeout,
+					BT_IO_OPT_INVALID);
+		if (!io) {
+			g_error_free(gerr);
+			gerr = NULL;
+			/* Fallback to legacy LE Mode */
+			io = bt_io_connect(eatt_connect_cb, client, NULL, &gerr,
 					BT_IO_OPT_SOURCE_BDADDR,
 					btd_adapter_get_address(adapter),
 					BT_IO_OPT_SOURCE_TYPE,
@@ -2196,13 +2216,14 @@ static void eatt_connect(struct btd_gatt_client *client)
 					device_get_le_address_type(dev),
 					BT_IO_OPT_PSM, BT_ATT_EATT_PSM,
 					BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_LOW,
-					BT_IO_OPT_MTU, main_opts.gatt_mtu,
+					BT_IO_OPT_MTU, btd_opts.gatt_mtu,
 					BT_IO_OPT_INVALID);
-		if (!io) {
-			error("EATT bt_io_connect(%s): %s", addr,
+			if (!io) {
+				error("EATT bt_io_connect(%s): %s", addr,
 							gerr->message);
-			g_error_free(gerr);
-			return;
+				g_error_free(gerr);
+				return;
+			}
 		}
 
 		g_io_channel_unref(io);

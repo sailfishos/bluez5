@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2019  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
  *
  */
 
@@ -660,9 +651,24 @@ static const struct mesh_crypto_test s8_6_2 = {
 #define INVAL	COLOR_YELLOW "INVALID" COLOR_OFF
 
 #define EVALCMP(a, b, l)	memcmp((a), (b), (l)) ? FAIL : PASS
-#define EVALSTR(a, b)		(a) && (b) ? (strcmp((a), (b)) ? FAIL : PASS) : INVAL
-#define EVALNUM(a, b)		a == b ? PASS : FAIL
+#define EXITCMP(a, b, l)	do { if (memcmp((a), (b), (l))) \
+					exit(1); \
+				} while (0)
+
+#define EVALSTR(a, b)	(((a) && (b)) ? (strcmp((a), (b)) ? FAIL : PASS) \
+								: INVAL)
+#define EXITSTR(a, b)	do { if ((a) && (b)) { \
+					if (strcmp((a), (b))) \
+						exit(1); \
+				} else \
+					exit(1); \
+			} while (0)
+
+#define EVALNUM(a, b)	(((a) == (b)) ? PASS : FAIL)
+#define EXITNUM(a, b)	do { if (a != b) exit(1); } while (0)
+
 #define EVALBOOLNOTBOTH(a, b)	!(a && b) ? PASS : FAIL
+#define EXITBOOLNOTBOTH(a, b)	do { if (!!(a && b)) exit(1); } while (0)
 
 static void verify_data(const char *label, unsigned int indent,
 			const char *sample, const uint8_t *data, size_t size)
@@ -673,6 +679,7 @@ static void verify_data(const char *label, unsigned int indent,
 	l_info("%-20s =%*c%s", label, 1 + (indent * 2), ' ', sample);
 	l_info("%-20s  %*c%s => %s", "", 1 + (indent * 2), ' ', str,
 							EVALSTR(sample, str));
+	EXITSTR(sample, str);
 	l_free(str);
 }
 
@@ -684,6 +691,7 @@ static void verify_bool_not_both(const char *label, unsigned int indent,
 	l_info("%-20s  %*c%s => %s", "", 1 + (indent * 2), ' ',
 						data ? "true" : "false",
 						EVALBOOLNOTBOTH(sample, data));
+	EXITBOOLNOTBOTH(sample, data);
 }
 
 static void verify_uint8(const char *label, unsigned int indent,
@@ -692,6 +700,7 @@ static void verify_uint8(const char *label, unsigned int indent,
 	l_info("%-20s =%*c%02x", label, 1 + (indent * 2), ' ', sample);
 	l_info("%-20s  %*c%02x => %s", "", 1 + (indent * 2), ' ', data,
 							EVALNUM(sample, data));
+	EXITNUM(sample, data);
 }
 
 static void verify_uint16(const char *label, unsigned int indent,
@@ -700,6 +709,7 @@ static void verify_uint16(const char *label, unsigned int indent,
 	l_info("%-20s =%*c%04x", label, 1 + (indent * 2), ' ', sample);
 	l_info("%-20s  %*c%04x => %s", "", 1 + (indent * 2), ' ', data,
 							EVALNUM(sample, data));
+	EXITNUM(sample, data);
 }
 
 static void verify_uint24(const char *label, unsigned int indent,
@@ -708,6 +718,7 @@ static void verify_uint24(const char *label, unsigned int indent,
 	l_info("%-20s =%*c%06x", label, 1 + (indent * 2), ' ', sample);
 	l_info("%-20s  %*c%06x => %s", "", 1 + (indent * 2), ' ', data,
 							EVALNUM(sample, data));
+	EXITNUM(sample, data);
 }
 
 static void verify_uint32(const char *label, unsigned int indent,
@@ -716,6 +727,7 @@ static void verify_uint32(const char *label, unsigned int indent,
 	l_info("%-20s =%*c%08x", label, 1 + (indent * 2), ' ', sample);
 	l_info("%-20s  %*c%08x => %s", "", 1 + (indent * 2), ' ', data,
 							EVALNUM(sample, data));
+	EXITNUM(sample, data);
 }
 
 static void verify_uint64(const char *label, unsigned int indent,
@@ -726,6 +738,7 @@ static void verify_uint64(const char *label, unsigned int indent,
 	l_info("%-20s  %*c%16llx => %s", "", 1 + (indent * 2), ' ',
 						(long long unsigned int) data,
 						EVALNUM(sample, data));
+	EXITNUM(sample, data);
 }
 
 static void show_str(const char *label, unsigned int indent,
@@ -780,8 +793,8 @@ static void check_encrypt_segment(const struct mesh_crypto_test *keys,
 	uint8_t priv_rand[16];
 	uint8_t packet[29];
 	uint8_t packet_len;
-	uint64_t net_mic64;
-	uint32_t hdr, net_mic32;
+	uint32_t hdr;
+	uint64_t net_mic64, net_mic32;
 	size_t net_msg_len;
 	uint8_t key_aid = keys->key_aid | (keys->akf ? KEY_ID_AKF : 0x00);
 
@@ -857,13 +870,12 @@ static void check_encrypt_segment(const struct mesh_crypto_test *keys,
 	net_msg_len = len + 2;
 	show_data("TransportPayload", 7, packet + 7, net_msg_len);
 
-	mesh_crypto_network_encrypt(keys->ctl,
-			keys->net_ttl, keys->net_seq[0],
-			keys->net_src,
-			keys->iv_index, enc_key,
-			packet + 7, len + 2, packet + 7,
-			keys->ctl ? (void *)&net_mic64 :
-			(void *)&net_mic32);
+	mesh_crypto_packet_encrypt(packet, packet_len,
+						enc_key,
+						keys->iv_index, false,
+						keys->ctl, keys->net_ttl,
+						keys->net_seq[0],
+						keys->net_src);
 
 	mesh_crypto_privacy_counter(keys->iv_index, packet + 7, priv_rand);
 
@@ -883,20 +895,22 @@ static void check_encrypt_segment(const struct mesh_crypto_test *keys,
 	verify_data("EncNetworkPayload", 7, keys->net_msg[0],
 			packet + 7, net_msg_len);
 	if (keys->ctl) {
+		net_mic64 = l_get_be64(packet + 7 + net_msg_len);
 		verify_uint64("NetworkMIC", 7 + net_msg_len,
-				keys->net_mic64, net_mic64);
+						keys->net_mic64, net_mic64);
 		net_msg_len += 8;
 	} else {
+		net_mic32 = l_get_be32(packet + 7 + net_msg_len);
 		verify_uint32("NetworkMIC", 7 + net_msg_len,
-				keys->net_mic32[0], net_mic32);
+						keys->net_mic32[0], net_mic32);
 		net_msg_len += 4;
 	}
 
 	show_data("PreObsPayload", 1, packet + 1, 6 + net_msg_len);
-	mesh_crypto_network_obfuscate(priv_key, priv_rand,
-			keys->ctl,
-			keys->net_ttl, keys->net_seq[0],
-			keys->net_src, packet + 1);
+	mesh_crypto_network_obfuscate(packet, priv_key,
+					keys->iv_index,
+					keys->ctl, keys->net_ttl,
+					keys->net_seq[0], keys->net_src);
 	show_data("PostObsPayload", 1, packet + 1, 6 + net_msg_len);
 
 	packet[0] = (keys->iv_index & 0x01) << 7 | nid;
@@ -1017,27 +1031,25 @@ static void check_encrypt(const struct mesh_crypto_test *keys)
 		app_msg = l_util_from_hexstring(keys->app_msg, &app_msg_len);
 
 		if (keys->szmic) {
-			seg_max = SEG_MAX(app_msg_len + 8);
+			seg_max = SEG_MAX(keys->segmented, app_msg_len + 8);
 			enc_msg = l_malloc(app_msg_len + 8);
-			mesh_crypto_application_encrypt(key_aid, keys->app_seq,
-					keys->net_src, keys->net_dst,
-					keys->iv_index,
-					keys->akf ? app_key : dev_key,
-					aad, aad_len,
-					app_msg, app_msg_len,
-					enc_msg, &app_mic64, sizeof(app_mic64));
-			l_put_be64(app_mic64, enc_msg + app_msg_len);
+
+			mesh_crypto_payload_encrypt(aad, app_msg,
+					enc_msg, app_msg_len,
+					keys->net_src, keys->net_dst, key_aid,
+					keys->app_seq, keys->iv_index,
+					keys->szmic,
+					keys->akf ? app_key : dev_key);
 		} else {
-			seg_max = SEG_MAX(app_msg_len + 4);
+			seg_max = SEG_MAX(keys->segmented, app_msg_len + 4);
 			enc_msg = l_malloc(app_msg_len + 4);
-			mesh_crypto_application_encrypt(key_aid, keys->app_seq,
-					keys->net_src, keys->net_dst,
-					keys->iv_index,
-					keys->akf ? app_key : dev_key,
-					aad, aad_len,
-					app_msg, app_msg_len,
-					enc_msg, &app_mic32, sizeof(app_mic32));
-			l_put_be32(app_mic32, enc_msg + app_msg_len);
+
+			mesh_crypto_payload_encrypt(aad, app_msg,
+					enc_msg, app_msg_len,
+					keys->net_src, keys->net_dst, key_aid,
+					keys->app_seq, keys->iv_index,
+					keys->szmic,
+					keys->akf ? app_key : dev_key);
 		}
 
 		if (keys->dev_key && !keys->akf)
@@ -1057,10 +1069,12 @@ static void check_encrypt(const struct mesh_crypto_test *keys)
 		verify_data("EncryptedAppPayload", 0, keys->enc_msg, enc_msg,
 								app_msg_len);
 		if (keys->szmic) {
+			app_mic64 = l_get_be64(enc_msg + app_msg_len);
 			verify_uint64("ApplicationMIC", app_msg_len,
 						keys->app_mic64, app_mic64);
 			app_msg_len += 8;
 		} else {
+			app_mic32 = l_get_be32(enc_msg + app_msg_len);
 			verify_uint32("ApplicationMIC", app_msg_len,
 						keys->app_mic32, app_mic32);
 			app_msg_len += 4;
@@ -1172,20 +1186,18 @@ static void check_encrypt(const struct mesh_crypto_test *keys)
 					keys->net_seq[i], keys->net_src,
 					keys->iv_index, net_nonce);
 
-			verify_data("TransportData", 9, keys->trans_pkt[i],
+		verify_data("TransportData", 9, keys->trans_pkt[i],
 							packet + 9, seg_len);
 
 		verify_uint16("DST", 7, keys->net_dst, l_get_be16(packet + 7));
 		net_msg_len = seg_len + 2;
 		show_data("TransportPayload", 7, packet + 7, net_msg_len);
 
-		mesh_crypto_network_encrypt(keys->ctl,
-				keys->net_ttl, keys->net_seq[i],
-				keys->net_src,
-				keys->iv_index, enc_key,
-				packet + 7, seg_len + 2, packet + 7,
-				keys->ctl ? (void *)&net_mic64 :
-							(void *)&net_mic32);
+		mesh_crypto_packet_encrypt(packet, packet_len, enc_key,
+						keys->iv_index, false,
+						keys->ctl, keys->net_ttl,
+						keys->net_seq[i],
+						keys->net_src);
 
 		mesh_crypto_privacy_counter(keys->iv_index, packet + 7,
 								priv_rand);
@@ -1208,20 +1220,23 @@ static void check_encrypt(const struct mesh_crypto_test *keys)
 		verify_data("EncNetworkPayload", 7, keys->net_msg[i],
 						packet + 7, net_msg_len);
 		if (keys->ctl) {
+			net_mic64 = l_get_be64(packet + packet_len - 8);
 			verify_uint64("NetworkMIC", 7 + net_msg_len,
 						keys->net_mic64, net_mic64);
 			net_msg_len += 8;
 		} else {
+			net_mic32 = l_get_be32(packet + packet_len - 4);
 			verify_uint32("NetworkMIC", 7 + net_msg_len,
 						keys->net_mic32[i], net_mic32);
 			net_msg_len += 4;
 		}
 
 		show_data("PreObsPayload", 1, packet + 1, 6 + net_msg_len);
-		mesh_crypto_network_obfuscate(priv_key, priv_rand,
-				keys->ctl,
-				keys->net_ttl, keys->net_seq[i],
-				keys->net_src, packet + 1);
+		mesh_crypto_network_obfuscate(packet, priv_key,
+					keys->iv_index,
+					keys->ctl, keys->net_ttl,
+					keys->net_seq[i], keys->net_src);
+
 		show_data("PostObsPayload", 1, packet + 1, 6 + net_msg_len);
 
 		packet[0] = (keys->iv_index & 0x01) << 7 | nid;
@@ -1242,7 +1257,7 @@ done:
 
 static void check_decrypt_segment(const struct mesh_crypto_test *keys,
 				uint16_t seg, uint16_t seg_max,
-				const uint8_t *pkt, uint8_t pkt_len,
+				uint8_t *pkt, uint8_t pkt_len,
 				const uint8_t *msg, uint8_t msg_len,
 				uint8_t *enc_key, uint8_t *priv_key,
 				uint8_t nid)
@@ -1274,26 +1289,30 @@ static void check_decrypt_segment(const struct mesh_crypto_test *keys,
 	if (ctl) {
 		net_mic64 = l_get_be64(pkt + pkt_len - 8);
 		show_data("EncryptedPayload", 7, pkt + 7, pkt_len - 7 - 8);
-		mesh_crypto_network_decrypt(ctl, ttl, seq,
-				src, keys->iv_index, enc_key,
-				pkt + 7, pkt_len - 7, net_clr + 7,
-				&calc_net_mic64,
-				sizeof(calc_net_mic64));
+
+		mesh_crypto_packet_decrypt(pkt, pkt_len,
+							enc_key,
+							keys->iv_index, false,
+							ctl, ttl, seq,
+							src);
+		calc_net_mic64 = l_get_be64(pkt + pkt_len - 8);
+
 		verify_uint64("NetworkMIC", pkt_len - 8, net_mic64,
-				calc_net_mic64);
+						net_mic64 ^ calc_net_mic64);
 		show_data("DecryptedPayload", 7, net_clr + 7, pkt_len - 7 - 8);
 	} else {
 		net_mic32 = l_get_be32(pkt + pkt_len - 4);
 		show_data("EncryptedPayload", 7, pkt + 7, pkt_len - 7 - 4);
 
-		mesh_crypto_network_decrypt(ctl, ttl, seq,
-				src, keys->iv_index, enc_key,
-				pkt + 7, pkt_len - 7, net_clr + 7,
-				&calc_net_mic32,
-				sizeof(calc_net_mic32));
+		mesh_crypto_packet_decrypt(pkt, pkt_len,
+							enc_key,
+							keys->iv_index, false,
+							ctl, ttl, seq,
+							src);
+		calc_net_mic32 = l_get_be32(pkt + pkt_len - 4);
 
 		verify_uint32("NetworkMIC", pkt_len - 4, net_mic32,
-				calc_net_mic32);
+						net_mic32 ^ calc_net_mic32);
 		show_data("DecryptedPayload", 7, net_clr + 7, pkt_len - 7 - 4);
 	}
 
@@ -1387,15 +1406,11 @@ static void check_decrypt(const struct mesh_crypto_test *keys)
 	uint8_t *app_key;
 	uint8_t *net_key;
 	uint8_t enc_key[16];
-	uint8_t net_nonce[13];
-	uint8_t app_nonce[13];
 	uint8_t priv_key[16];
-	uint8_t priv_rand[16];
 	uint8_t p[9];
 	size_t p_len;
 	uint8_t *packet = NULL;
 	size_t packet_len;
-	const uint8_t *net_hdr;
 	uint8_t *net_msg;
 	uint8_t net_msg_len;
 	uint16_t app_msg_len = 0;
@@ -1469,9 +1484,6 @@ static void check_decrypt(const struct mesh_crypto_test *keys)
 		goto done;
 	}
 
-	mesh_crypto_application_nonce(keys->app_seq, keys->net_src,
-						keys->net_dst, keys->iv_index,
-						keys->szmic, app_nonce);
 	app_msg = l_malloc(384);
 
 	seg_max = (sizeof(keys->packet) / sizeof(keys->packet[0])) - 1;
@@ -1483,19 +1495,13 @@ static void check_decrypt(const struct mesh_crypto_test *keys)
 		if (keys->segmented)
 			l_info(COLOR_YELLOW "Segment-%d" COLOR_OFF, i);
 
-		mesh_crypto_network_nonce(keys->frnd, keys->net_ttl,
-				keys->net_seq[i], keys->net_src, keys->iv_index,
-				net_nonce);
 		l_free(packet);
 		packet = l_util_from_hexstring(keys->packet[i], &packet_len);
 
-		net_hdr = packet + 1;
 		net_msg = packet + 7;
 		net_msg_len = packet_len - 7;
 
-		mesh_crypto_privacy_counter(keys->iv_index, net_msg, priv_rand);
-
-		mesh_crypto_network_clarify(priv_key, priv_rand, net_hdr,
+		mesh_crypto_network_clarify(packet, priv_key, keys->iv_index,
 				&net_ctl, &net_ttl, &net_seq, &net_src);
 
 		show_str("Packet", 0, keys->packet[i]);
@@ -1504,29 +1510,31 @@ static void check_decrypt(const struct mesh_crypto_test *keys)
 			net_mic64 = l_get_be64(packet + packet_len - 8);
 			show_data("NetworkMessage", 7, net_msg,
 							net_msg_len - 8);
-			mesh_crypto_network_decrypt(net_ctl, net_ttl, net_seq,
-					net_src, keys->iv_index, enc_key,
-					net_msg, net_msg_len, net_msg,
-					&calc_net_mic64,
-					sizeof(calc_net_mic64));
+			mesh_crypto_packet_decrypt(packet, packet_len,
+						enc_key,
+						keys->iv_index, false,
+						net_ctl, net_ttl,
+						net_seq,
+						net_src);
+			calc_net_mic64 = l_get_be64(packet + packet_len - 8);
 			net_msg_len -= 8;
 			verify_uint64("NetworkMIC", 7 + net_msg_len, net_mic64,
-								calc_net_mic64);
+						net_mic64 ^ calc_net_mic64);
 			show_data("DecryptedNetwork", 7, net_msg, net_msg_len);
 		} else {
 			net_mic32 = l_get_be32(packet + packet_len - 4);
 			show_data("NetworkMessage", 7, net_msg,
 							net_msg_len - 4);
-
-			mesh_crypto_network_decrypt(net_ctl, net_ttl, net_seq,
-					net_src, keys->iv_index, enc_key,
-					net_msg, net_msg_len, net_msg,
-					&calc_net_mic32,
-					sizeof(calc_net_mic32));
-
+			mesh_crypto_packet_decrypt(packet, packet_len,
+						enc_key,
+						keys->iv_index, false,
+						net_ctl, net_ttl,
+						net_seq,
+						net_src);
+			calc_net_mic32 = l_get_be32(packet + packet_len - 4);
 			net_msg_len -= 4;
 			verify_uint32("NetworkMIC", 7 + net_msg_len, net_mic32,
-								calc_net_mic32);
+						net_mic32 ^ calc_net_mic32);
 			show_data("DecryptedNetwork", 7, net_msg, net_msg_len);
 		}
 
@@ -1645,8 +1653,8 @@ static void check_decrypt(const struct mesh_crypto_test *keys)
 				packet, &pkt_len);
 		verify_data("TransportData", 9, keys->trans_pkt[i], packet + 9,
 								payload_len);
-		mesh_crypto_packet_encode(packet, pkt_len, enc_key,
-						keys->iv_index, priv_key);
+		mesh_crypto_packet_encode(packet, pkt_len, keys->iv_index,
+							enc_key, priv_key);
 		mesh_crypto_packet_label(packet, pkt_len, keys->iv_index, nid);
 
 		verify_data("Encoded-Packet", 0, keys->packet[i], packet,
@@ -1666,39 +1674,45 @@ static void check_decrypt(const struct mesh_crypto_test *keys)
 							app_msg_len - 8);
 		app_mic64 = l_get_be64(app_msg + app_msg_len - 8);
 
-		mesh_crypto_application_decrypt(
-				keys_aid | (keys->akf ? KEY_ID_AKF : 0),
-				seqZero, net_src,
-				net_dst, keys->iv_index,
-				keys->akf ? app_key : dev_key,
+		mesh_crypto_payload_decrypt(
 				aad, aad_len,
 				app_msg, app_msg_len,
-				app_msg, &calc_app_mic64,
-				sizeof(calc_app_mic64));
+				true,
+				net_src, net_dst,
+				keys->akf ? keys_aid | KEY_ID_AKF : APP_AID_DEV,
+				seqZero,
+				keys->iv_index,
+				app_msg,
+				keys->akf ? app_key : dev_key);
+
+		calc_app_mic64 = l_get_be64(app_msg + app_msg_len - 8);
 
 		verify_data("Payload", 0, keys->app_msg, app_msg,
 							app_msg_len - 8);
 		verify_uint64("ApplicationMIC", app_msg_len - 8, app_mic64,
-								calc_app_mic64);
+						app_mic64 ^ calc_app_mic64);
 	} else if (!keys->ctl) {
 		verify_data("EncryptedPayload", 0, keys->enc_msg, app_msg,
 							app_msg_len - 4);
 		app_mic32 = l_get_be32(app_msg + app_msg_len - 4);
 
-		mesh_crypto_application_decrypt(
-				keys_aid | (keys->akf ? KEY_ID_AKF : 0),
-				seqZero, net_src,
-				net_dst, keys->iv_index,
-				keys->akf ? app_key : dev_key,
+		mesh_crypto_payload_decrypt(
 				aad, aad_len,
 				app_msg, app_msg_len,
-				app_msg, &calc_app_mic32,
-				sizeof(calc_app_mic32));
+				false,
+				net_src, net_dst,
+				keys->akf ? keys_aid | KEY_ID_AKF : APP_AID_DEV,
+				seqZero,
+				keys->iv_index,
+				app_msg,
+				keys->akf ? app_key : dev_key);
+
+		calc_app_mic32 = l_get_be32(app_msg + app_msg_len - 4);
 
 		verify_data("Payload", 0, keys->app_msg, app_msg,
 							app_msg_len - 4);
 		verify_uint32("ApplicationMIC", app_msg_len - 4, app_mic32,
-								calc_app_mic32);
+						app_mic32 ^ calc_app_mic32);
 	}
 
 done:

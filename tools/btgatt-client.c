@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2014  Google Inc.
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -231,7 +218,8 @@ static struct client *client_create(int fd, uint16_t mtu)
 								NULL, NULL);
 
 	if (verbose) {
-		bt_att_set_debug(cli->att, att_debug_cb, "att: ", NULL);
+		bt_att_set_debug(cli->att, BT_ATT_DEBUG_VERBOSE, att_debug_cb,
+								"att: ", NULL);
 		bt_gatt_client_set_debug(cli->gatt, gatt_debug_cb, "gatt: ",
 									NULL);
 	}
@@ -1492,8 +1480,8 @@ static void usage(void)
 		"\t-d, --dest <addr>\t\tSpecify the destination address\n"
 		"\t-t, --type [random|public] \tSpecify the LE address type\n"
 		"\t-m, --mtu <mtu> \t\tThe ATT MTU to use\n"
-		"\t-s, --security-level <sec> \tSet security level (low|"
-								"medium|high)\n"
+		"\t-s, --security-level <sec> \tSet security level (low|medium|"
+								"high|fips)\n"
 		"\t-v, --verbose\t\t\tEnable extra logging\n"
 		"\t-h, --help\t\t\tDisplay help\n");
 }
@@ -1537,6 +1525,8 @@ int main(int argc, char *argv[])
 				sec = BT_SECURITY_MEDIUM;
 			else if (strcmp(optarg, "high") == 0)
 				sec = BT_SECURITY_HIGH;
+			else if (strcmp(optarg, "fips") == 0)
+				sec = BT_SECURITY_FIPS;
 			else {
 				fprintf(stderr, "Invalid security level\n");
 				return EXIT_FAILURE;

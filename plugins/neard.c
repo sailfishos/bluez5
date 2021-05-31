@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2012-2013  Tieto Poland
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -42,7 +29,7 @@
 #include "src/device.h"
 #include "src/eir.h"
 #include "src/agent.h"
-#include "src/hcid.h"
+#include "src/btd.h"
 
 #define NEARD_NAME "org.neard"
 #define NEARD_PATH "/"
@@ -233,9 +220,9 @@ static DBusMessage *create_request_oob_reply(struct btd_adapter *adapter,
 	len = eir_create_oob(btd_adapter_get_address(adapter),
 				btd_adapter_get_name(adapter),
 				btd_adapter_get_class(adapter), hash,
-				randomizer, main_opts.did_vendor,
-				main_opts.did_product, main_opts.did_version,
-				main_opts.did_source,
+				randomizer, btd_opts.did_vendor,
+				btd_opts.did_product, btd_opts.did_version,
+				btd_opts.did_source,
 				btd_adapter_get_services(adapter), eir);
 
 	reply = dbus_message_new_method_return(msg);

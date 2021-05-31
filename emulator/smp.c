@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2013-2014  Intel Corporation
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -521,7 +508,8 @@ static void pairing_cfm(struct smp_conn *conn, const void *data, uint16_t len)
 
 	if (conn->out) {
 		memset(rsp, 0, sizeof(rsp));
-		smp_send(conn, BT_L2CAP_SMP_PAIRING_RANDOM, rsp, sizeof(rsp));
+		smp_send(conn, BT_L2CAP_SMP_PAIRING_RANDOM, conn->prnd,
+					sizeof(conn->prnd));
 	} else {
 		bt_crypto_c1(conn->smp->crypto, conn->tk, conn->prnd,
 				conn->prsp, conn->preq, conn->ia_type,
@@ -558,8 +546,6 @@ static uint8_t sc_random(struct smp_conn *conn)
 
 static void pairing_rnd(struct smp_conn *conn, const void *data, uint16_t len)
 {
-	uint8_t rsp[16];
-
 	memcpy(conn->rrnd, data + 1, 16);
 
 	if (conn->sc) {
@@ -576,8 +562,8 @@ static void pairing_rnd(struct smp_conn *conn, const void *data, uint16_t len)
 	if (conn->out)
 		return;
 
-	memset(rsp, 0, sizeof(rsp));
-	smp_send(conn, BT_L2CAP_SMP_PAIRING_RANDOM, rsp, sizeof(rsp));
+	smp_send(conn, BT_L2CAP_SMP_PAIRING_RANDOM, conn->prnd,
+				sizeof(conn->prnd));
 }
 
 static void encrypt_info(struct smp_conn *conn, const void *data, uint16_t len)
@@ -848,8 +834,22 @@ void smp_conn_encrypted(void *conn_data, uint8_t encrypt)
 	distribute_keys(conn);
 }
 
-void *smp_conn_add(void *smp_data, uint16_t handle, const uint8_t *ia,
-			const uint8_t *ra, uint8_t addr_type, bool conn_init)
+static uint8_t type2hci(uint8_t addr_type)
+{
+	switch (addr_type) {
+	case BDADDR_BREDR:
+	case BDADDR_LE_PUBLIC:
+		return LE_PUBLIC_ADDRESS;
+	case BDADDR_LE_RANDOM:
+		return LE_RANDOM_ADDRESS;
+	}
+
+	return 0x00;
+}
+
+void *smp_conn_add(void *smp_data, uint16_t handle,
+			const uint8_t *ia, uint8_t ia_type,
+			const uint8_t *ra, uint8_t ra_type, bool conn_init)
 {
 	struct smp *smp = smp_data;
 	struct smp_conn *conn;
@@ -862,13 +862,15 @@ void *smp_conn_add(void *smp_data, uint16_t handle, const uint8_t *ia,
 
 	conn->smp = smp;
 	conn->handle = handle;
-	conn->addr_type = addr_type;
 	conn->out = conn_init;
+	conn->addr_type = conn_init ? ia_type : ra_type;
 
-	conn->ia_type = LE_PUBLIC_ADDRESS;
-	conn->ra_type = LE_PUBLIC_ADDRESS;
+	conn->ia_type = type2hci(ia_type);
+	conn->ra_type = type2hci(ra_type);
 	memcpy(conn->ia, ia, 6);
 	memcpy(conn->ra, ra, 6);
+
+	bt_crypto_random_bytes(smp->crypto, conn->prnd, sizeof(conn->prnd));
 
 	return conn;
 }

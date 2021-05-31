@@ -41,7 +41,7 @@
 #include "src/plugin.h"
 #include "src/log.h"
 #include "src/adapter.h"
-#include "src/hcid.h"
+#include "src/btd.h"
 #include "src/sdpd.h"
 
 static GKeyFile *load_config(const char *file)
@@ -137,7 +137,7 @@ static gsize read_line(GHashTable *hash, gchar *buf, gsize len, gsize pos)
 
 	chunk = read_variable_name(buf, len, cur);
 	if (chunk < 0) {
-		warn("Invalid name at position %u, skipping line", cur);
+		warn("Invalid name at position %"G_GSIZE_FORMAT", skipping line", cur);
 		cur += skip_until_eol(buf, len, cur);
 		cur++;
 		goto out;
@@ -148,7 +148,7 @@ static gsize read_line(GHashTable *hash, gchar *buf, gsize len, gsize pos)
 
 	chunk = expect_char(buf, len, cur, '=');
 	if (chunk < 0) {
-		warn("Assignment not found at position %u, skipping line", cur);
+		warn("Assignment not found at position %"G_GSIZE_FORMAT", skipping line", cur);
 		cur += skip_until_eol(buf, len, cur);
 		cur++;
 		goto out;
@@ -188,7 +188,7 @@ static GHashTable *load_os_release(void)
 	while (pos < len) {
 		gsize chunk = read_line(hash, buf, len, pos);
 		if (!chunk) {
-			error("Error parsing /etc/os-release (offset %u)", pos);
+			error("Error parsing /etc/os-release (offset %"G_GSIZE_FORMAT")", pos);
 			goto cleanup;
 		}
 		pos += chunk;
@@ -249,11 +249,11 @@ static void set_did(struct btd_adapter *adapter, gpointer user_data)
 	(void) user_data;
 
 	DBG("%p", adapter);
-	if (main_opts.did_source)
-		btd_adapter_set_did(adapter, main_opts.did_vendor,
-					main_opts.did_product,
-					main_opts.did_version,
-					main_opts.did_source);
+	if (btd_opts.did_source)
+		btd_adapter_set_did(adapter, btd_opts.did_vendor,
+					btd_opts.did_product,
+					btd_opts.did_version,
+					btd_opts.did_source);
 }
 
 static int jolla_did_init(void)
@@ -284,16 +284,16 @@ static int jolla_did_init(void)
 			bcd |= MIN(min, 9) << 4;
 			bcd |= MIN(sub, 9);
 			DBG("Setting version ID to %04x", bcd);
-			main_opts.did_version = bcd;
+			btd_opts.did_version = bcd;
 
 			/* Need to push the version to adapters (for
 			   EIR) as well as SDP server */
 
 			adapter_foreach(set_did, NULL);
-			update_device_id(main_opts.did_vendor,
-						main_opts.did_product,
-						main_opts.did_version,
-						main_opts.did_source);
+			update_device_id(btd_opts.did_vendor,
+						btd_opts.did_product,
+						btd_opts.did_version,
+						btd_opts.did_source);
 
 		} else {
 			error("Cannot get OS version");

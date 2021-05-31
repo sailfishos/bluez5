@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2006-2010  Nokia Corporation
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -226,13 +213,21 @@ struct avdtp_service_capability *avdtp_service_cap_new(uint8_t category,
 struct avdtp_remote_sep *avdtp_register_remote_sep(struct avdtp *session,
 							uint8_t seid,
 							uint8_t type,
-							GSList *caps);
+							GSList *caps,
+							bool delay_reporting);
+
+typedef void (*avdtp_remote_sep_destroy_t)(void *user_data);
+
+void avdtp_remote_sep_set_destroy(struct avdtp_remote_sep *sep, void *user_data,
+					avdtp_remote_sep_destroy_t destroy);
 
 uint8_t avdtp_get_seid(struct avdtp_remote_sep *sep);
 
 uint8_t avdtp_get_type(struct avdtp_remote_sep *sep);
 
 struct avdtp_service_capability *avdtp_get_codec(struct avdtp_remote_sep *sep);
+
+bool avdtp_get_delay_reporting(struct avdtp_remote_sep *sep);
 
 int avdtp_discover(struct avdtp *session, avdtp_discover_cb_t cb,
 			void *user_data);
@@ -310,3 +305,4 @@ struct avdtp_server *avdtp_get_server(struct avdtp_local_sep *lsep);
 
 struct avdtp *avdtp_new(GIOChannel *chan, struct btd_device *device,
 							struct queue *lseps);
+uint16_t avdtp_get_version(struct avdtp *session);

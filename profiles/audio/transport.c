@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2006-2007  Nokia Corporation
  *  Copyright (C) 2004-2009  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -86,7 +73,7 @@ struct media_owner {
 struct a2dp_transport {
 	struct avdtp		*session;
 	uint16_t		delay;
-	uint16_t		volume;
+	int8_t			volume;
 };
 
 struct media_transport {
@@ -634,7 +621,7 @@ static gboolean volume_exists(const GDBusPropertyTable *property, void *data)
 	struct media_transport *transport = data;
 	struct a2dp_transport *a2dp = transport->data;
 
-	return a2dp->volume <= 127;
+	return a2dp->volume >= 0;
 }
 
 static gboolean get_volume(const GDBusPropertyTable *property,
@@ -642,8 +629,9 @@ static gboolean get_volume(const GDBusPropertyTable *property,
 {
 	struct media_transport *transport = data;
 	struct a2dp_transport *a2dp = transport->data;
+	uint16_t volume = (uint16_t)a2dp->volume;
 
-	dbus_message_iter_append_basic(iter, DBUS_TYPE_UINT16, &a2dp->volume);
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_UINT16, &volume);
 
 	return TRUE;
 }
@@ -654,27 +642,20 @@ static void set_volume(const GDBusPropertyTable *property,
 {
 	struct media_transport *transport = data;
 	struct a2dp_transport *a2dp = transport->data;
-	uint16_t volume;
+	uint16_t arg;
+	int8_t volume;
 	bool notify;
 
-	if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_UINT16) {
-		g_dbus_pending_property_error(id,
-					ERROR_INTERFACE ".InvalidArguments",
-					"Invalid arguments in method call");
-		return;
-	}
+	if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_UINT16)
+		goto error;
 
-	dbus_message_iter_get_basic(iter, &volume);
-
-	if (volume > 127) {
-		g_dbus_pending_property_error(id,
-					ERROR_INTERFACE ".InvalidArguments",
-					"Invalid arguments in method call");
-		return;
-	}
+	dbus_message_iter_get_basic(iter, &arg);
+	if (arg > INT8_MAX)
+		goto error;
 
 	g_dbus_pending_property_success(id);
 
+	volume = (int8_t)arg;
 	if (a2dp->volume == volume)
 		return;
 
@@ -688,6 +669,11 @@ static void set_volume(const GDBusPropertyTable *property,
 						"Volume");
 
 	avrcp_set_volume(transport->device, volume, notify);
+	return;
+
+error:
+	g_dbus_pending_property_error(id, ERROR_INTERFACE ".InvalidArguments",
+					"Invalid arguments in method call");
 }
 
 static gboolean endpoint_exists(const GDBusPropertyTable *property, void *data)
@@ -931,16 +917,19 @@ struct btd_device *media_transport_get_dev(struct media_transport *transport)
 	return transport->device;
 }
 
-uint16_t media_transport_get_volume(struct media_transport *transport)
+int8_t media_transport_get_volume(struct media_transport *transport)
 {
 	struct a2dp_transport *a2dp = transport->data;
 	return a2dp->volume;
 }
 
 void media_transport_update_volume(struct media_transport *transport,
-								uint8_t volume)
+								int8_t volume)
 {
 	struct a2dp_transport *a2dp = transport->data;
+
+	if (volume < 0)
+		return;
 
 	/* Check if volume really changed */
 	if (a2dp->volume == volume)
@@ -953,12 +942,12 @@ void media_transport_update_volume(struct media_transport *transport,
 					MEDIA_TRANSPORT_INTERFACE, "Volume");
 }
 
-uint8_t media_transport_get_device_volume(struct btd_device *dev)
+int8_t media_transport_get_device_volume(struct btd_device *dev)
 {
 	GSList *l;
 
 	if (dev == NULL)
-		return 128;
+		return -1;
 
 	for (l = transports; l; l = l->next) {
 		struct media_transport *transport = l->data;
@@ -974,11 +963,11 @@ uint8_t media_transport_get_device_volume(struct btd_device *dev)
 }
 
 void media_transport_update_device_volume(struct btd_device *dev,
-								uint8_t volume)
+								int8_t volume)
 {
 	GSList *l;
 
-	if (dev == NULL)
+	if (dev == NULL || volume < 0)
 		return;
 
 	for (l = transports; l; l = l->next) {

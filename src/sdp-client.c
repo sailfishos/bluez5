@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2004-2011  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -34,6 +21,7 @@
 #include "lib/sdp_lib.h"
 
 #include "btio/btio.h"
+#include "shared/timeout.h"
 #include "log.h"
 #include "sdp-client.h"
 
@@ -44,7 +32,7 @@ struct cached_sdp_session {
 	bdaddr_t src;
 	bdaddr_t dst;
 	sdp_session_t *session;
-	guint timer;
+	unsigned int timer;
 	guint io_id;
 };
 
@@ -57,7 +45,7 @@ static void cleanup_cached_session(struct cached_sdp_session *cached)
 	g_free(cached);
 }
 
-static gboolean cached_session_expired(gpointer user_data)
+static bool cached_session_expired(gpointer user_data)
 {
 	struct cached_sdp_session *cached = user_data;
 
@@ -79,7 +67,7 @@ static sdp_session_t *get_cached_sdp_session(const bdaddr_t *src,
 		if (bacmp(&c->src, src) || bacmp(&c->dst, dst))
 			continue;
 
-		g_source_remove(c->timer);
+		timeout_remove(c->timer);
 		g_source_remove(c->io_id);
 
 		session = c->session;
@@ -98,7 +86,7 @@ static gboolean disconnect_watch(GIOChannel *chan, GIOCondition cond,
 {
 	struct cached_sdp_session *cached = user_data;
 
-	g_source_remove(cached->timer);
+	timeout_remove(cached->timer);
 	cleanup_cached_session(cached);
 
 	return FALSE;
@@ -120,9 +108,9 @@ static void cache_sdp_session(bdaddr_t *src, bdaddr_t *dst,
 
 	cached_sdp_sessions = g_slist_append(cached_sdp_sessions, cached);
 
-	cached->timer = g_timeout_add_seconds(CACHE_TIMEOUT,
+	cached->timer = timeout_add_seconds(CACHE_TIMEOUT,
 						cached_session_expired,
-						cached);
+						cached, NULL);
 
 	/* Watch the connection state during cache timeout */
 	sk = sdp_get_socket(session);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -6,20 +7,6 @@
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
  *  Copyright (C) 2009  Joao Paulo Rechi Vita
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -193,12 +180,15 @@ static void stream_setup_complete(struct avdtp *session, struct a2dp_sep *sep,
 }
 
 static void select_complete(struct avdtp *session, struct a2dp_sep *sep,
-			GSList *caps, void *user_data)
+			GSList *caps, int err, void *user_data)
 {
 	struct source *source = user_data;
 	int id;
 
 	source->connect_id = 0;
+
+	if (err)
+		goto failed;
 
 	if (caps == NULL)
 		goto failed;
@@ -272,8 +262,11 @@ gboolean source_setup_stream(struct btd_service *service,
 
 	source->connect_id = a2dp_discover(source->session, discovery_complete,
 								source);
-	if (source->connect_id == 0)
+	if (source->connect_id == 0) {
+		avdtp_unref(source->session);
+		source->session = NULL;
 		return FALSE;
+	}
 
 	return TRUE;
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2010 GSyC/LibreSoft, Universidad Rey Juan Carlos.
  *  Copyright (C) 2010 Signove
  *  Copyright (C) 2014 Intel Corporation. All rights reserved.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -39,6 +26,7 @@
 #include "bluetooth/l2cap.h"
 #include "btio/btio.h"
 #include "src/log.h"
+#include "src/shared/timeout.h"
 
 #include "mcap.h"
 
@@ -56,7 +44,7 @@
 
 #define RELEASE_TIMER(__mcl) do {		\
 	if (__mcl->tid) {			\
-		g_source_remove(__mcl->tid);	\
+		timeout_remove(__mcl->tid);	\
 		__mcl->tid = 0;			\
 	}					\
 } while(0)
@@ -496,7 +484,7 @@ static int compare_mdl(gconstpointer a, gconstpointer b)
 		return 1;
 }
 
-static gboolean wait_response_timer(gpointer data)
+static bool wait_response_timer(gpointer data)
 {
 	struct mcap_mcl *mcl = data;
 
@@ -562,8 +550,8 @@ gboolean mcap_create_mdl(struct mcap_mcl *mcl,
 
 	mcl->mdls = g_slist_insert_sorted(mcl->mdls, mcap_mdl_ref(mdl),
 								compare_mdl);
-	mcl->tid = g_timeout_add_seconds(RESPONSE_TIMER, wait_response_timer,
-									mcl);
+	mcl->tid = timeout_add_seconds(RESPONSE_TIMER, wait_response_timer,
+					mcl, NULL);
 	return TRUE;
 }
 
@@ -600,8 +588,8 @@ gboolean mcap_reconnect_mdl(struct mcap_mdl *mdl,
 	mcl->state = MCL_ACTIVE;
 	mcl->priv_data = con;
 
-	mcl->tid = g_timeout_add_seconds(RESPONSE_TIMER, wait_response_timer,
-									mcl);
+	mcl->tid = timeout_add_seconds(RESPONSE_TIMER, wait_response_timer,
+					mcl, NULL);
 	return TRUE;
 }
 
@@ -620,8 +608,8 @@ static gboolean send_delete_req(struct mcap_mcl *mcl,
 
 	mcl->priv_data = con;
 
-	mcl->tid = g_timeout_add_seconds(RESPONSE_TIMER, wait_response_timer,
-									mcl);
+	mcl->tid = timeout_add_seconds(RESPONSE_TIMER, wait_response_timer,
+					mcl, NULL);
 	return TRUE;
 }
 
@@ -731,8 +719,8 @@ gboolean mcap_mdl_abort(struct mcap_mdl *mdl, mcap_mdl_notify_cb abort_cb,
 	con->user_data = user_data;
 
 	mcl->priv_data = con;
-	mcl->tid = g_timeout_add_seconds(RESPONSE_TIMER, wait_response_timer,
-									mcl);
+	mcl->tid = timeout_add_seconds(RESPONSE_TIMER, wait_response_timer,
+					mcl, NULL);
 	return TRUE;
 }
 
@@ -1741,7 +1729,7 @@ gboolean mcap_connect_mdl(struct mcap_mdl *mdl, uint8_t mode,
 		return FALSE;
 	}
 
-	if ((mode != L2CAP_MODE_ERTM) && (mode != L2CAP_MODE_STREAMING)) {
+	if ((mode != BT_IO_MODE_ERTM) && (mode != BT_IO_MODE_STREAMING)) {
 		g_set_error(err, MCAP_ERROR, MCAP_ERROR_INVALID_ARGS,
 						"Invalid MDL configuration");
 		return FALSE;
@@ -1933,7 +1921,7 @@ gboolean mcap_create_mcl(struct mcap_instance *mi,
 				BT_IO_OPT_PSM, ccpsm,
 				BT_IO_OPT_MTU, MCAP_CC_MTU,
 				BT_IO_OPT_SEC_LEVEL, mi->sec,
-				BT_IO_OPT_MODE, L2CAP_MODE_ERTM,
+				BT_IO_OPT_MODE, BT_IO_MODE_ERTM,
 				BT_IO_OPT_INVALID);
 	if (!mcl->cc) {
 		mcl->ctrl &= ~MCAP_CTRL_CONN;
@@ -2111,7 +2099,7 @@ struct mcap_instance *mcap_create_instance(const bdaddr_t *src,
 				BT_IO_OPT_PSM, ccpsm,
 				BT_IO_OPT_MTU, MCAP_CC_MTU,
 				BT_IO_OPT_SEC_LEVEL, sec,
-				BT_IO_OPT_MODE, L2CAP_MODE_ERTM,
+				BT_IO_OPT_MODE, BT_IO_MODE_ERTM,
 				BT_IO_OPT_INVALID);
 	if (!mi->ccio) {
 		error("%s", (*gerr)->message);

@@ -1,19 +1,9 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2019-2020  Intel Corporation. All rights reserved.
- *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
  *
  *
  */
@@ -65,6 +55,7 @@ static struct l_queue *groups;
 
 static void *send_data;
 static model_send_msg_func_t send_msg;
+static delete_remote_func_t mgr_del_remote;
 
 static void *key_data;
 static key_send_func_t send_key_msg;
@@ -191,6 +182,15 @@ static const char *opcode_str(uint32_t opcode)
 	return cmd->desc;
 }
 
+static void reset_remote_node(uint16_t addr)
+{
+	uint8_t ele_cnt = remote_del_node(addr);
+
+	bt_shell_printf("Remote removed (primary %4.4x)\n", addr);
+	if (ele_cnt && mgr_del_remote)
+		mgr_del_remote(addr, ele_cnt);
+}
+
 static void free_request(void *a)
 {
 	struct pending_req *req = a;
@@ -222,6 +222,10 @@ static void wait_rsp_timeout(struct l_timeout *timeout, void *user_data)
 	bt_shell_printf("No response for \"%s\" from %4.4x\n",
 						req->cmd->desc, req->addr);
 
+	/* Node reset case: delete the remote even if there is no response */
+	if (req->cmd->opcode == OP_NODE_RESET)
+		reset_remote_node(req->addr);
+
 	l_queue_remove(requests, req);
 	free_request(req);
 }
@@ -249,7 +253,8 @@ static uint32_t print_mod_id(uint8_t *data, bool vendor, const char *offset)
 
 	if (!vendor) {
 		mod_id = get_le16(data);
-		bt_shell_printf("%sModel ID\t%4.4x\n", offset, mod_id);
+		bt_shell_printf("%sModel ID\t%4.4x \"%s\"\n",
+				offset, mod_id, sig_model_string(mod_id));
 		mod_id = VENDOR_ID_MASK | mod_id;
 	} else {
 		mod_id = get_le16(data + 2);
@@ -337,7 +342,8 @@ static void print_pub(uint16_t ele_addr, uint32_t mod_id,
 		bt_shell_printf("\tModel: %4.4x\n",
 				(uint16_t) (mod_id & 0xffff));
 
-	bt_shell_printf("\tApp Key Idx: %4.4x\n", pub->app_idx);
+	bt_shell_printf("\tApp Key Idx: %u (0x%3.3x)\n", pub->app_idx,
+								pub->app_idx);
 	bt_shell_printf("\tTTL: %2.2x\n", pub->ttl);
 }
 
@@ -360,6 +366,27 @@ static void print_sub_list(uint16_t addr, bool is_vendor, uint8_t *data,
 		bt_shell_printf("\t\t%4.4x\n ", get_le16(data + i));
 }
 
+static void print_appkey_list(uint16_t len, uint8_t *data)
+{
+	uint16_t app_idx;
+
+	bt_shell_printf("AppKeys:\n");
+
+	while (len >= 3) {
+		app_idx = l_get_le16(data) & 0xfff;
+		bt_shell_printf("\t%u (0x%3.3x)\n", app_idx, app_idx);
+		app_idx = l_get_le16(data + 1) >> 4;
+		bt_shell_printf("\t%u (0x%3.3x)\n", app_idx, app_idx);
+		data += 3;
+		len -= 3;
+	}
+
+	if (len == 2) {
+		app_idx = l_get_le16(data) & 0xfff;
+		bt_shell_printf("\t %u (0x%3.3x)\n", app_idx, app_idx);
+	}
+}
+
 static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 							uint16_t len)
 {
@@ -370,7 +397,6 @@ static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 	uint32_t mod_id;
 	struct model_pub pub;
 	int n;
-	uint16_t i;
 	struct pending_req *req;
 
 	if (mesh_opcode_get(data, len, &opcode, &n)) {
@@ -381,15 +407,15 @@ static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 
 	bt_shell_printf("Received %s (len %u)\n", opcode_str(opcode), len);
 
-	req = get_req_by_rsp(src, (opcode & ~OP_UNRELIABLE));
+	req = get_req_by_rsp(src, opcode);
 	if (req) {
 		cmd = req->cmd;
-		free_request(req);
 		l_queue_remove(requests, req);
+		free_request(req);
 	} else
 		cmd = NULL;
 
-	switch (opcode & ~OP_UNRELIABLE) {
+	switch (opcode) {
 	default:
 		return false;
 
@@ -399,6 +425,8 @@ static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 
 		print_composition(data, len);
 
+		if (!mesh_db_node_set_composition(src, data, len))
+			bt_shell_printf("Failed to save node composition!\n");
 		break;
 
 	case OP_APPKEY_STATUS:
@@ -410,8 +438,8 @@ static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 		net_idx = get_le16(data + 1) & 0xfff;
 		app_idx = get_le16(data + 2) >> 4;
 
-		bt_shell_printf("NetKey\t%3.3x\n", net_idx);
-		bt_shell_printf("AppKey\t%3.3x\n", app_idx);
+		bt_shell_printf("NetKey\t%u (0x%3.3x)\n", net_idx, net_idx);
+		bt_shell_printf("AppKey\t%u (0x%3.3x)\n", app_idx, app_idx);
 
 		if (data[0] != MESH_STATUS_SUCCESS)
 			break;
@@ -435,24 +463,16 @@ static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 
 		bt_shell_printf("AppKey List (node %4.4x) Status %s\n",
 						src, mesh_status_str(data[0]));
-		bt_shell_printf("NetKey %3.3x\n", l_get_le16(&data[1]));
+
+		net_idx = l_get_le16(&data[1]);
+		bt_shell_printf("NetKey %u (0x%3.3x)\n", net_idx, net_idx);
 		len -= 3;
 
 		if (data[0] != MESH_STATUS_SUCCESS)
 			break;
 
-		bt_shell_printf("AppKeys:\n");
 		data += 3;
-
-		while (len >= 3) {
-			bt_shell_printf("\t%3.3x\n", l_get_le16(data) & 0xfff);
-			bt_shell_printf("\t%3.3x\n", l_get_le16(data + 1) >> 4);
-			len -= 3;
-			data += 3;
-		}
-
-		if (len == 2)
-			bt_shell_printf("\t%3.3x\n", l_get_le16(data));
+		print_appkey_list(len, data);
 
 		break;
 
@@ -464,7 +484,7 @@ static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 						mesh_status_str(data[0]));
 		net_idx = get_le16(data + 1) & 0xfff;
 
-		bt_shell_printf("\tNetKey %3.3x\n", net_idx);
+		bt_shell_printf("\tNetKey %u (0x%3.3x)\n", net_idx, net_idx);
 
 		if (data[0] != MESH_STATUS_SUCCESS)
 			break;
@@ -490,16 +510,30 @@ static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 
 		while (len >= 3) {
 			net_idx = l_get_le16(data) & 0xfff;
-			bt_shell_printf("\t%3.3x\n", net_idx);
+			bt_shell_printf("\t%u (0x%3.3x)\n", net_idx, net_idx);
 			net_idx = l_get_le16(data + 1) >> 4;
-			bt_shell_printf("\t%3.3x\n", net_idx);
+			bt_shell_printf("\t%u (0x%3.3x)\n", net_idx, net_idx);
 			data += 3;
 			len -= 3;
 		}
 
-		if (len == 2)
-			bt_shell_printf("\t%3.3x\n", l_get_le16(data) & 0xfff);
+		if (len == 2) {
+			net_idx = l_get_le16(data) & 0xfff;
+			bt_shell_printf("\t %u (0x%3.3x)\n", net_idx, net_idx);
+		}
 
+		break;
+
+	case OP_CONFIG_KEY_REFRESH_PHASE_STATUS:
+		if (len != 4)
+			break;
+
+		bt_shell_printf("Node %4.4x Key Refresh Phase status %s\n", src,
+						mesh_status_str(data[0]));
+		net_idx = get_le16(data + 1) & 0xfff;
+
+		bt_shell_printf("\tNetKey %u (0x%3.3x)\n", net_idx, net_idx);
+		bt_shell_printf("\tKR Phase %2.2x\n", data[3]);
 		break;
 
 	case OP_MODEL_APP_STATUS:
@@ -515,7 +549,7 @@ static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 
 		print_mod_id(data + 5, len == 9, "");
 
-		bt_shell_printf("AppIdx\t\t%3.3x\n ", app_idx);
+		bt_shell_printf("AppIdx\t\t%u (0x%3.3x)\n ", app_idx, app_idx);
 
 		break;
 
@@ -647,9 +681,10 @@ static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 		bt_shell_printf("Element Addr\t%4.4x\n", get_le16(data + 1));
 		bt_shell_printf("Model ID\t%4.4x\n", get_le16(data + 3));
 
-		for (i = 5; i < len; i += 2)
-			bt_shell_printf("Model AppIdx\t%4.4x\n",
-							get_le16(data + i));
+		data += 5;
+		len -= 5;
+		print_appkey_list(len, data);
+
 		break;
 
 	case OP_VEND_MODEL_APP_LIST:
@@ -665,9 +700,10 @@ static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 		bt_shell_printf("Element Addr\t%4.4x\n", get_le16(data + 1));
 		print_mod_id(data + 3, true, "");
 
-		for (i = 7; i < len; i += 2)
-			bt_shell_printf("Model AppIdx\t%4.4x\n",
-							get_le16(data + i));
+		data += 7;
+		len -= 7;
+		print_appkey_list(len, data);
+
 		break;
 
 	/* Per Mesh Profile 4.3.2.63 */
@@ -683,7 +719,8 @@ static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 		bt_shell_printf("Period\t\t%2.2x\n", data[4]);
 		bt_shell_printf("TTL\t\t%2.2x\n", data[5]);
 		bt_shell_printf("Features\t%4.4x\n", get_le16(data + 6));
-		bt_shell_printf("Net_Idx\t%4.4x\n", get_le16(data + 8));
+		net_idx = get_le16(data + 8);
+		bt_shell_printf("Net_Idx\t%u (0x%3.3x)\n", net_idx, net_idx);
 		break;
 
 	/* Per Mesh Profile 4.3.2.66 */
@@ -707,17 +744,15 @@ static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 		if (len != 1)
 			return true;
 
-		bt_shell_printf("Node %4.4x: Network transmit cnt %d, steps %d\n",
+		bt_shell_printf("Node %4.4x: Net transmit cnt %d, steps %d\n",
 				src, data[0] & 7, data[0] >> 3);
 		break;
 
 	/* Per Mesh Profile 4.3.2.54 */
 	case OP_NODE_RESET_STATUS:
-		if (len != 1)
-			return true;
 
-		bt_shell_printf("Node %4.4x reset status %s\n",
-				src, mesh_status_str(data[0]));
+		bt_shell_printf("Node %4.4x is reset\n", src);
+		reset_remote_node(src);
 
 		break;
 
@@ -933,6 +968,74 @@ static void cmd_netkey_del(int argc, char *argv[])
 	n += 2;
 
 	if (!config_send(msg, n, OP_NETKEY_DELETE))
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+
+	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static void cmd_kr_phase_get(int argc, char *argv[])
+{
+	uint16_t n;
+	uint8_t msg[32];
+
+	if (IS_UNASSIGNED(target)) {
+		bt_shell_printf("Destination not set\n");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	n = mesh_opcode_set(OP_CONFIG_KEY_REFRESH_PHASE_GET, msg);
+
+	if (read_input_parameters(argc, argv) != 1)
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+
+	put_le16(parms[0], msg + n);
+	n += 2;
+
+	if (!config_send(msg, n, OP_CONFIG_KEY_REFRESH_PHASE_GET))
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+
+	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static void cmd_kr_phase_set(int argc, char *argv[])
+{
+	uint16_t n;
+	uint8_t msg[32];
+	uint8_t phase;
+
+	if (IS_UNASSIGNED(target)) {
+		bt_shell_printf("Destination not set\n");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	n = mesh_opcode_set(OP_CONFIG_KEY_REFRESH_PHASE_SET, msg);
+
+	if (read_input_parameters(argc, argv) != 2)
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+
+	if (parms[1] != KEY_REFRESH_PHASE_TWO &&
+				parms[1] != KEY_REFRESH_PHASE_THREE) {
+		bt_shell_printf("Invalid KR transition value %u\n", parms[1]);
+		bt_shell_printf("Allowed values: 2 or 3\n");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	if (!keys_get_net_key_phase((uint16_t) parms[0], &phase)) {
+		bt_shell_printf("Subnet KR state not found\n");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	if (phase != (parms[1] % KEY_REFRESH_PHASE_THREE)) {
+		bt_shell_printf("Subnet's phase must be updated first!\n");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	put_le16(parms[0], msg + n);
+	n += 2;
+
+	msg[n++] = parms[1];
+
+	if (!config_send(msg, n, OP_CONFIG_KEY_REFRESH_PHASE_SET))
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
@@ -1367,14 +1470,13 @@ static void subscription_cmd(int argc, char *argv[], uint32_t opcode)
 
 	grp = l_queue_find(groups, match_group_addr, L_UINT_TO_PTR(sub_addr));
 
-	if (!grp && opcode != OP_CONFIG_MODEL_SUB_DELETE) {
-		grp = add_group(sub_addr);
-
-		if (!grp && IS_VIRTUAL(sub_addr)) {
-			print_virtual_not_found(sub_addr);
-			return bt_shell_noninteractive_quit(EXIT_FAILURE);
-		}
+	if (!grp && IS_VIRTUAL(sub_addr)) {
+		print_virtual_not_found(sub_addr);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 	}
+
+	if (!grp && opcode != OP_CONFIG_MODEL_SUB_DELETE)
+		grp = add_group(sub_addr);
 
 	if (IS_VIRTUAL(sub_addr)) {
 		if (opcode == OP_CONFIG_MODEL_SUB_ADD)
@@ -1656,7 +1758,41 @@ static void cmd_friend_get(int argc, char *argv[])
 
 static void cmd_node_reset(int argc, char *argv[])
 {
-	cmd_default(OP_NODE_RESET);
+	uint16_t n, i;
+	uint8_t msg[8];
+	struct pending_req *req;
+
+	if (IS_UNASSIGNED(target)) {
+		bt_shell_printf("Destination not set\n");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	/* Cannot remet self */
+	if (target == 0x0001) {
+		bt_shell_printf("Resetting self not allowed\n");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	n = mesh_opcode_set(OP_NODE_RESET, msg);
+
+	req = l_new(struct pending_req, 1);
+	req->addr = target;
+	req->cmd = get_cmd(OP_NODE_RESET);
+
+	/*
+	 * As a courtesy to the remote node, send the reset command
+	 * several times. Treat this as a single request with a longer
+	 * response timeout.
+	 */
+	req->timer = l_timeout_create(rsp_timeout * 2,
+				wait_rsp_timeout, req, NULL);
+
+	l_queue_push_tail(requests, req);
+
+	for (i = 0; i < 5; i++)
+		send_msg(send_data, target, APP_IDX_DEV_REMOTE, msg, n);
+
+	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
 static void cmd_netkey_get(int argc, char *argv[])
@@ -1742,6 +1878,10 @@ static const struct bt_shell_menu cfg_menu = {
 				"Delete NetKey"},
 	{"netkey-get", NULL, cmd_netkey_get,
 				"List NetKeys known to the node"},
+	{"kr-phase-get", "<net_idx>", cmd_kr_phase_get,
+				"Get Key Refresh phase of a NetKey"},
+	{"kr-phase-set", "<net_idx> <phase>", cmd_kr_phase_set,
+				"Set Key Refresh phase transition of a NetKey"},
 	{"appkey-add", "<app_idx>", cmd_appkey_add,
 				"Add AppKey"},
 	{"appkey-update", "<app_idx>", cmd_appkey_update,
@@ -1831,13 +1971,15 @@ static struct model_info cli_info = {
 	.vendor_id = VENDOR_ID_INVALID
 };
 
-struct model_info *cfgcli_init(key_send_func_t key_send, void *user_data)
+struct model_info *cfgcli_init(key_send_func_t key_send,
+				delete_remote_func_t del_node, void *user_data)
 {
 	if (!key_send)
 		return NULL;
 
 	send_key_msg = key_send;
 	key_data = user_data;
+	mgr_del_remote = del_node;
 	requests = l_queue_new();
 	groups = mesh_db_load_groups();
 	bt_shell_add_submenu(&cfg_menu);

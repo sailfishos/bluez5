@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,12 @@
  *  Copyright (C) 2018  Intel Corporation. All rights reserved.
  *
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
  */
 
 #define BLUEZ_MESH_PATH "/org/bluez/mesh"
 #define BLUEZ_MESH_SERVICE "org.bluez.mesh"
+
+#define DEFAULT_DBUS_TIMEOUT	30
 
 bool dbus_init(struct l_dbus *dbus);
 struct l_dbus *dbus_get_bus(void);
@@ -31,3 +24,8 @@ bool dbus_match_interface(struct l_dbus_message_iter *interfaces,
 							const char *match);
 struct l_dbus_message *dbus_error(struct l_dbus_message *msg, int err,
 						const char *description);
+void dbus_send_with_timeout(struct l_dbus *dbus, struct l_dbus_message *msg,
+						l_dbus_message_func_t cb,
+						void *user_data,
+						l_dbus_destroy_func_t destroy,
+						unsigned int seconds);

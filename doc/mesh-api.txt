@@ -27,7 +27,12 @@ Methods:
 		The uuid parameter is a 16-byte array that contains Device UUID.
 		This UUID must be unique (at least from the daemon perspective),
 		therefore attempting to call this function using already
-		registered UUID results in an error.
+		registered UUID results in an error. The composition of the UUID
+		octets must be in compliance with RFC 4122.
+
+		When provisioning finishes, the daemon will call either
+		JoinComplete or JoinFailed method on object implementing
+		org.bluez.mesh.Application1 interface.
 
 		PossibleErrors:
 			org.bluez.mesh.Error.InvalidArguments
@@ -112,6 +117,7 @@ Methods:
 			org.bluez.mesh.Error.InvalidArguments
 			org.bluez.mesh.Error.NotFound,
 			org.bluez.mesh.Error.AlreadyExists,
+			org.bluez.mesh.Error.Busy,
 			org.bluez.mesh.Error.Failed
 
 	void Leave(uint64 token)
@@ -122,8 +128,10 @@ Methods:
 
 		PossibleErrors:
 			org.bluez.mesh.Error.InvalidArguments
+			org.bluez.mesh.Error.NotFound
+			org.bluez.mesh.Error.Busy
 
-	uint64 token CreateNetwork(object app_root, array{byte}[16] uuid)
+	void CreateNetwork(object app_root, array{byte}[16] uuid)
 
 		This is the first method that an application calls to become
 		a Provisioner node, and a Configuration Client on a newly
@@ -142,24 +150,23 @@ Methods:
 		The uuid parameter is a 16-byte array that contains Device UUID.
 		This UUID must be unique (at least from the daemon perspective),
 		therefore attempting to call this function using already
-		registered UUID results in an error.
-
-		The returned token must be preserved by the application in
-		order to authenticate itself to the mesh daemon and attach to
-		the network as a mesh node by calling Attach() method or
-		permanently remove the identity of the mesh node by calling
-		Leave() method.
+		registered UUID results in an error. The composition of the UUID
+		octets must be in compliance with RFC 4122.
 
 		The other information the bluetooth-meshd daemon will preserve
 		about the initial node, is to give it the initial primary
 		unicast address (0x0001), and create and assign a net_key as the
 		primary network net_index (0x000).
 
+		Upon successful processing of Create() method, the daemon
+		will call JoinComplete method on object implementing
+		org.bluez.mesh.Application1.
+
 		PossibleErrors:
 			org.bluez.mesh.Error.InvalidArguments
 			org.bluez.mesh.Error.AlreadyExists,
 
-	uint64 token Import(object app_root, array{byte}[16] uuid,
+	void Import(object app_root, array{byte}[16] uuid,
 				array{byte}[16] dev_key,
 				array{byte}[16] net_key, uint16 net_index,
 				dict flags, uint32 iv_index, uint16 unicast)
@@ -174,7 +181,8 @@ Methods:
 		The uuid parameter is a 16-byte array that contains Device UUID.
 		This UUID must be unique (at least from the daemon perspective),
 		therefore attempting to call this function using already
-		registered UUID results in an error.
+		registered UUID results in an error. The composition of the UUID
+		octets must be in compliance with RFC 4122.
 
 		The dev_key parameter is the 16-byte value of the dev key of
 		the imported mesh node.
@@ -188,7 +196,7 @@ Methods:
 		The flags parameter is a dictionary containing provisioning
 		flags. Supported values are:
 
-			boolean IVUpdate
+			boolean IvUpdate
 
 				When true, indicates that the network is in the
 				middle of IV Index Update procedure.
@@ -204,11 +212,9 @@ Methods:
 		The unicast parameter is the primary unicast address of the
 		imported node.
 
-		The returned token must be preserved by the application in
-		order to authenticate itself to the mesh daemon and attach to
-		the network as a mesh node by calling Attach() method or
-		permanently remove the identity of the mesh node by calling
-		Leave() method.
+		Upon successful processing of Import() method, the daemon will
+		call JoinComplete method on object implementing
+		org.bluez.mesh.Application1 interface.
 
 		PossibleErrors:
 			org.bluez.mesh.Error.InvalidArguments,
@@ -226,7 +232,7 @@ Object path	/org/bluez/mesh/node<uuid>
 
 Methods:
 	void Send(object element_path, uint16 destination, uint16 key_index,
-							array{byte} data)
+						dict options, array{byte} data)
 
 		This method is used to send a message originated by a local
 		model.
@@ -245,6 +251,14 @@ Methods:
 		this element. Otherwise, org.bluez.mesh.Error.NotAuthorized will
 		be returned.
 
+		The options parameter is a dictionary with the following keys
+		defined:
+
+			bool ForceSegmented
+				Specifies whether to force sending of a short
+				message as one-segment payload. If not present,
+				the default setting is "false".
+
 		The data parameter is an outgoing message to be encypted by the
 		bluetooth-meshd daemon and sent on.
 
@@ -254,7 +268,7 @@ Methods:
 			org.bluez.mesh.Error.NotFound
 
 	void DevKeySend(object element_path, uint16 destination, boolean remote,
-					uint16 net_index, array{byte} data)
+			uint16 net_index, dict options, array{byte} data)
 
 		This method is used to send a message originated by a local
 		model encoded with the device key of the remote node.
@@ -275,6 +289,14 @@ Methods:
 
 		The net_index parameter is the subnet index of the network on
 		which the message is to be sent.
+
+		The options parameter is a dictionary with the following keys
+		defined:
+
+			bool ForceSegmented
+				Specifies whether to force sending of a short
+				message as one-segment payload. If not present,
+				the default setting is "false".
 
 		The data parameter is an outgoing message to be encypted by the
 		meshd daemon and sent on.
@@ -341,7 +363,8 @@ Methods:
 			org.bluez.mesh.Error.InvalidArguments
 			org.bluez.mesh.Error.NotFound
 
-	void Publish(object element_path, uint16 model, array{byte} data)
+	void Publish(object element_path, uint16 model, dict options,
+							array{byte} data)
 
 		This method is used to send a publication originated by a local
 		model. If the model does not exist, or it has no publication
@@ -353,7 +376,24 @@ Methods:
 		Hierarchy section).
 
 		The model parameter contains a model ID, as defined by the
-		Bluetooth SIG.
+		Bluetooth SIG. If the options dictionary contains a "Vendor"
+		key, then this ID is defined by the specified vendor.
+
+		The options parameter is a dictionary with the following keys
+		defined:
+
+			bool ForceSegmented
+				Specifies whether to force sending of a short
+				message as one-segment payload. If not present,
+				the default setting is "false".
+
+			uint16 Vendor
+				A 16-bit Company ID as defined by the
+				Bluetooth SIG. This key should only exist when
+				publishing on a Vendor defined model.
+
+		The data parameter is an outgoing message to be encypted by the
+		meshd daemon and sent on.
 
 		Since only one Publish record may exist per element-model, the
 		destination and key_index are obtained from the Publication
@@ -363,30 +403,6 @@ Methods:
 			org.bluez.mesh.Error.DoesNotExist
 			org.bluez.mesh.Error.InvalidArguments
 
-	void VendorPublish(object element_path, uint16 vendor, uint16 model_id,
-							array{byte} data)
-
-		This method is used to send a publication originated by a local
-		vendor model. If the model does not exist, or it has no
-		publication record, the method returns
-		org.bluez.mesh.Error.DoesNotExist error.
-
-		The element_path parameter is the object path of an element from
-		a collection of the application elements (see Mesh Application
-		Hierarchy section).
-
-		The vendor parameter is a 16-bit Bluetooth-assigned Company ID.
-
-		The model_id parameter is a 16-bit vendor-assigned Model
-		Identifier.
-
-		Since only one Publish record may exist per element-model, the
-		destination and key_index are obtained from the Publication
-		record cached by the daemon.
-
-		Possible errors:
-			org.bluez.mesh.Error.DoesNotExist
-			org.bluez.mesh.Error.InvalidArguments
 
 Properties:
 	dict Features [read-only]
@@ -419,11 +435,11 @@ Properties:
 		This property indicates whether the periodic beaconing is
 		enabled (true) or disabled (false).
 
-	uint8 BeaconFlags [read-only]
+	boolean IvUpdate [read-only]
 
-		This property may be read at any time to determine the flag
-		field setting on sent and received beacons of the primary
-		network key.
+		When true, indicates that the network is in the middle of IV
+		Index Update procedure. This information is only useful for
+		provisioning.
 
 	uint32 IvIndex [read-only]
 
@@ -455,14 +471,20 @@ Object path	/org/bluez/mesh/node<uuid>
 		CreateNetwork() or Import()
 
 Methods:
-	void UnprovisionedScan(uint16 seconds)
+	void UnprovisionedScan(dict options)
 
 		This method is used by the application that supports
 		org.bluez.mesh.Provisioner1 interface to start listening
-		(scanning) for unprovisioned devices in the area. Scanning
-		will continue for the specified number of seconds, or, if 0 is
-		specified, then continuously until UnprovisionedScanCancel() is
-		called or if AddNode() method is called.
+		(scanning) for unprovisioned devices in the area.
+
+		The options parameter is a dictionary with the following keys
+		defined:
+
+		uint16 Seconds
+			Specifies number of seconds for scanning to be active.
+			If set to 0 or if this key is not present, then the
+			scanning will continue until UnprovisionedScanCancel()
+			or AddNode() methods are called.
 
 		Each time a unique unprovisioned beacon is heard, the
 		ScanResult() method on the app will be called with the result.
@@ -482,7 +504,7 @@ Methods:
 			org.bluez.mesh.Error.InvalidArguments
 			org.bluez.mesh.Error.NotAuthorized
 
-	void AddNode(array{byte}[16] uuid)
+	void AddNode(array{byte}[16] uuid, dict options)
 
 		This method is used by the application that supports
 		org.bluez.mesh.Provisioner1 interface to add the
@@ -490,6 +512,10 @@ Methods:
 
 		The uuid parameter is a 16-byte array that contains Device UUID
 		of the unprovisioned device to be added to the network.
+
+		The options parameter is a dictionary that may contain
+		additional configuration info (currently an empty placeholder
+		for forward compatibility).
 
 		PossibleErrors:
 			org.bluez.mesh.Error.InvalidArguments
@@ -644,7 +670,7 @@ Methods:
 			org.bluez.mesh.Error.Failed
 			org.bluez.mesh.Error.InvalidArguments
 			org.bluez.mesh.Error.DoesNotExist
-			org.bluez.mesh.Error.Busy
+			org.bluez.mesh.Error.InProgress
 
 	void DeleteAppKey(uint16 app_index)
 
@@ -747,6 +773,10 @@ Methods:
 		the network as a mesh node by calling Attach() method or
 		permanently remove the identity of the mesh node by calling
 		Leave() method.
+
+		If this method returns an error, the daemon will assume that the
+		application failed to preserve the token, and will remove the
+		freshly created node.
 
 	void JoinFailed(string reason)
 
@@ -871,15 +901,43 @@ Properties:
 		Element index. It is required that the application follows
 		sequential numbering scheme for the elements, starting with 0.
 
-	array{uint16} Models [read-only]
+	array{(uint16 id, dict caps)} Models [read-only]
 
-		An array of SIG Model Identifiers. The array may be empty.
+		An array of SIG Models:
 
-	array{(uint16, uint16)} VendorModels [read-only]
+			id - SIG Model Identifier
 
-		An array of pairs (vendor, model ID): vendor is a 16-bit
-		Bluetooth-assigned Company ID as defined by Bluetooth SIG.
-		model ID is a 16-bit vendor-assigned Model Identifier
+			options - a dictionary that may contain additional model
+			info. The following keys are defined:
+
+				boolean Publish - indicates whether the model
+					supports publication mechanism. If not
+					present, publication is enabled.
+
+				boolean Subscribe - indicates whether the model
+					supports subscription mechanism. If not
+					present, subscriptons are enabled.
+
+		The array may be empty.
+
+
+	array{(uint16 vendor, uint16 id, dict options)} VendorModels [read-only]
+
+		An array of Vendor Models:
+
+			vendor - a 16-bit Bluetooth-assigned Company ID as
+			defined by Bluetooth SIG.
+
+			id - a 16-bit vendor-assigned Model Identifier
+
+			options - a dictionary that may contain additional model
+			info. The following keys are defined:
+
+				boolean Publish - indicates whether the model
+					supports publication mechanism
+
+				boolean Subscribe - indicates whether the model
+					supports subscription mechanism
 
 		The array may be empty.
 
@@ -927,7 +985,7 @@ Service		unique name
 Interface	org.bluez.mesh.Provisioner1
 Object path	freely definable
 
-	void ScanResult(int16 rssi, array{byte} data)
+	void ScanResult(int16 rssi, array{byte} data, dict options)
 
 		The method is called from the bluetooth-meshd daemon when a
 		unique UUID has been seen during UnprovisionedScan() for
@@ -938,10 +996,14 @@ Object path	freely definable
 
 		The data parameter is a variable length byte array, that may
 		have 1, 2 or 3 distinct fields contained in it including the 16
-		byte remote device UUID (always), a 32 bit mask of OOB
+		byte remote device UUID (always), a 16 bit mask of OOB
 		authentication flags (optional), and a 32 bit URI hash (if URI
 		bit set in OOB mask). Whether these fields exist or not is a
 		decision of the remote device.
+
+		The options parameter is a dictionary that may contain
+		additional scan result info (currently an empty placeholder for
+		forward compatibility).
 
 		If a beacon with a UUID that has already been reported is
 		recieved by the daemon, it will be silently discarded unless it

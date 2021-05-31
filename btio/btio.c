@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2009-2010  Marcel Holtmann <marcel@holtmann.org>
  *  Copyright (C) 2009-2010  Nokia Corporation
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -85,6 +72,7 @@ struct connect {
 	BtIOConnect connect;
 	gpointer user_data;
 	GDestroyNotify destroy;
+	bdaddr_t dst;
 };
 
 struct accept {
@@ -214,6 +202,7 @@ static gboolean connect_cb(GIOChannel *io, GIOCondition cond,
 	GError *gerr = NULL;
 	int err, sk_err, sock;
 	socklen_t len = sizeof(sk_err);
+	char addr[18];
 
 	/* If the user aborted this connect attempt */
 	if ((cond & G_IO_NVAL) || check_nval(io))
@@ -226,8 +215,11 @@ static gboolean connect_cb(GIOChannel *io, GIOCondition cond,
 	else
 		err = -sk_err;
 
-	if (err < 0)
-		ERROR_FAILED(&gerr, "connect error", -err);
+	if (err < 0) {
+		ba2str(&conn->dst, addr);
+		g_set_error(&gerr, BT_IO_ERROR, -err,
+			"connect to %s: %s (%d)", addr, strerror(-err), -err);
+	}
 
 	conn->connect(io, gerr, conn->user_data);
 
@@ -282,11 +274,11 @@ static void server_add(GIOChannel *io, BtIOConnect connect,
 	server->destroy = destroy;
 
 	cond = G_IO_IN | G_IO_ERR | G_IO_HUP | G_IO_NVAL;
-	g_io_add_watch_full(io, G_PRIORITY_DEFAULT, cond, server_cb, server,
+	g_io_add_watch_full(io, G_PRIORITY_HIGH, cond, server_cb, server,
 					(GDestroyNotify) server_remove);
 }
 
-static void connect_add(GIOChannel *io, BtIOConnect connect,
+static void connect_add(GIOChannel *io, BtIOConnect connect, bdaddr_t dst,
 				gpointer user_data, GDestroyNotify destroy)
 {
 	struct connect *conn;
@@ -296,9 +288,10 @@ static void connect_add(GIOChannel *io, BtIOConnect connect,
 	conn->connect = connect;
 	conn->user_data = user_data;
 	conn->destroy = destroy;
+	conn->dst = dst;
 
 	cond = G_IO_OUT | G_IO_ERR | G_IO_HUP | G_IO_NVAL;
-	g_io_add_watch_full(io, G_PRIORITY_DEFAULT, cond, connect_cb, conn,
+	g_io_add_watch_full(io, G_PRIORITY_HIGH, cond, connect_cb, conn,
 					(GDestroyNotify) connect_remove);
 }
 
@@ -314,7 +307,7 @@ static void accept_add(GIOChannel *io, BtIOConnect connect, gpointer user_data,
 	accept->destroy = destroy;
 
 	cond = G_IO_OUT | G_IO_ERR | G_IO_HUP | G_IO_NVAL;
-	g_io_add_watch_full(io, G_PRIORITY_DEFAULT, cond, accept_cb, accept,
+	g_io_add_watch_full(io, G_PRIORITY_HIGH, cond, accept_cb, accept,
 					(GDestroyNotify) accept_remove);
 }
 
@@ -591,6 +584,20 @@ static gboolean get_key_size(int sock, int *size, GError **err)
 	return FALSE;
 }
 
+static uint8_t mode_l2mode(uint8_t mode)
+{
+	switch (mode) {
+	case BT_IO_MODE_BASIC:
+		return L2CAP_MODE_BASIC;
+	case BT_IO_MODE_ERTM:
+		return L2CAP_MODE_ERTM;
+	case BT_IO_MODE_STREAMING:
+		return L2CAP_MODE_STREAMING;
+	default:
+		return UINT8_MAX;
+	}
+}
+
 static gboolean set_l2opts(int sock, uint16_t imtu, uint16_t omtu,
 						uint8_t mode, GError **err)
 {
@@ -608,8 +615,14 @@ static gboolean set_l2opts(int sock, uint16_t imtu, uint16_t omtu,
 		l2o.imtu = imtu;
 	if (omtu)
 		l2o.omtu = omtu;
-	if (mode)
-		l2o.mode = mode;
+
+	if (mode) {
+		l2o.mode = mode_l2mode(mode);
+		if (l2o.mode == UINT8_MAX) {
+			ERROR_FAILED(err, "Unsupported mode", errno);
+			return FALSE;
+		}
+	}
 
 	if (setsockopt(sock, SOL_L2CAP, L2CAP_OPTIONS, &l2o, sizeof(l2o)) < 0) {
 		ERROR_FAILED(err, "setsockopt(L2CAP_OPTIONS)", errno);
@@ -630,18 +643,34 @@ static gboolean set_le_imtu(int sock, uint16_t imtu, GError **err)
 	return TRUE;
 }
 
+static gboolean set_le_mode(int sock, uint8_t mode, GError **err)
+{
+	if (setsockopt(sock, SOL_BLUETOOTH, BT_MODE, &mode,
+						sizeof(mode)) < 0) {
+		ERROR_FAILED(err, "setsockopt(BT_MODE)", errno);
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
 static gboolean l2cap_set(int sock, uint8_t src_type, int sec_level,
 				uint16_t imtu, uint16_t omtu, uint8_t mode,
 				int master, int flushable, uint32_t priority,
 				GError **err)
 {
 	if (imtu || omtu || mode) {
-		gboolean ret;
+		gboolean ret = FALSE;
 
 		if (src_type == BDADDR_BREDR)
 			ret = set_l2opts(sock, imtu, omtu, mode, err);
-		else
-			ret = set_le_imtu(sock, imtu, err);
+		else {
+			if (imtu)
+				ret = set_le_imtu(sock, imtu, err);
+
+			if (ret && mode)
+				ret = set_le_mode(sock, mode, err);
+		}
 
 		if (!ret)
 			return ret;
@@ -980,6 +1009,30 @@ static int get_phy(int sock, uint32_t *phy)
 	return 0;
 }
 
+static int get_le_imtu(int sock, uint16_t *mtu)
+{
+	socklen_t len;
+
+	len = sizeof(*mtu);
+
+	if (getsockopt(sock, SOL_BLUETOOTH, BT_RCVMTU, mtu, &len) < 0)
+		return -errno;
+
+	return 0;
+}
+
+static int get_le_mode(int sock, uint8_t *mode)
+{
+	socklen_t len;
+
+	len = sizeof(*mode);
+
+	if (getsockopt(sock, SOL_BLUETOOTH, BT_MODE, mode, &len) < 0)
+		return -errno;
+
+	return 0;
+}
+
 static gboolean l2cap_get(int sock, GError **err, BtIOOption opt1,
 								va_list args)
 {
@@ -999,10 +1052,11 @@ static gboolean l2cap_get(int sock, GError **err, BtIOOption opt1,
 	memset(&l2o, 0, sizeof(l2o));
 
 	if (src.l2_bdaddr_type != BDADDR_BREDR) {
-		len = sizeof(l2o.imtu);
-		if (getsockopt(sock, SOL_BLUETOOTH, BT_RCVMTU,
-						&l2o.imtu, &len) == 0)
+		if (get_le_imtu(sock, &l2o.imtu) == 0) {
+			/* Older kernels may not support BT_MODE */
+			get_le_mode(sock, &l2o.mode);
 			goto parse_opts;
+		}
 
 		/* Non-LE CoC enabled kernels will return one of these
 		 * in which case we need to fall back to L2CAP_OPTIONS.
@@ -1630,6 +1684,7 @@ GIOChannel *bt_io_connect(BtIOConnect connect, gpointer user_data,
 	struct set_opts opts;
 	int err, sock;
 	gboolean ret;
+	char addr[18];
 
 	va_start(args, opt1);
 	ret = parse_set_opts(&opts, gerr, opt1, args);
@@ -1643,6 +1698,15 @@ GIOChannel *bt_io_connect(BtIOConnect connect, gpointer user_data,
 		return NULL;
 
 	sock = g_io_channel_unix_get_fd(io);
+
+	/* Use DEFER_SETUP when connecting using Ext-Flowctl */
+	if (opts.mode == BT_IO_MODE_EXT_FLOWCTL && opts.defer) {
+		if (setsockopt(sock, SOL_BLUETOOTH, BT_DEFER_SETUP,
+					&opts.defer, sizeof(opts.defer)) < 0) {
+			ERROR_FAILED(gerr, "setsockopt(BT_DEFER_SETUP)", errno);
+			return NULL;
+		}
+	}
 
 	switch (opts.type) {
 	case BT_IO_L2CAP:
@@ -1663,12 +1727,15 @@ GIOChannel *bt_io_connect(BtIOConnect connect, gpointer user_data,
 	}
 
 	if (err < 0) {
-		ERROR_FAILED(gerr, "connect", -err);
+		ba2str(&opts.dst, addr);
+		g_set_error(gerr, BT_IO_ERROR, -err,
+				"connect to %s: %s (%d)", addr, strerror(-err),
+				-err);
 		g_io_channel_unref(io);
 		return NULL;
 	}
 
-	connect_add(io, connect, user_data, destroy);
+	connect_add(io, connect, opts.dst, user_data, destroy);
 
 	return io;
 }
@@ -1697,8 +1764,11 @@ GIOChannel *bt_io_listen(BtIOConnect connect, BtIOConfirm confirm,
 	sock = g_io_channel_unix_get_fd(io);
 
 	if (confirm)
-		setsockopt(sock, SOL_BLUETOOTH, BT_DEFER_SETUP, &opts.defer,
-							sizeof(opts.defer));
+		if (setsockopt(sock, SOL_BLUETOOTH, BT_DEFER_SETUP,
+					&opts.defer, sizeof(opts.defer)) < 0) {
+			ERROR_FAILED(err, "setsockopt(BT_DEFER_SETUP)", errno);
+			return NULL;
+		}
 
 	if (listen(sock, 5) < 0) {
 		ERROR_FAILED(err, "listen", errno);

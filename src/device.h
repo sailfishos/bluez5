@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
@@ -5,20 +6,6 @@
  *  Copyright (C) 2006-2010  Nokia Corporation
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -32,6 +19,7 @@ struct btd_device *device_create_from_storage(struct btd_adapter *adapter,
 				const char *address, GKeyFile *key_file);
 char *btd_device_get_storage_path(struct btd_device *device,
 				const char *filename);
+
 
 void btd_device_device_set_name(struct btd_device *device, const char *name);
 void device_store_cached_name(struct btd_device *dev, const char *name);
@@ -49,6 +37,7 @@ uint16_t btd_device_get_vendor(struct btd_device *device);
 uint16_t btd_device_get_vendor_src(struct btd_device *device);
 uint16_t btd_device_get_product(struct btd_device *device);
 uint16_t btd_device_get_version(struct btd_device *device);
+void device_remove_bonding(struct btd_device *device, uint8_t bdaddr_type);
 void device_remove(struct btd_device *device, gboolean remove_stored);
 int device_address_cmp(gconstpointer a, gconstpointer b);
 int device_bdaddr_cmp(gconstpointer a, gconstpointer b);
@@ -139,6 +128,12 @@ void device_store_svc_chng_ccc(struct btd_device *device, uint8_t bdaddr_type,
 								uint16_t value);
 void device_load_svc_chng_ccc(struct btd_device *device, uint16_t *ccc_le,
 							uint16_t *ccc_bredr);
+void device_set_wake_support(struct btd_device *device, bool wake_support);
+void device_set_wake_override(struct btd_device *device, bool wake_override);
+void device_set_wake_allowed(struct btd_device *device, bool wake_allowed,
+			     guint32 id);
+void device_set_wake_allowed_complete(struct btd_device *device);
+void device_set_refresh_discovery(struct btd_device *dev, bool refresh);
 
 typedef void (*service_probe_filter_cb) (struct btd_device *device, GSList **services,
                                          void *user_data);
@@ -181,6 +176,10 @@ struct btd_service *btd_device_get_service(struct btd_device *dev,
 
 int device_discover_services(struct btd_device *device);
 int btd_device_connect_services(struct btd_device *dev, GSList *services);
+
+uint32_t btd_device_get_current_flags(struct btd_device *dev);
+void btd_device_flags_changed(struct btd_device *dev, uint32_t supported_flags,
+			      uint32_t current_flags);
 
 void btd_device_init(void);
 void btd_device_cleanup(void);

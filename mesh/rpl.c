@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2020  Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
  *
  */
 
@@ -51,7 +42,7 @@ bool rpl_put_entry(struct mesh_node *node, uint16_t src, uint32_t iv_index,
 	DIR *dir;
 	int fd;
 
-	if (!node || !IS_UNICAST(src))
+	if (!IS_UNICAST(src))
 		return false;
 
 	node_path = node_get_storage_dir(node);
@@ -71,7 +62,7 @@ bool rpl_put_entry(struct mesh_node *node, uint16_t src, uint32_t iv_index,
 	snprintf(src_file, PATH_MAX, "%s%s/%8.8x/%4.4x", node_path, rpl_dir,
 								iv_index, src);
 
-	fd = open(src_file, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+	fd = open(src_file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
 	if (fd >= 0) {
 		snprintf(seq_txt, 7, "%6.6x", seq);
 		if (write(fd, seq_txt, 6) == 6)
@@ -100,7 +91,7 @@ void rpl_del_entry(struct mesh_node *node, uint16_t src)
 	struct dirent *entry;
 	DIR *dir;
 
-	if (!node || !IS_UNICAST(src))
+	if (!IS_UNICAST(src))
 		return;
 
 	node_path = node_get_storage_dir(node);
@@ -205,12 +196,12 @@ bool rpl_get_list(struct mesh_node *node, struct l_queue *rpl_list)
 	size_t len;
 	DIR *dir;
 
-	if (!node || !rpl_list)
+	if (!rpl_list)
 		return false;
 
 	node_path = node_get_storage_dir(node);
 
-	len = strlen(node_path) + strlen(rpl_dir) + 14;
+	len = strlen(node_path) + strlen(rpl_dir) + 15;
 
 	if (len > PATH_MAX)
 		return false;
@@ -241,7 +232,7 @@ bool rpl_get_list(struct mesh_node *node, struct l_queue *rpl_list)
 	return true;
 }
 
-void rpl_init(struct mesh_node *node, uint32_t cur)
+void rpl_update(struct mesh_node *node, uint32_t cur)
 {
 	uint32_t old = cur - 1;
 	const char *node_path;
@@ -249,12 +240,11 @@ void rpl_init(struct mesh_node *node, uint32_t cur)
 	char path[PATH_MAX];
 	DIR *dir;
 
-	if (!node)
+	node_path = node_get_storage_dir(node);
+	if (!node_path)
 		return;
 
-	node_path = node_get_storage_dir(node);
-
-	if (strlen(node_path) + strlen(rpl_dir) + 10 >= PATH_MAX)
+	if (strlen(node_path) + strlen(rpl_dir) + 15 >= PATH_MAX)
 		return;
 
 	/* Make sure path exists */
@@ -286,4 +276,16 @@ void rpl_init(struct mesh_node *node, uint32_t cur)
 	}
 
 	closedir(dir);
+}
+
+bool rpl_init(const char *node_path)
+{
+	char path[PATH_MAX];
+
+	if (strlen(node_path) + strlen(rpl_dir) + 15 >= PATH_MAX)
+		return false;
+
+	snprintf(path, PATH_MAX, "%s%s", node_path, rpl_dir);
+	mkdir(path, 0755);
+	return true;
 }

@@ -1,5 +1,6 @@
+# SPDX-License-Identifier: GPL-2.0
 AC_PREREQ(2.60)
-AC_INIT(bluez, 5.54)
+AC_INIT(bluez, 5.58)
 
 AM_INIT_AUTOMAKE([foreign subdir-objects color-tests silent-rules
 					tar-pax no-dist-gzip dist-xz])
@@ -47,6 +48,8 @@ AC_ARG_ENABLE(threads, AC_HELP_STRING([--enable-threads],
 		[enable threading support]), [enable_threads=${enableval}])
 
 AC_CHECK_FUNCS(explicit_bzero)
+
+AC_CHECK_FUNCS(rawmemchr)
 
 AC_CHECK_FUNC(signalfd, dummy=yes,
 			AC_MSG_ERROR(signalfd support is required))
@@ -218,9 +221,6 @@ if (test "${enable_udev}" != "no" && test -z "${path_udevdir}"); then
 fi
 AC_SUBST(UDEV_DIR, [${path_udevdir}])
 
-AM_CONDITIONAL(HID2HCI, test "${enable_tools}" != "no" &&
-						test "${enable_udev}" != "no")
-
 AC_ARG_ENABLE(cups, AC_HELP_STRING([--disable-cups],
                 [disable CUPS printer support]), [enable_cups=${enableval}])
 AM_CONDITIONAL(CUPS, test "${enable_cups}" != "no")
@@ -265,8 +265,8 @@ AC_ARG_ENABLE([external_ell], AC_HELP_STRING([--enable-external-ell],
 				[enable external Embedded Linux library]),
 					[enable_external_ell=${enableval}])
 if (test "${enable_external_ell}" = "yes"); then
-	PKG_CHECK_MODULES(ELL, ell >= 0.28, dummy=yes,
-		AC_MSG_ERROR(Embedded Linux library >= 0.28 is required))
+	PKG_CHECK_MODULES(ELL, ell >= 0.39, dummy=yes,
+		AC_MSG_ERROR(Embedded Linux library >= 0.39 is required))
 	AC_SUBST(ELL_CFLAGS)
 	AC_SUBST(ELL_LIBS)
 fi
@@ -347,6 +347,11 @@ AC_ARG_ENABLE(sixaxis, AC_HELP_STRING([--enable-sixaxis],
 		[enable sixaxis plugin]), [enable_sixaxis=${enableval}])
 AM_CONDITIONAL(SIXAXIS, test "${enable_sixaxis}" = "yes" &&
 					 test "${enable_udev}" != "no")
+
+AC_ARG_ENABLE(hid2hci, AC_HELP_STRING([--enable-hid2hci],
+		[enable hid2hci tool]), [enable_hid2hci=${enableval}])
+AM_CONDITIONAL(HID2HCI, test "${enable_hid2hci}" = "yes" &&
+					test "${enable_udev}" != "no")
 
 AC_ARG_ENABLE(logger, AC_HELP_STRING([--enable-logger],
 		[enable HCI logger service]), [enable_logger=${enableval}])

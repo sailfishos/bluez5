@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2018-2019 Intel Corporation. All rights reserved.
  *
- *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation; either
- *  version 2.1 of the License, or (at your option) any later version.
- *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
  *
  */
 
@@ -37,6 +28,15 @@ struct error_entry {
 	const char *default_desc;
 };
 
+struct send_info {
+	struct l_dbus *dbus;
+	struct l_timeout *timeout;
+	l_dbus_message_func_t cb;
+	l_dbus_destroy_func_t destroy;
+	void *user_data;
+	uint32_t serial;
+};
+
 /*
  * Important: The entries in this table follow the order of
  * enumerated values in mesh_error (file error.h)
@@ -48,7 +48,8 @@ static struct error_entry const error_table[] =
 	{ ERROR_INTERFACE ".NotAuthorized", "Permission denied"},
 	{ ERROR_INTERFACE ".NotFound", "Object not found"},
 	{ ERROR_INTERFACE ".InvalidArgs", "Invalid arguments"},
-	{ ERROR_INTERFACE ".InProgress", "Already in progress"},
+	{ ERROR_INTERFACE ".InProgress", "Operation already in progress"},
+	{ ERROR_INTERFACE ".Busy", "Busy"},
 	{ ERROR_INTERFACE ".AlreadyExists", "Already exists"},
 	{ ERROR_INTERFACE ".DoesNotExist", "Does not exist"},
 	{ ERROR_INTERFACE ".Canceled", "Operation canceled"},
@@ -142,4 +143,42 @@ void dbus_append_dict_entry_basic(struct l_dbus_message_builder *builder,
 	l_dbus_message_builder_append_basic(builder, signature[0], data);
 	l_dbus_message_builder_leave_variant(builder);
 	l_dbus_message_builder_leave_dict(builder);
+}
+
+static void send_reply(struct l_dbus_message *message, void *user_data)
+{
+	struct send_info *info = user_data;
+
+	l_timeout_remove(info->timeout);
+	info->cb(message, info->user_data);
+
+	if (info->destroy)
+		info->destroy(info->user_data);
+
+	l_free(info);
+}
+
+static void send_timeout(struct l_timeout *timeout, void *user_data)
+{
+	struct send_info *info = user_data;
+
+	l_dbus_cancel(info->dbus, info->serial);
+	send_reply(NULL, info);
+}
+
+void dbus_send_with_timeout(struct l_dbus *dbus, struct l_dbus_message *msg,
+						l_dbus_message_func_t cb,
+						void *user_data,
+						l_dbus_destroy_func_t destroy,
+						unsigned int seconds)
+{
+	struct send_info *info = l_new(struct send_info, 1);
+
+	info->dbus = dbus;
+	info->cb = cb;
+	info->user_data = user_data;
+	info->destroy = destroy;
+	info->serial = l_dbus_send_with_reply(dbus, msg, send_reply,
+								info, NULL);
+	info->timeout = l_timeout_create(seconds, send_timeout, info, NULL);
 }
