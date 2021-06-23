@@ -154,6 +154,7 @@ autoreconf --force --install
     --enable-jolla-dbus-access \
     --enable-jolla-did \
     --enable-library \
+    --enable-nfc \
     --enable-option-checking \
     --enable-sailfish-exclude \
     --enable-sixaxis \
