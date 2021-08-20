@@ -1,0 +1,41 @@
+SailfishOS Packaging
+====================
+
+Remotes
+-------
+
+upstream - Package upstream
+sailfish - Packaging upstream
+
+Commit formatting
+-----------------
+
+ * Prefix commits backported from future upstream version with "backport:"
+ * Prefix SailfishOS specific commits with "sfos:"
+ * Prefix commits which are submitted to upstream with "pending:"
+ * Include bug references in the commit message body if applicable to ease
+   changelog creation (WITHOUT [foo] tags)
+ * Don't include [foo] style tags in the commits if possible, and avoid
+   [sailfish] tags completely.
+
+New versions
+------------
+
+ * Make a pull request for the changes as usual, following formatting rules
+   above.
+ * After the pull request is merged, create an annotated tag with changelog
+   of the changes, with sailfish prefix and tag, for example
+   git tag -a -m "[sailfish] Fix segfault. JB#12345" sailfish/1.1.13+git2
+ * Increment gitX suffix when the upstream version doesn't change.
+
+Updating to new upstream version
+--------------------------------
+
+git checkout -b jb12345_update_upstream BLUEZ_5_58
+git merge --strategy ours master -m "Reset master to tag 'BLUEZ_5_58'"
+git checkout master
+git branch -f master-archived
+# target is either previous reset to upstream commit or BLUEZ_5_58 if
+# doing this the very first time
+git rebase -i --onto jb12345_update_upstream <target>
+git push sailfish -u jb12345_update_upstream
