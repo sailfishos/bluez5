@@ -193,8 +193,6 @@ cp -a %{SOURCE3} %{buildroot}%{_sysconfdir}/tracing/bluez/
 # obexd wrapper
 install -m755 -D %{SOURCE1} ${RPM_BUILD_ROOT}/%{_libexecdir}/obexd-wrapper
 install -m644 -D %{SOURCE2} ${RPM_BUILD_ROOT}/%{_sysconfdir}/obexd.conf
-sed -i 's,Exec=.*,Exec=/usr/libexec/obexd-wrapper,' \
-    ${RPM_BUILD_ROOT}/%{_datadir}/dbus-1/services/org.bluez.obex.service
 sed -i 's,ExecStart=.*,ExecStart=/usr/libexec/obexd-wrapper,' \
 ${RPM_BUILD_ROOT}/%{_userunitdir}/obex.service
 
