@@ -222,9 +222,6 @@ cp -a test/simple-obex-agent %{buildroot}%{_libdir}/bluez/test/
 mkdir -p %{buildroot}%{_sysconfdir}/tracing/obexd/
 cp -a %{SOURCE4} %{buildroot}%{_sysconfdir}/tracing/obexd/
 
-# Rename pkg-config file to differentiate from BlueZ 4.x
-mv %{buildroot}%{_libdir}/pkgconfig/bluez.pc %{buildroot}%{_libdir}/pkgconfig/bluez5.pc
-
 # We don't need zsh stuff
 rm -rf %{buildroot}%{_datadir}/zsh
 
@@ -288,7 +285,7 @@ systemctl-user daemon-reload ||:
 %{_libdir}/libbluetooth.so
 %dir %{_includedir}/bluetooth
 %{_includedir}/bluetooth/*
-%{_libdir}/pkgconfig/bluez5.pc
+%{_libdir}/pkgconfig/bluez.pc
 
 %files test
 %defattr(-,root,root,-)
