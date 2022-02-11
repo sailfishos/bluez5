@@ -4720,7 +4720,7 @@ static void load_devices(struct btd_adapter *adapter)
 		if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 			error("Unable to load key file from %s: (%s)", filename,
 								gerr->message);
-			g_error_free(gerr);
+			g_clear_error(&gerr);
 		}
 
 		key_info = get_key_info(key_file, entry->d_name);
@@ -5715,7 +5715,7 @@ static void convert_names_entry(char *key, char *value, void *user_data)
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
 								gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 	g_key_file_set_string(key_file, "General", "Name", value);
 
@@ -5948,7 +5948,7 @@ static void convert_entry(char *key, char *value, void *user_data)
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
 								gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 
 	set_device_type(key_file, type);
@@ -6054,7 +6054,7 @@ static void store_sdp_record(char *local, char *peer, int handle, char *value)
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
 								gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 
 	sprintf(handle_str, "0x%8.8X", handle);
@@ -6138,7 +6138,7 @@ static void convert_sdp_entry(char *key, char *value, void *user_data)
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
 								gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 
 	store_attribute_uuid(key_file, start, end, prim_uuid, uuid);
@@ -6198,7 +6198,7 @@ static void convert_primaries_entry(char *key, char *value, void *user_data)
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
 								gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 
 	for (service = services; *service; service++) {
@@ -6223,7 +6223,7 @@ static void convert_primaries_entry(char *key, char *value, void *user_data)
 	if (!g_file_set_contents(filename, data, length, &gerr)) {
 		error("Unable set contents for %s: (%s)", filename,
 								gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 
 	if (device_type < 0)
@@ -6238,7 +6238,7 @@ static void convert_primaries_entry(char *key, char *value, void *user_data)
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
 								gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 	set_device_type(key_file, device_type);
 
@@ -6294,7 +6294,7 @@ static void convert_ccc_entry(char *key, char *value, void *user_data)
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
 								gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 
 	sprintf(group, "%hu", handle);
@@ -6350,7 +6350,7 @@ static void convert_gatt_entry(char *key, char *value, void *user_data)
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
 								gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 
 	sprintf(group, "%hu", handle);
@@ -6405,7 +6405,7 @@ static void convert_proximity_entry(char *key, char *value, void *user_data)
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
 								gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 
 	g_key_file_set_string(key_file, alert, "Level", value);
@@ -6609,7 +6609,7 @@ static void load_config(struct btd_adapter *adapter)
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
 								gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 
 	/* Get alias */
@@ -8462,7 +8462,7 @@ static void store_ltk_group(struct btd_adapter *adapter, const bdaddr_t *peer,
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
 								gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 
 	for (i = 0; i < 16; i++)
@@ -8628,7 +8628,7 @@ static void store_csrk(struct btd_adapter *adapter, const bdaddr_t *peer,
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
 								gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 
 	for (i = 0; i < 16; i++)
@@ -8806,7 +8806,7 @@ static void store_conn_param(struct btd_adapter *adapter, const bdaddr_t *peer,
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
 								gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 
 	g_key_file_set_integer(key_file, "ConnectionParameters",
@@ -9466,7 +9466,7 @@ static void remove_keys(struct btd_adapter *adapter,
 	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
 		error("Unable to load key file from %s: (%s)", filename,
 								gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 
 	if (type == BDADDR_BREDR) {
@@ -9568,7 +9568,7 @@ static bool get_static_addr(struct btd_adapter *adapter)
 								&gerr)) {
 		error("Unable to load key file from %s: (%s)",
 					STORAGEDIR "/addresses", gerr->message);
-		g_error_free(gerr);
+		g_clear_error(&gerr);
 	}
 	addrs = g_key_file_get_string_list(file, "Static", mfg, &len, NULL);
 	if (addrs) {
