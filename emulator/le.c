@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/uio.h>
+#include <sys/random.h>
 #include <time.h>
 
 #include "lib/bluetooth.h"
@@ -34,7 +35,7 @@
 #include "phy.h"
 #include "le.h"
 
-#define WHITE_LIST_SIZE		16
+#define ACCEPT_LIST_SIZE	16
 #define RESOLV_LIST_SIZE	16
 #define SCAN_CACHE_SIZE		64
 
@@ -102,8 +103,8 @@ struct bt_le {
 	uint8_t  le_conn_own_addr_type;
 	uint8_t  le_conn_enable;
 
-	uint8_t  le_white_list_size;
-	uint8_t  le_white_list[WHITE_LIST_SIZE][7];
+	uint8_t  le_accept_list_size;
+	uint8_t  le_accept_list[ACCEPT_LIST_SIZE][7];
 	uint8_t  le_states[8];
 
 	uint16_t le_default_tx_len;
@@ -122,27 +123,27 @@ struct bt_le {
 	uint8_t scan_cache_count;
 };
 
-static bool is_in_white_list(struct bt_le *hci, uint8_t addr_type,
+static bool is_in_accept_list(struct bt_le *hci, uint8_t addr_type,
 							const uint8_t addr[6])
 {
 	int i;
 
-	for (i = 0; i < hci->le_white_list_size; i++) {
-		if (hci->le_white_list[i][0] == addr_type &&
-				!memcmp(&hci->le_white_list[i][1], addr, 6))
+	for (i = 0; i < hci->le_accept_list_size; i++) {
+		if (hci->le_accept_list[i][0] == addr_type &&
+				!memcmp(&hci->le_accept_list[i][1], addr, 6))
 			return true;
 	}
 
 	return false;
 }
 
-static void clear_white_list(struct bt_le *hci)
+static void clear_accept_list(struct bt_le *hci)
 {
 	int i;
 
-	for (i = 0; i < hci->le_white_list_size; i++) {
-		hci->le_white_list[i][0] = 0xff;
-		memset(&hci->le_white_list[i][1], 0, 6);
+	for (i = 0; i < hci->le_accept_list_size; i++) {
+		hci->le_accept_list[i][0] = 0xff;
+		memset(&hci->le_accept_list[i][1], 0, 6);
 	}
 }
 
@@ -243,10 +244,10 @@ static void reset_defaults(struct bt_le *hci)
 	hci->commands[26] |= 0x08;	/* LE Set Scan Enable */
 	hci->commands[26] |= 0x10;	/* LE Create Connection */
 	hci->commands[26] |= 0x20;	/* LE Create Connection Cancel */
-	hci->commands[26] |= 0x40;	/* LE Read White List Size */
-	hci->commands[26] |= 0x80;	/* LE Clear White List */
-	hci->commands[27] |= 0x01;	/* LE Add Device To White List */
-	hci->commands[27] |= 0x02;	/* LE Remove Device From White List */
+	hci->commands[26] |= 0x40;	/* LE Read Accept List Size */
+	hci->commands[26] |= 0x80;	/* LE Clear Accept List */
+	hci->commands[27] |= 0x01;	/* LE Add Device To Accept List */
+	hci->commands[27] |= 0x02;	/* LE Remove Device From Accept List */
 	//hci->commands[27] |= 0x04;	/* LE Connection Update */
 	//hci->commands[27] |= 0x08;	/* LE Set Host Channel Classification */
 	//hci->commands[27] |= 0x10;	/* LE Read Channel Map */
@@ -343,7 +344,7 @@ static void reset_defaults(struct bt_le *hci)
 	hci->le_features[0] |= 0x01;	/* LE Encryption */
 	//hci->le_features[0] |= 0x02;	/* Connection Parameter Request Procedure */
 	//hci->le_features[0] |= 0x04;	/* Extended Reject Indication */
-	//hci->le_features[0] |= 0x08;	/* Slave-initiated Features Exchange */
+	//hci->le_features[0] |= 0x08;	/* Peripheral-initd Features Exchange */
 	hci->le_features[0] |= 0x10;	/* LE Ping */
 	hci->le_features[0] |= 0x20;	/* LE Data Packet Length Extension */
 	hci->le_features[0] |= 0x40;	/* LL Privacy */
@@ -389,8 +390,8 @@ static void reset_defaults(struct bt_le *hci)
 
 	hci->le_conn_enable = 0x00;
 
-	hci->le_white_list_size = WHITE_LIST_SIZE;
-	clear_white_list(hci);
+	hci->le_accept_list_size = ACCEPT_LIST_SIZE;
+	clear_accept_list(hci);
 
 	memset(hci->le_states, 0, sizeof(hci->le_states));
 	hci->le_states[0] |= 0x01;	/* Non-connectable Advertising */
@@ -399,8 +400,8 @@ static void reset_defaults(struct bt_le *hci)
 	hci->le_states[0] |= 0x08;	/* High Duty Cycle Directed Advertising */
 	hci->le_states[0] |= 0x10;	/* Passive Scanning */
 	hci->le_states[0] |= 0x20;	/* Active Scanning */
-	hci->le_states[0] |= 0x40;	/* Initiating + Connection (Master Role) */
-	hci->le_states[0] |= 0x80;	/* Connection (Slave Role) */
+	hci->le_states[0] |= 0x40;	/* Initiating + Conn (Central Role) */
+	hci->le_states[0] |= 0x80;	/* Connection (Peripheral Role) */
 	hci->le_states[1] |= 0x01;	/* Passive Scanning +
 					 * Non-connectable Advertising */
 
@@ -503,11 +504,17 @@ static void send_adv_pkt(struct bt_le *hci, uint8_t channel)
 
 static unsigned int get_adv_delay(void)
 {
+	unsigned int val;
+
 	/* The advertising delay is a pseudo-random value with a range
 	 * of 0 ms to 10 ms generated for each advertising event.
 	 */
-	srand(time(NULL));
-	return (rand() % 11);
+	if (getrandom(&val, sizeof(val), 0) < 0) {
+		/* If it fails to get the random number, use a static value */
+		val = 5;
+	}
+
+	return (val % 11);
 }
 
 static void adv_timeout_callback(int id, void *user_data)
@@ -1208,34 +1215,34 @@ static void cmd_le_create_conn_cancel(struct bt_le *hci,
 							&evt, sizeof(evt));
 }
 
-static void cmd_le_read_white_list_size(struct bt_le *hci,
+static void cmd_le_read_accept_list_size(struct bt_le *hci,
 						const void *data, uint8_t size)
 {
-	struct bt_hci_rsp_le_read_white_list_size rsp;
+	struct bt_hci_rsp_le_read_accept_list_size rsp;
 
 	rsp.status = BT_HCI_ERR_SUCCESS;
-	rsp.size = hci->le_white_list_size;
+	rsp.size = hci->le_accept_list_size;
 
-	cmd_complete(hci, BT_HCI_CMD_LE_READ_WHITE_LIST_SIZE,
+	cmd_complete(hci, BT_HCI_CMD_LE_READ_ACCEPT_LIST_SIZE,
 							&rsp, sizeof(rsp));
 }
 
-static void cmd_le_clear_white_list(struct bt_le *hci,
+static void cmd_le_clear_accept_list(struct bt_le *hci,
 						const void *data, uint8_t size)
 {
 	uint8_t status;
 
-	clear_white_list(hci);
+	clear_accept_list(hci);
 
 	status = BT_HCI_ERR_SUCCESS;
-	cmd_complete(hci, BT_HCI_CMD_LE_CLEAR_WHITE_LIST,
+	cmd_complete(hci, BT_HCI_CMD_LE_CLEAR_ACCEPT_LIST,
 						&status, sizeof(status));
 }
 
-static void cmd_le_add_to_white_list(struct bt_le *hci,
+static void cmd_le_add_to_accept_list(struct bt_le *hci,
 						const void *data, uint8_t size)
 {
-	const struct bt_hci_cmd_le_add_to_white_list *cmd = data;
+	const struct bt_hci_cmd_le_add_to_accept_list *cmd = data;
 	uint8_t status;
 	bool exists = false;
 	int i, pos = -1;
@@ -1243,57 +1250,57 @@ static void cmd_le_add_to_white_list(struct bt_le *hci,
 	/* Valid range for address type is 0x00 to 0x01 */
 	if (cmd->addr_type > 0x01) {
 		cmd_status(hci, BT_HCI_ERR_INVALID_PARAMETERS,
-					BT_HCI_CMD_LE_ADD_TO_WHITE_LIST);
+					BT_HCI_CMD_LE_ADD_TO_ACCEPT_LIST);
 		return;
 	}
 
-	for (i = 0; i < hci->le_white_list_size; i++) {
-		if (hci->le_white_list[i][0] == cmd->addr_type &&
-				!memcmp(&hci->le_white_list[i][1],
+	for (i = 0; i < hci->le_accept_list_size; i++) {
+		if (hci->le_accept_list[i][0] == cmd->addr_type &&
+				!memcmp(&hci->le_accept_list[i][1],
 							cmd->addr, 6)) {
 			exists = true;
 			break;
-		} else if (pos < 0 && hci->le_white_list[i][0] == 0xff)
+		} else if (pos < 0 && hci->le_accept_list[i][0] == 0xff)
 			pos = i;
 	}
 
 	if (exists) {
 		cmd_status(hci, BT_HCI_ERR_UNSPECIFIED_ERROR,
-					BT_HCI_CMD_LE_ADD_TO_WHITE_LIST);
+					BT_HCI_CMD_LE_ADD_TO_ACCEPT_LIST);
 		return;
 	}
 
 	if (pos < 0) {
 		cmd_status(hci, BT_HCI_ERR_MEM_CAPACITY_EXCEEDED,
-					BT_HCI_CMD_LE_ADD_TO_WHITE_LIST);
+					BT_HCI_CMD_LE_ADD_TO_ACCEPT_LIST);
 		return;
 	}
 
-	hci->le_white_list[pos][0] = cmd->addr_type;
-	memcpy(&hci->le_white_list[pos][1], cmd->addr, 6);
+	hci->le_accept_list[pos][0] = cmd->addr_type;
+	memcpy(&hci->le_accept_list[pos][1], cmd->addr, 6);
 
 	status = BT_HCI_ERR_SUCCESS;
-	cmd_complete(hci, BT_HCI_CMD_LE_ADD_TO_WHITE_LIST,
+	cmd_complete(hci, BT_HCI_CMD_LE_ADD_TO_ACCEPT_LIST,
 						&status, sizeof(status));
 }
 
-static void cmd_le_remove_from_white_list(struct bt_le *hci,
+static void cmd_le_remove_from_accept_list(struct bt_le *hci,
 						const void *data, uint8_t size)
 {
-	const struct bt_hci_cmd_le_remove_from_white_list *cmd = data;
+	const struct bt_hci_cmd_le_remove_from_accept_list *cmd = data;
 	uint8_t status;
 	int i, pos = -1;
 
 	/* Valid range for address type is 0x00 to 0x01 */
 	if (cmd->addr_type > 0x01) {
 		cmd_status(hci, BT_HCI_ERR_INVALID_PARAMETERS,
-					BT_HCI_CMD_LE_REMOVE_FROM_WHITE_LIST);
+					BT_HCI_CMD_LE_REMOVE_FROM_ACCEPT_LIST);
 		return;
 	}
 
-	for (i = 0; i < hci->le_white_list_size; i++) {
-		if (hci->le_white_list[i][0] == cmd->addr_type &&
-				!memcmp(&hci->le_white_list[i][1],
+	for (i = 0; i < hci->le_accept_list_size; i++) {
+		if (hci->le_accept_list[i][0] == cmd->addr_type &&
+				!memcmp(&hci->le_accept_list[i][1],
 							cmd->addr, 6)) {
 			pos = i;
 			break;
@@ -1302,15 +1309,15 @@ static void cmd_le_remove_from_white_list(struct bt_le *hci,
 
 	if (pos < 0) {
 		cmd_status(hci, BT_HCI_ERR_INVALID_PARAMETERS,
-					BT_HCI_CMD_LE_REMOVE_FROM_WHITE_LIST);
+					BT_HCI_CMD_LE_REMOVE_FROM_ACCEPT_LIST);
 		return;
 	}
 
-	hci->le_white_list[pos][0] = 0xff;
-	memset(&hci->le_white_list[pos][1], 0, 6);
+	hci->le_accept_list[pos][0] = 0xff;
+	memset(&hci->le_accept_list[pos][1], 0, 6);
 
 	status = BT_HCI_ERR_SUCCESS;
-	cmd_complete(hci, BT_HCI_CMD_LE_REMOVE_FROM_WHITE_LIST,
+	cmd_complete(hci, BT_HCI_CMD_LE_REMOVE_FROM_ACCEPT_LIST,
 						&status, sizeof(status));
 }
 
@@ -1830,14 +1837,14 @@ static const struct {
 				cmd_le_create_conn, 25, true },
 	{ BT_HCI_CMD_LE_CREATE_CONN_CANCEL,
 				cmd_le_create_conn_cancel, 0, true },
-	{ BT_HCI_CMD_LE_READ_WHITE_LIST_SIZE,
-				cmd_le_read_white_list_size, 0, true },
-	{ BT_HCI_CMD_LE_CLEAR_WHITE_LIST,
-				cmd_le_clear_white_list, 0, true },
-	{ BT_HCI_CMD_LE_ADD_TO_WHITE_LIST,
-				cmd_le_add_to_white_list,  7, true },
-	{ BT_HCI_CMD_LE_REMOVE_FROM_WHITE_LIST,
-				cmd_le_remove_from_white_list, 7, true },
+	{ BT_HCI_CMD_LE_READ_ACCEPT_LIST_SIZE,
+				cmd_le_read_accept_list_size, 0, true },
+	{ BT_HCI_CMD_LE_CLEAR_ACCEPT_LIST,
+				cmd_le_clear_accept_list, 0, true },
+	{ BT_HCI_CMD_LE_ADD_TO_ACCEPT_LIST,
+				cmd_le_add_to_accept_list,  7, true },
+	{ BT_HCI_CMD_LE_REMOVE_FROM_ACCEPT_LIST,
+				cmd_le_remove_from_accept_list, 7, true },
 
 	{ BT_HCI_CMD_LE_ENCRYPT, cmd_le_encrypt, 32, true },
 	{ BT_HCI_CMD_LE_RAND, cmd_le_rand, 0, true },
@@ -1963,7 +1970,7 @@ static void phy_recv_callback(uint16_t type, const void *data,
 
 			if (hci->le_scan_filter_policy == 0x01 ||
 					hci->le_scan_filter_policy == 0x03) {
-				if (!is_in_white_list(hci, tx_addr_type,
+				if (!is_in_accept_list(hci, tx_addr_type,
 								tx_addr))
 					break;
 			}

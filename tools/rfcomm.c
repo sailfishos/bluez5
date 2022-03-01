@@ -37,7 +37,7 @@ static int rfcomm_raw_tty = 0;
 static int auth = 0;
 static int encryption = 0;
 static int secure = 0;
-static int master = 0;
+static int central = 0;
 static int linger = 0;
 
 static char *rfcomm_state[] = {
@@ -434,7 +434,7 @@ static void cmd_listen(int ctl, int dev, bdaddr_t *bdaddr, int argc, char **argv
 	}
 
 	lm = 0;
-	if (master)
+	if (central)
 		lm |= RFCOMM_LM_MASTER;
 	if (auth)
 		lm |= RFCOMM_LM_AUTH;
@@ -646,7 +646,7 @@ static void usage(void)
 		"\t-A, --auth                     Enable authentication\n"
 		"\t-E, --encrypt                  Enable encryption\n"
 		"\t-S, --secure                   Secure connection\n"
-		"\t-M, --master                   Become the master of a piconet\n"
+		"\t-C, --central                  Become the central of a piconet\n"
 		"\t-L, --linger [seconds]         Set linger timeout\n"
 		"\t-a                             Show all devices (default)\n"
 		"\n");
@@ -668,7 +668,8 @@ static struct option main_options[] = {
 	{ "auth",	0, 0, 'A' },
 	{ "encrypt",	0, 0, 'E' },
 	{ "secure",	0, 0, 'S' },
-	{ "master",	0, 0, 'M' },
+	{ "master",	0, 0, 'M' }, /* Deprecated. Kept for compatibility. */
+	{ "central",	0, 0, 'C' },
 	{ "linger",	1, 0, 'L' },
 	{ 0, 0, 0, 0 }
 };
@@ -680,7 +681,8 @@ int main(int argc, char *argv[])
 
 	bacpy(&bdaddr, BDADDR_ANY);
 
-	while ((opt = getopt_long(argc, argv, "+i:rahAESML:", main_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "+i:rahAESMCL:", main_options,
+								NULL)) != -1) {
 		switch(opt) {
 		case 'i':
 			if (strncmp(optarg, "hci", 3) == 0)
@@ -713,8 +715,9 @@ int main(int argc, char *argv[])
 			secure = 1;
 			break;
 
-		case 'M':
-			master = 1;
+		case 'M': /* Deprecated. Kept for compatibility. */
+		case 'C':
+			central = 1;
 			break;
 
 		case 'L':

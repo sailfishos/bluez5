@@ -437,6 +437,7 @@ void rfcomm_packet(const struct l2cap_frame *frame)
 	if (frame->size < 4)
 		goto fail;
 
+	memset(&hdr, 0, sizeof(hdr));
 	if (!l2cap_frame_get_u8(l2cap_frame, &hdr.address) ||
 			!l2cap_frame_get_u8(l2cap_frame, &hdr.control) ||
 			!l2cap_frame_get_u8(l2cap_frame, &length))
@@ -448,9 +449,12 @@ void rfcomm_packet(const struct l2cap_frame *frame)
 	else {
 		if (!l2cap_frame_get_u8(l2cap_frame, &ex_length))
 			goto fail;
-		hdr.length = ((uint16_t)length << 8) | ex_length;
+		hdr.length = ((uint16_t)ex_length << 8) | length;
 		hdr.length = GET_LEN16(hdr.length);
 	}
+
+	if (!l2cap_frame->size)
+		goto fail;
 
 	l2cap_frame_pull(&tmp_frame, l2cap_frame, l2cap_frame->size-1);
 

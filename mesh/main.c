@@ -17,7 +17,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <signal.h>
 
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <ell/ell.h>
 
@@ -54,14 +56,15 @@ static void usage(void)
 	fprintf(stderr,
 		"Options:\n"
 	       "\t--io <io>         Use specified io (default: generic)\n"
-	       "\t--config          Configuration directory\n"
+	       "\t--config          Daemon configuration directory\n"
+	       "\t--storage         Mesh node(s) configuration directory\n"
 	       "\t--nodetach        Run in foreground\n"
 	       "\t--debug           Enable debug output\n"
 	       "\t--dbus-debug      Enable D-Bus debugging\n"
 	       "\t--help            Show %s information\n", __func__);
 	fprintf(stderr,
 	       "io:\n"
-	       "\t([hci]<index> | generic[:[hci]<index>])\n"
+	       "\t([hci]<index> | generic[:[hci]<index>] | unit:<fd_path>)\n"
 	       "\t\tUse generic HCI io on interface hci<index>, or the first\n"
 	       "\t\tavailable one\n");
 }
@@ -77,6 +80,7 @@ static void mesh_ready_callback(void *user_data, bool success)
 {
 	struct l_dbus *dbus = user_data;
 
+	l_info("mesh_ready_callback");
 	if (!success) {
 		l_error("Failed to start mesh");
 		l_main_quit();
@@ -92,10 +96,8 @@ static void mesh_ready_callback(void *user_data, bool success)
 static void request_name_callback(struct l_dbus *dbus, bool success,
 					bool queued, void *user_data)
 {
-	l_info("Request name %s",
-		success ? "success": "failed");
-
-	if (!success) {
+	if (!success && io_type != MESH_IO_TYPE_UNIT_TEST) {
+		l_info("Request name failed");
 		l_main_quit();
 		return;
 	}
@@ -159,6 +161,21 @@ static bool parse_io(const char *optarg, enum mesh_io_type *type, void **opts)
 			return true;
 
 		return false;
+
+	} else if (strstr(optarg, "unit") == optarg) {
+		char *test_path;
+
+		*type = MESH_IO_TYPE_UNIT_TEST;
+
+		optarg += strlen("unit");
+		if (*optarg != ':')
+			return false;
+
+		optarg++;
+		test_path = strdup(optarg);
+
+		*opts = test_path;
+		return true;
 	}
 
 	return false;
@@ -187,11 +204,19 @@ int main(int argc, char *argv[])
 	for (;;) {
 		int opt;
 
-		opt = getopt_long(argc, argv, "i:s:c:ndbh", main_options, NULL);
+		opt = getopt_long(argc, argv, "u:i:s:c:ndbh", main_options,
+									NULL);
 		if (opt < 0)
 			break;
 
 		switch (opt) {
+		case 'u':
+			if (sscanf(optarg, "%d", &hci_index) == 1 ||
+					sscanf(optarg, "%d", &hci_index) == 1)
+				io = l_strdup_printf("unit:%d", hci_index);
+			else
+				io = l_strdup(optarg);
+			break;
 		case 'i':
 			if (sscanf(optarg, "hci%d", &hci_index) == 1 ||
 					sscanf(optarg, "%d", &hci_index) == 1)
@@ -240,7 +265,13 @@ int main(int argc, char *argv[])
 	if (!detached)
 		umask(0077);
 
-	dbus = l_dbus_new_default(L_DBUS_SYSTEM_BUS);
+	if (io_type != MESH_IO_TYPE_UNIT_TEST)
+		dbus = l_dbus_new_default(L_DBUS_SYSTEM_BUS);
+	else {
+		dbus = l_dbus_new_default(L_DBUS_SESSION_BUS);
+		prctl(PR_SET_PDEATHSIG, SIGSEGV);
+	}
+
 	if (!dbus) {
 		l_error("unable to connect to D-Bus");
 		status = EXIT_FAILURE;
@@ -261,11 +292,8 @@ int main(int argc, char *argv[])
 	status = l_main_run_with_signal(signal_handler, NULL);
 
 done:
-	if (io)
-		l_free(io);
-
-	if (io_opts)
-		l_free(io_opts);
+	l_free(io);
+	l_free(io_opts);
 
 	mesh_cleanup();
 	l_dbus_destroy(dbus);

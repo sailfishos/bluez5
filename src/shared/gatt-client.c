@@ -562,8 +562,9 @@ static void discover_incl_cb(bool success, uint8_t att_ecode,
 		attr = gatt_db_get_attribute(client->db, start);
 		if (!attr) {
 			util_debug(client->debug_callback, client->debug_data,
-				"Unable to find attribute at 0x%04x", start);
-			goto failed;
+				"Unable to find attribute at 0x%04x: skipping",
+				start);
+			continue;
 		}
 
 		attr = gatt_db_insert_included(client->db, handle, attr);
@@ -1585,20 +1586,20 @@ static bool notify_data_write_ccc(struct notify_data *notify_data, bool enable,
 {
 	uint8_t pdu[4];
 	unsigned int att_id;
+	uint16_t properties = notify_data->chrc->properties;
 
 	assert(notify_data->chrc->ccc_handle);
 	memset(pdu, 0, sizeof(pdu));
 	put_le16(notify_data->chrc->ccc_handle, pdu);
 
 	if (enable) {
-		/* Try to enable notifications and/or indications based on
+		/* Try to enable notifications or indications based on
 		 * whatever the characteristic supports.
 		 */
-		if (notify_data->chrc->properties & BT_GATT_CHRC_PROP_NOTIFY)
+		if (properties & BT_GATT_CHRC_PROP_NOTIFY)
 			pdu[2] = 0x01;
-
-		if (notify_data->chrc->properties & BT_GATT_CHRC_PROP_INDICATE)
-			pdu[2] |= 0x02;
+		else if (properties & BT_GATT_CHRC_PROP_INDICATE)
+			pdu[2] = 0x02;
 
 		if (!pdu[2])
 			return false;
@@ -2172,6 +2173,9 @@ static void notify_cb(struct bt_att_chan *chan, uint8_t opcode,
 			data.len = get_le16(pdu);
 			length -= 2;
 			pdu += 2;
+
+			if (data.len > length)
+				data.len = length;
 
 			data.data = pdu;
 
@@ -2862,17 +2866,18 @@ static void read_long_cb(uint8_t opcode, const void *pdu,
 
 	if (length >= bt_att_get_mtu(op->client->att) - 1) {
 		uint8_t pdu[4];
+		int err;
 
 		put_le16(op->value_handle, pdu);
 		put_le16(op->offset, pdu + 2);
 
-		req->att_id = bt_att_send(op->client->att,
+		err = bt_att_resend(op->client->att, req->att_id,
 							BT_ATT_OP_READ_BLOB_REQ,
 							pdu, sizeof(pdu),
 							read_long_cb,
 							request_ref(req),
 							request_unref);
-		if (req->att_id)
+		if (!err)
 			return;
 
 		request_unref(req);
@@ -3118,6 +3123,7 @@ static void handle_next_prep_write(struct request *req)
 	struct long_write_op *op = req->data;
 	bool success = true;
 	uint8_t *pdu;
+	int err;
 
 	pdu = malloc(op->cur_length + 4);
 	if (!pdu) {
@@ -3129,12 +3135,13 @@ static void handle_next_prep_write(struct request *req)
 	put_le16(op->offset + op->index, pdu + 2);
 	memcpy(pdu + 4, op->value + op->index, op->cur_length);
 
-	req->att_id = bt_att_send(op->client->att, BT_ATT_OP_PREP_WRITE_REQ,
-							pdu, op->cur_length + 4,
-							prepare_write_cb,
-							request_ref(req),
-							request_unref);
-	if (!req->att_id) {
+	err = bt_att_resend(op->client->att, req->att_id,
+						BT_ATT_OP_PREP_WRITE_REQ,
+						pdu, op->cur_length + 4,
+						prepare_write_cb,
+						request_ref(req),
+						request_unref);
+	if (err) {
 		request_unref(req);
 		success = false;
 	}
@@ -3204,6 +3211,7 @@ static void complete_write_long_op(struct request *req, bool success,
 {
 	struct long_write_op *op = req->data;
 	uint8_t pdu;
+	int err;
 
 	op->success = success;
 	op->att_ecode = att_ecode;
@@ -3214,12 +3222,13 @@ static void complete_write_long_op(struct request *req, bool success,
 	else
 		pdu = 0x00;  /* Cancel */
 
-	req->att_id = bt_att_send(op->client->att, BT_ATT_OP_EXEC_WRITE_REQ,
-							&pdu, sizeof(pdu),
-							execute_write_cb,
-							request_ref(req),
-							request_unref);
-	if (req->att_id)
+	err = bt_att_resend(op->client->att, req->att_id,
+					BT_ATT_OP_EXEC_WRITE_REQ,
+					&pdu, sizeof(pdu),
+					execute_write_cb,
+					request_ref(req),
+					request_unref);
+	if (!err)
 		return;
 
 	request_unref(req);

@@ -48,7 +48,7 @@ struct btd_adv_manager {
 	uint8_t max_scan_rsp_len;
 	uint8_t max_ads;
 	uint32_t supported_flags;
-	unsigned int instance_bitmap;
+	uint64_t instance_bitmap;
 	bool extended_add_cmds;
 	int8_t min_tx_power;
 	int8_t max_tx_power;
@@ -774,21 +774,14 @@ static uint8_t *generate_adv_data(struct btd_adv_client *client,
 static uint8_t *generate_scan_rsp(struct btd_adv_client *client,
 						uint32_t *flags, size_t *len)
 {
-	struct btd_adv_manager *manager = client->manager;
-	const char *name;
-
-	if (!(*flags & MGMT_ADV_FLAG_LOCAL_NAME) && !client->name) {
+	if (!client->name) {
 		*len = 0;
 		return NULL;
 	}
 
 	*flags &= ~MGMT_ADV_FLAG_LOCAL_NAME;
 
-	name = client->name;
-	if (!name)
-		name = btd_adapter_get_name(manager->adapter);
-
-	bt_ad_add_name(client->scan, name);
+	bt_ad_add_name(client->scan, client->name);
 
 	return bt_ad_generate(client->scan, len);
 }
@@ -1793,6 +1786,13 @@ static void read_adv_features_callback(uint8_t status, uint16_t length,
 	manager->max_ads = feat->max_instances;
 	manager->supported_flags |= feat->supported_flags;
 
+	/* Registering interface after querying properties */
+	if (!g_dbus_register_interface(btd_get_dbus_connection(),
+				       adapter_get_path(manager->adapter),
+				       LE_ADVERTISING_MGR_IFACE, methods,
+				       NULL, properties, manager, NULL))
+		error("Failed to register " LE_ADVERTISING_MGR_IFACE);
+
 	if (manager->max_ads == 0)
 		return;
 
@@ -1867,14 +1867,6 @@ static struct btd_adv_manager *manager_create(struct btd_adapter *adapter,
 			btd_has_kernel_features(KERNEL_HAS_EXT_ADV_ADD_CMDS);
 	manager->min_tx_power = ADV_TX_POWER_NO_PREFERENCE;
 	manager->max_tx_power = ADV_TX_POWER_NO_PREFERENCE;
-
-	if (!g_dbus_register_interface(btd_get_dbus_connection(),
-					adapter_get_path(manager->adapter),
-					LE_ADVERTISING_MGR_IFACE, methods,
-					NULL, properties, manager, NULL)) {
-		error("Failed to register " LE_ADVERTISING_MGR_IFACE);
-		goto fail;
-	}
 
 	if (!mgmt_send(manager->mgmt, MGMT_OP_READ_ADV_FEATURES,
 				manager->mgmt_index, 0, NULL,

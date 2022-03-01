@@ -10,6 +10,8 @@
  *
  */
 
+#include <stdbool.h>
+
 typedef enum {
 	BT_MODE_DUAL,
 	BT_MODE_BREDR,
@@ -89,6 +91,10 @@ struct btd_avdtp_opts {
 	uint8_t  stream_mode;
 };
 
+struct btd_advmon_opts {
+	uint8_t		rssi_sampling_period;
+};
+
 struct btd_opts {
 	char		*name;
 	uint32_t	class;
@@ -97,6 +103,8 @@ struct btd_opts {
 	uint32_t	discovto;
 	uint32_t	tmpto;
 	uint8_t		privacy;
+	bool		device_privacy;
+	uint32_t	name_request_retry_delay;
 
 	struct btd_defaults defaults;
 
@@ -105,6 +113,7 @@ struct btd_opts {
 	gboolean	debug_keys;
 	gboolean	fast_conn;
 	gboolean	refresh_discovery;
+	struct queue	*experimental;
 
 	uint16_t	did_source;
 	uint16_t	did_vendor;
@@ -122,6 +131,8 @@ struct btd_opts {
 	uint8_t		key_size;
 
 	enum jw_repairing_t jw_repairing;
+
+	struct btd_advmon_opts	advmon;
 };
 
 extern struct btd_opts btd_opts;
@@ -133,5 +144,6 @@ void rfkill_init(void);
 void rfkill_exit(void);
 
 GKeyFile *btd_get_main_conf(void);
+bool btd_experimental_enabled(const char *uuid);
 
 void btd_exit(void);

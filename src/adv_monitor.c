@@ -25,6 +25,7 @@
 #include "lib/mgmt.h"
 
 #include "adapter.h"
+#include "btd.h"
 #include "dbus-common.h"
 #include "device.h"
 #include "log.h"
@@ -49,7 +50,6 @@
 #define ADV_MONITOR_DEFAULT_HIGH_TIMEOUT 10	/* second */
 #define ADV_MONITOR_UNSET_SAMPLING_PERIOD 256	/* 100 ms */
 #define ADV_MONITOR_MAX_SAMPLING_PERIOD	255	/* 100 ms */
-#define ADV_MONITOR_DEFAULT_SAMPLING_PERIOD 0	/* 100 ms */
 
 struct btd_adv_monitor_manager {
 	struct btd_adapter *adapter;
@@ -172,6 +172,11 @@ struct adv_content_filter_info {
 struct adv_rssi_filter_info {
 	struct btd_device *device;
 	int8_t rssi;
+};
+
+struct monitored_device_info {
+	uint16_t monitor_handle;	/* Kernel Monitor Handle */
+	struct btd_device *device;
 };
 
 static void monitor_device_free(void *data);
@@ -767,7 +772,7 @@ static bool parse_rssi_and_timeout(struct adv_monitor *monitor,
 	int16_t l_rssi = ADV_MONITOR_UNSET_RSSI;
 	uint16_t h_rssi_timeout = ADV_MONITOR_UNSET_TIMEOUT;
 	uint16_t l_rssi_timeout = ADV_MONITOR_UNSET_TIMEOUT;
-	int16_t sampling_period = ADV_MONITOR_UNSET_SAMPLING_PERIOD;
+	uint16_t sampling_period = ADV_MONITOR_UNSET_SAMPLING_PERIOD;
 	uint16_t adapter_id = monitor->app->manager->adapter_id;
 
 	/* Extract RSSIHighThreshold */
@@ -831,7 +836,7 @@ static bool parse_rssi_and_timeout(struct adv_monitor *monitor,
 		h_rssi_timeout = ADV_MONITOR_DEFAULT_HIGH_TIMEOUT;
 
 	if (sampling_period == ADV_MONITOR_UNSET_SAMPLING_PERIOD)
-		sampling_period = ADV_MONITOR_DEFAULT_SAMPLING_PERIOD;
+		sampling_period = btd_opts.advmon.rssi_sampling_period;
 
 	if (h_rssi < ADV_MONITOR_MIN_RSSI || h_rssi > ADV_MONITOR_MAX_RSSI ||
 		l_rssi < ADV_MONITOR_MIN_RSSI ||
@@ -1531,6 +1536,171 @@ static void adv_monitor_removed_callback(uint16_t index, uint16_t length,
 		ev->monitor_handle);
 }
 
+/* Includes found/lost device's object path into the dbus message */
+static void report_device_state_setup(DBusMessageIter *iter, void *user_data)
+{
+	const char *path = device_get_path(user_data);
+
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_OBJECT_PATH, &path);
+}
+
+/* Invokes DeviceFound on the matched monitor */
+static void notify_device_found_per_monitor(void *data, void *user_data)
+{
+	struct adv_monitor *monitor = data;
+	struct monitored_device_info *info = user_data;
+
+	if (monitor->merged_pattern->monitor_handle == info->monitor_handle) {
+		DBG("Calling DeviceFound() on Adv Monitor of owner %s "
+		    "at path %s", monitor->app->owner, monitor->path);
+
+		g_dbus_proxy_method_call(monitor->proxy, "DeviceFound",
+					 report_device_state_setup, NULL,
+					 info->device, NULL);
+	}
+}
+
+/* Checks all monitors for match in the app to invoke DeviceFound */
+static void notify_device_found_per_app(void *data, void *user_data)
+{
+	struct adv_monitor_app *app = data;
+
+	queue_foreach(app->monitors, notify_device_found_per_monitor,
+		      user_data);
+}
+
+/* Processes Adv Monitor Device Found event from kernel */
+static void adv_monitor_device_found_callback(uint16_t index, uint16_t length,
+						const void *param,
+						void *user_data)
+{
+	const struct mgmt_ev_adv_monitor_device_found *ev = param;
+	struct btd_adv_monitor_manager *manager = user_data;
+	const uint16_t adapter_id = manager->adapter_id;
+	struct btd_adapter *adapter = manager->adapter;
+	uint16_t handle = le16_to_cpu(ev->monitor_handle);
+	struct monitored_device_info info;
+	const uint8_t *ad_data = NULL;
+	uint16_t ad_data_len;
+	uint32_t flags;
+	bool confirm_name;
+	bool legacy;
+	bool not_connectable;
+	bool name_resolve_failed;
+	char addr[18];
+
+	if (length < sizeof(*ev)) {
+		btd_error(adapter_id,
+				"Too short Adv Monitor Device Found event");
+		return;
+	}
+
+	ad_data_len = btohs(ev->ad_data_len);
+	if (length != sizeof(*ev) + ad_data_len) {
+		btd_error(adapter_id,
+				"Wrong size of Adv Monitor Device Found event");
+		return;
+	}
+
+	if (ad_data_len > 0)
+		ad_data = ev->ad_data;
+
+	flags = btohl(ev->flags);
+
+	ba2str(&ev->addr.bdaddr, addr);
+	DBG("hci%u addr %s, rssi %d flags 0x%04x ad_data_len %u",
+			index, addr, ev->rssi, flags, ad_data_len);
+
+	confirm_name = (flags & MGMT_DEV_FOUND_CONFIRM_NAME);
+	legacy = (flags & MGMT_DEV_FOUND_LEGACY_PAIRING);
+	not_connectable = (flags & MGMT_DEV_FOUND_NOT_CONNECTABLE);
+	name_resolve_failed = (flags & MGMT_DEV_FOUND_NAME_REQUEST_FAILED);
+
+	btd_adapter_update_found_device(adapter, &ev->addr.bdaddr,
+					ev->addr.type, ev->rssi, confirm_name,
+					legacy, not_connectable,
+					name_resolve_failed, ad_data,
+					ad_data_len, true);
+
+	if (handle) {
+		DBG("Adv Monitor with handle 0x%04x started tracking "
+		    "the device %s", handle, addr);
+
+		info.device = btd_adapter_find_device(adapter, &ev->addr.bdaddr,
+						      ev->addr.type);
+		if (!info.device) {
+			btd_error(adapter_id, "Device object not found for %s",
+				  addr);
+			return;
+		}
+
+		/* Check for matched monitor in all apps */
+		info.monitor_handle = handle;
+		queue_foreach(manager->apps, notify_device_found_per_app,
+			      &info);
+	}
+}
+
+/* Invokes DeviceLost on the matched monitor */
+static void notify_device_lost_per_monitor(void *data, void *user_data)
+{
+	struct adv_monitor *monitor = data;
+	struct monitored_device_info *info = user_data;
+
+	if (monitor->merged_pattern->monitor_handle == info->monitor_handle) {
+		DBG("Calling DeviceLost() on Adv Monitor of owner %s "
+		    "at path %s", monitor->app->owner, monitor->path);
+
+		g_dbus_proxy_method_call(monitor->proxy, "DeviceLost",
+					 report_device_state_setup, NULL,
+					 info->device, NULL);
+	}
+}
+
+/* Checks all monitors for match in the app to invoke DeviceLost */
+static void notify_device_lost_per_app(void *data, void *user_data)
+{
+	struct adv_monitor_app *app = data;
+
+	queue_foreach(app->monitors, notify_device_lost_per_monitor,
+		      user_data);
+}
+
+/* Processes Adv Monitor Device Lost event from kernel */
+static void adv_monitor_device_lost_callback(uint16_t index, uint16_t length,
+						const void *param,
+						void *user_data)
+{
+	struct btd_adv_monitor_manager *manager = user_data;
+	const struct mgmt_ev_adv_monitor_device_lost *ev = param;
+	uint16_t handle = le16_to_cpu(ev->monitor_handle);
+	const uint16_t adapter_id = manager->adapter_id;
+	struct btd_adapter *adapter = manager->adapter;
+	struct monitored_device_info info;
+	char addr[18];
+
+	if (length < sizeof(*ev)) {
+		btd_error(adapter_id,
+				"Wrong size of Adv Monitor Device Lost event");
+		return;
+	}
+
+	ba2str(&ev->addr.bdaddr, addr);
+	DBG("Adv Monitor with handle 0x%04x stopped tracking the device %s",
+		handle, addr);
+
+	info.device = btd_adapter_find_device(adapter, &ev->addr.bdaddr,
+					      ev->addr.type);
+	if (!info.device) {
+		btd_error(adapter_id, "Device object not found for %s", addr);
+		return;
+	}
+
+	/* Check for matched monitor in all apps */
+	info.monitor_handle = handle;
+	queue_foreach(manager->apps, notify_device_lost_per_app, &info);
+}
+
 /* Allocates a manager object */
 static struct btd_adv_monitor_manager *manager_new(
 						struct btd_adapter *adapter,
@@ -1553,6 +1723,14 @@ static struct btd_adv_monitor_manager *manager_new(
 
 	mgmt_register(manager->mgmt, MGMT_EV_ADV_MONITOR_REMOVED,
 			manager->adapter_id, adv_monitor_removed_callback,
+			manager, NULL);
+
+	mgmt_register(manager->mgmt, MGMT_EV_ADV_MONITOR_DEVICE_FOUND,
+			manager->adapter_id, adv_monitor_device_found_callback,
+			manager, NULL);
+
+	mgmt_register(manager->mgmt, MGMT_EV_ADV_MONITOR_DEVICE_LOST,
+			manager->adapter_id, adv_monitor_device_lost_callback,
 			manager, NULL);
 
 	return manager;
@@ -1664,6 +1842,15 @@ void btd_adv_monitor_manager_destroy(struct btd_adv_monitor_manager *manager)
 	btd_info(manager->adapter_id, "Destroy Adv Monitor Manager");
 
 	manager_destroy(manager);
+}
+
+bool btd_adv_monitor_offload_enabled(struct btd_adv_monitor_manager *manager)
+{
+	if (!manager)
+		return false;
+
+	return !!(manager->enabled_features &
+				MGMT_ADV_MONITOR_FEATURE_MASK_OR_PATTERNS);
 }
 
 /* Processes the content matching based pattern(s) of a monitor */
@@ -1871,43 +2058,22 @@ static struct adv_monitor_device *monitor_device_create(
 	return dev;
 }
 
-/* Includes found/lost device's object path into the dbus message */
-static void report_device_state_setup(DBusMessageIter *iter, void *user_data)
-{
-	const char *path = device_get_path(user_data);
-
-	dbus_message_iter_append_basic(iter, DBUS_TYPE_OBJECT_PATH, &path);
-}
-
 /* Handles a situation where the device goes offline/out-of-range */
 static bool handle_device_lost_timeout(gpointer user_data)
 {
 	struct adv_monitor_device *dev = user_data;
 	struct adv_monitor *monitor = dev->monitor;
-	time_t curr_time = time(NULL);
 
-	DBG("Device Lost timeout triggered for device %p "
-	    "for the Adv Monitor at path %s", dev->device, monitor->path);
+	DBG("Device Lost timeout triggered for device %p. Calling DeviceLost() "
+	    "on Adv Monitor of owner %s at path %s", dev->device,
+					    monitor->app->owner, monitor->path);
+
+	g_dbus_proxy_method_call(monitor->proxy, "DeviceLost",
+				 report_device_state_setup,
+				 NULL, dev->device, NULL);
 
 	dev->lost_timer = 0;
-
-	if (dev->found && dev->last_seen) {
-		/* We were tracking for the Low RSSI filter. Check if there is
-		 * any Adv received after the timeout function is invoked.
-		 * If not, report the Device Lost event.
-		 */
-		if (difftime(curr_time, dev->last_seen) >=
-		    monitor->rssi.low_rssi_timeout) {
-			dev->found = false;
-
-			DBG("Calling DeviceLost() on Adv Monitor of owner %s "
-			    "at path %s", monitor->app->owner, monitor->path);
-
-			g_dbus_proxy_method_call(monitor->proxy, "DeviceLost",
-						 report_device_state_setup,
-						 NULL, dev->device, NULL);
-		}
-	}
+	dev->found = false;
 
 	return FALSE;
 }
@@ -2025,4 +2191,55 @@ static void adv_monitor_filter_rssi(struct adv_monitor *monitor,
 					    handle_device_lost_timeout, dev,
 					    NULL);
 	}
+}
+
+/* Clears running DeviceLost timer for a given device */
+static void clear_device_lost_timer(void *data, void *user_data)
+{
+	struct adv_monitor_device *dev = data;
+	struct adv_monitor *monitor = NULL;
+
+	if (dev->lost_timer) {
+		timeout_remove(dev->lost_timer);
+		dev->lost_timer = 0;
+
+		monitor = dev->monitor;
+
+		DBG("Calling DeviceLost() for device %p on Adv Monitor "
+				"of owner %s at path %s", dev->device,
+				monitor->app->owner, monitor->path);
+
+		g_dbus_proxy_method_call(monitor->proxy, "DeviceLost",
+				report_device_state_setup,
+				NULL, dev->device, NULL);
+	}
+}
+
+/* Clears running DeviceLost timers from each monitor */
+static void clear_lost_timers_from_monitor(void *data, void *user_data)
+{
+	struct adv_monitor *monitor = data;
+
+	queue_foreach(monitor->devices, clear_device_lost_timer, NULL);
+}
+
+/* Clears running DeviceLost timers from each app */
+static void clear_lost_timers_from_app(void *data, void *user_data)
+{
+	struct adv_monitor_app *app = data;
+
+	queue_foreach(app->monitors, clear_lost_timers_from_monitor, NULL);
+}
+
+/* Handles bt power down scenario */
+void btd_adv_monitor_power_down(struct btd_adv_monitor_manager *manager)
+{
+	if (!manager) {
+		error("Unexpected NULL btd_adv_monitor_manager object upon "
+				"power down");
+		return;
+	}
+
+	/* Clear any running DeviceLost timers in case of power down */
+	queue_foreach(manager->apps, clear_lost_timers_from_app, NULL);
 }

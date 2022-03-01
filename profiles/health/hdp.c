@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <sys/random.h>
 
 #include <glib.h>
 
@@ -575,7 +576,7 @@ static void device_reconnect_mdl_cb(struct mcap_mdl *mdl, GError *err,
 					"Cannot reconnect: %s", gerr->message);
 	g_dbus_send_message(conn, reply);
 	hdp_tmp_dc_data_unref(dc_data);
-	g_error_free(gerr);
+	g_clear_error(&gerr);
 
 	/* Send abort request because remote side is now in PENDING state */
 	if (!mcap_mdl_abort(mdl, abort_mdl_cb, NULL, NULL, &gerr)) {
@@ -1484,13 +1485,15 @@ static void destroy_create_dc_data(gpointer data)
 static void *generate_echo_packet(void)
 {
 	uint8_t *buf;
-	int i;
 
 	buf = g_malloc(HDP_ECHO_LEN);
-	srand(time(NULL));
+	if (!buf)
+		return NULL;
 
-	for(i = 0; i < HDP_ECHO_LEN; i++)
-		buf[i] = rand() % UINT8_MAX;
+	if (getrandom(buf, HDP_ECHO_LEN, 0) < 0) {
+		g_free(buf);
+		return NULL;
+	}
 
 	return buf;
 }
@@ -1763,7 +1766,7 @@ static void device_create_mdl_cb(struct mcap_mdl *mdl, uint8_t conf,
 		return;
 
 	error("%s", gerr->message);
-	g_error_free(gerr);
+	g_clear_error(&gerr);
 
 	reply = g_dbus_create_reply(hdp_conn->msg,
 					DBUS_TYPE_OBJECT_PATH, &hdp_chan->path,
@@ -1787,7 +1790,7 @@ fail:
 						ERROR_INTERFACE ".HealthError",
 						"%s", gerr->message);
 	g_dbus_send_message(conn, reply);
-	g_error_free(gerr);
+	g_clear_error(&gerr);
 
 	/* Send abort request because remote side is now in PENDING */
 	/* state. Then we have to delete it because we couldn't */

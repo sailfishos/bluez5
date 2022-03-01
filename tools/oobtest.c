@@ -133,16 +133,16 @@ static void new_long_term_key_event(uint16_t index, uint16_t len,
 
 	switch (ev->key.type) {
 	case 0x00:
-		if (ev->key.master)
-			type = "Unauthenticated, Master";
+		if (ev->key.central)
+			type = "Unauthenticated, Central";
 		else
-			type = "Unauthenticated, Slave";
+			type = "Unauthenticated, Peripheral";
 		break;
 	case 0x01:
-		if (ev->key.master)
-			type = "Authenticated, Master";
+		if (ev->key.central)
+			type = "Authenticated, Central";
 		else
-			type = "Authenticated, Slave";
+			type = "Authenticated, Peripheral";
 		break;
 	case 0x02:
 		type = "Unauthenticated, P-256";

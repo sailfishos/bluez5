@@ -166,13 +166,16 @@ static void write_char(struct bt_hog *hog, GAttrib *attrib, uint16_t handle,
 		return;
 
 	id = gatt_write_char(attrib, handle, value, vlen, func, req);
-
-	if (set_and_store_gatt_req(hog, req, id))
+	if (!id) {
+		error("hog: Could not write char");
 		return;
+	}
 
-	error("hog: Could not read char");
-	g_attrib_cancel(attrib, id);
-	free(req);
+	if (!set_and_store_gatt_req(hog, req, id)) {
+		error("hog: Failed to queue write char req");
+		g_attrib_cancel(attrib, id);
+		free(req);
+	}
 }
 
 static void read_char(struct bt_hog *hog, GAttrib *attrib, uint16_t handle,
@@ -181,22 +184,21 @@ static void read_char(struct bt_hog *hog, GAttrib *attrib, uint16_t handle,
 	struct gatt_request *req;
 	unsigned int id;
 
-	/* Ignore if not connected */
-	if (!attrib)
-		return;
-
 	req = create_request(hog, user_data);
 	if (!req)
 		return;
 
 	id = gatt_read_char(attrib, handle, func, req);
-
-	if (set_and_store_gatt_req(hog, req, id))
+	if (!id) {
+		error("hog: Could not read char");
 		return;
+	}
 
-	error("hog: Could not read char");
-	g_attrib_cancel(attrib, id);
-	free(req);
+	if (!set_and_store_gatt_req(hog, req, id)) {
+		error("hog: Failed to queue read char req");
+		g_attrib_cancel(attrib, id);
+		free(req);
+	}
 }
 
 static void discover_desc(struct bt_hog *hog, GAttrib *attrib,
@@ -211,12 +213,16 @@ static void discover_desc(struct bt_hog *hog, GAttrib *attrib,
 		return;
 
 	id = gatt_discover_desc(attrib, start, end, NULL, func, req);
-	if (set_and_store_gatt_req(hog, req, id))
+	if (!id) {
+		error("hog: Could not discover descriptors");
 		return;
+	}
 
-	error("hog: Could not discover descriptors");
-	g_attrib_cancel(attrib, id);
-	free(req);
+	if (!set_and_store_gatt_req(hog, req, id)) {
+		error("hog: Failed to queue discover descriptors req");
+		g_attrib_cancel(attrib, id);
+		free(req);
+	}
 }
 
 static void discover_char(struct bt_hog *hog, GAttrib *attrib,
@@ -232,13 +238,16 @@ static void discover_char(struct bt_hog *hog, GAttrib *attrib,
 		return;
 
 	id = gatt_discover_char(attrib, start, end, uuid, func, req);
-
-	if (set_and_store_gatt_req(hog, req, id))
+	if (!id) {
+		error("hog: Could not discover characteristic");
 		return;
+	}
 
-	error("hog: Could not discover characteristic");
-	g_attrib_cancel(attrib, id);
-	free(req);
+	if (!set_and_store_gatt_req(hog, req, id)) {
+		error("hog: Failed to queue discover characteristic req");
+		g_attrib_cancel(attrib, id);
+		free(req);
+	}
 }
 
 static void discover_primary(struct bt_hog *hog, GAttrib *attrib,
@@ -253,13 +262,16 @@ static void discover_primary(struct bt_hog *hog, GAttrib *attrib,
 		return;
 
 	id = gatt_discover_primary(attrib, uuid, func, req);
-
-	if (set_and_store_gatt_req(hog, req, id))
+	if (!id) {
+		error("hog: Could not send discover primary");
 		return;
+	}
 
-	error("hog: Could not send discover primary");
-	g_attrib_cancel(attrib, id);
-	free(req);
+	if (!set_and_store_gatt_req(hog, req, id)) {
+		error("hog: Failed to queue discover primary req");
+		g_attrib_cancel(attrib, id);
+		free(req);
+	}
 }
 
 static void find_included(struct bt_hog *hog, GAttrib *attrib,
@@ -274,13 +286,16 @@ static void find_included(struct bt_hog *hog, GAttrib *attrib,
 		return;
 
 	id = gatt_find_included(attrib, start, end, func, req);
-
-	if (set_and_store_gatt_req(hog, req, id))
+	if (!id) {
+		error("hog: Could not find included");
 		return;
+	}
 
-	error("Could not find included");
-	g_attrib_cancel(attrib, id);
-	free(req);
+	if (!set_and_store_gatt_req(hog, req, id)) {
+		error("hog: Failed to queue find included req");
+		g_attrib_cancel(attrib, id);
+		free(req);
+	}
 }
 
 static void report_value_cb(const guint8 *pdu, guint16 len, gpointer user_data)
@@ -1439,7 +1454,6 @@ static void hog_attach_instance(struct bt_hog *hog,
 
 	if (!hog->attr) {
 		hog->attr = attr;
-		gatt_db_service_foreach_char(hog->attr, foreach_hog_chrc, hog);
 		return;
 	}
 

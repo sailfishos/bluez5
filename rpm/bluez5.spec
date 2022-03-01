@@ -1,7 +1,7 @@
 Name:       bluez5
 
 Summary:    Bluetooth daemon
-Version:    5.58
+Version:    5.63
 Release:    1
 License:    GPLv2+
 URL:        http://www.bluez.org/
@@ -51,13 +51,6 @@ Requires:   %{name} = %{version}-%{release}
 Requires:   cups
 Conflicts:  bluez-cups
 %description cups
-%{summary}.
-
-%package doc
-Summary:    Bluetooth (bluez5) daemon documentation
-Requires:   %{name} = %{version}-%{release}
-Conflicts:  bluez-doc
-%description doc
 %{summary}.
 
 %package hcidump
@@ -160,7 +153,8 @@ autoreconf --force --install
     --enable-sixaxis \
     --enable-test \
     --disable-autopair \
-    --disable-hostname
+    --disable-hostname \
+    --disable-manpages
 
 %make_build
 
@@ -265,11 +259,6 @@ systemctl-user daemon-reload ||:
 %files cups
 %defattr(-,root,root,-)
 %{_libdir}/cups/backend/bluetooth
-
-%files doc
-%defattr(-,root,root,-)
-%doc %{_mandir}/man1/*.1.gz
-%doc %{_mandir}/man8/*.8.gz
 
 %files hcidump
 %defattr(-,root,root,-)

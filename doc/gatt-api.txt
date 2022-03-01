@@ -253,7 +253,14 @@ Properties	string UUID [read-only]
 			Defines how the characteristic value can be used. See
 			Core spec "Table 3.5: Characteristic Properties bit
 			field", and "Table 3.8: Characteristic Extended
-			Properties bit field". Allowed values:
+			Properties bit field".
+
+			The "x-notify" and "x-indicate" flags restrict access
+			to notifications and indications by imposing write
+			restrictions on a characteristic's client
+			characteristic configuration descriptor.
+
+			Allowed values:
 
 				"broadcast"
 				"read"
@@ -267,10 +274,16 @@ Properties	string UUID [read-only]
 				"writable-auxiliaries"
 				"encrypt-read"
 				"encrypt-write"
+				"encrypt-notify" (Server only)
+				"encrypt-indicate" (Server only)
 				"encrypt-authenticated-read"
 				"encrypt-authenticated-write"
+				"encrypt-authenticated-notify" (Server only)
+				"encrypt-authenticated-indicate" (Server only)
 				"secure-read" (Server only)
 				"secure-write" (Server only)
+				"secure-notify" (Server only)
+				"secure-indicate" (Server only)
 				"authorize"
 
 		uint16 Handle [read-write, optional] (Server Only)
@@ -280,6 +293,12 @@ Properties	string UUID [read-only]
 			which may fail, to auto allocate the value 0x0000
 			shall be used which will cause the allocated handle to
 			be set once registered.
+
+		uint16 MTU [read-only]
+
+			Characteristic MTU, this is valid both for ReadValue
+			and WriteValue but either method can use long
+			procedures when supported.
 
 Characteristic Descriptors hierarchy
 ====================================

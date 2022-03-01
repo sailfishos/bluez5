@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 AC_PREREQ(2.60)
-AC_INIT(bluez, 5.58)
+AC_INIT(bluez, 5.63)
 
 AM_INIT_AUTOMAKE([foreign subdir-objects color-tests silent-rules
 					tar-pax no-dist-gzip dist-xz])
@@ -23,6 +23,9 @@ AC_C_RESTRICT
 AC_PROG_CC
 AM_PROG_CC_C_O
 AC_PROG_CC_PIE
+AC_PROG_CC_ASAN
+AC_PROG_CC_LSAN
+AC_PROG_CC_UBSAN
 AC_PROG_INSTALL
 AC_PROG_MKDIR_P
 
@@ -40,9 +43,11 @@ if (test "$USE_MAINTAINER_MODE" = "yes"); then
 fi
 AM_CONDITIONAL(COVERAGE, test "${enable_coverage}" = "yes")
 AM_CONDITIONAL(DBUS_RUN_SESSION, test "${enable_dbus_run_session}" = "yes")
-AM_CONDITIONAL(VALGRIND, test "${enable_valgrind}" = "yes")
 
 MISC_FLAGS
+
+AM_CONDITIONAL(VALGRIND, test "${enable_valgrind}" = "yes" &&
+		test "$ASAN_LIB" != "yes" && test "LSAN_LIB" != "yes")
 
 AC_ARG_ENABLE(threads, AC_HELP_STRING([--enable-threads],
 		[enable threading support]), [enable_threads=${enableval}])
@@ -63,7 +68,7 @@ AC_CHECK_LIB(pthread, pthread_create, dummy=yes,
 AC_CHECK_LIB(dl, dlopen, dummy=yes,
 			AC_MSG_ERROR(dynamic linking loader is required))
 
-AC_CHECK_HEADERS(linux/types.h linux/if_alg.h)
+AC_CHECK_HEADERS(linux/types.h linux/if_alg.h linux/uinput.h linux/uhid.h)
 
 PKG_CHECK_MODULES(GLIB, glib-2.0 >= 2.28, dummy=yes,
 				AC_MSG_ERROR(GLib >= 2.28 is required))
@@ -242,7 +247,7 @@ AM_CONDITIONAL(MIDI, test "${enable_midi}" = "yes")
 
 if (test "${enable_midi}" = "yes"); then
 	PKG_CHECK_MODULES(ALSA, alsa, dummy=yes,
-				AC_MSG_ERROR(ALSA lib is required for MIDI support))
+			AC_MSG_ERROR(ALSA lib is required for MIDI support))
 	AC_SUBST(ALSA_CFLAGS)
 	AC_SUBST(ALSA_LIBS)
 fi
@@ -323,10 +328,18 @@ AC_ARG_ENABLE(datafiles, AC_HELP_STRING([--disable-datafiles],
 					[enable_datafiles=${enableval}])
 AM_CONDITIONAL(DATAFILES, test "${enable_datafiles}" != "no")
 
-AC_ARG_ENABLE(manpages, AC_HELP_STRING([--enable-manpages],
-			[enable building of manual pages]),
+AC_ARG_ENABLE(manpages, AC_HELP_STRING([--disable-manpages],
+			[disable building of manual pages]),
 					[enable_manpages=${enableval}])
-AM_CONDITIONAL(MANPAGES, test "${enable_manpages}" = "yes")
+if (test "${enable_manpages}" != "no"); then
+	AC_CHECK_PROGS(RST2MAN, [rst2man rst2man.py], "no")
+	if (test "${RST2MAN}" = "no" ); then
+		AC_MSG_ERROR([rst2man is required])
+	fi
+fi
+AM_CONDITIONAL(MANPAGES, test "${enable_manpages}" != "no")
+AM_CONDITIONAL(RUN_RST2MAN, test "${enable_manpages}" != "no" &&
+				test "${RST2MAN}" != "no")
 
 AC_ARG_ENABLE(testing, AC_HELP_STRING([--enable-testing],
 			[enable testing tools]),
@@ -357,6 +370,10 @@ AC_ARG_ENABLE(logger, AC_HELP_STRING([--enable-logger],
 		[enable HCI logger service]), [enable_logger=${enableval}])
 AM_CONDITIONAL(LOGGER, test "${enable_logger}" = "yes")
 
+AC_ARG_ENABLE(admin, AC_HELP_STRING([--enable-admin],
+		[enable admin policy plugin]), [enable_admin=${enableval}])
+AM_CONDITIONAL(ADMIN, test "${enable_admin}" = "yes")
+
 if (test "${prefix}" = "NONE"); then
 	dnl no prefix and no localstatedir, so default to /var
 	if (test "$localstatedir" = '${prefix}/var'); then
@@ -385,6 +402,7 @@ AC_SUBST(CONFIGDIR, "${configdir}")
 
 AC_DEFINE_UNQUOTED(MESH_STORAGEDIR, "${storagedir}/mesh",
 			[Directory for the mesh daemon storage files])
+AC_SUBST(MESH_STORAGEDIR, "${storagedir}/mesh")
 
 AC_ARG_ENABLE(android, AC_HELP_STRING([--enable-android],
 			[enable BlueZ for Android]),
@@ -393,20 +411,40 @@ AM_CONDITIONAL(ANDROID, test "${enable_android}" = "yes")
 
 if (test "${enable_android}" = "yes"); then
 	PKG_CHECK_MODULES(SBC, sbc >= 1.2, dummy=yes,
-					AC_MSG_ERROR(SBC library >= 1.2 is required))
+			AC_MSG_ERROR(SBC library >= 1.2 is required))
 	AC_SUBST(SBC_CFLAGS)
 	AC_SUBST(SBC_LIBS)
 fi
 
 if (test "${enable_android}" = "yes"); then
 	PKG_CHECK_MODULES(SPEEXDSP, speexdsp >= 1.2, dummy=yes,
-					AC_MSG_ERROR(SPEEXDSP library >= 1.2 is required))
+			AC_MSG_ERROR(SPEEXDSP library >= 1.2 is required))
 	AC_SUBST(SPEEXDSP_CFLAGS)
 	AC_SUBST(SPEEXDSP_LIBS)
 fi
 
 AC_DEFINE_UNQUOTED(ANDROID_STORAGEDIR, "${storagedir}/android",
 			[Directory for the Android daemon storage files])
+
+AC_ARG_WITH([phonebook], AC_HELP_STRING([--with-phonebook=PLUGIN],
+			[obexd phonebook plugin (default=dummy)]),
+			[plugin_phonebook=${withval}])
+if (test -z "${plugin_phonebook}"); then
+	plugin_phonebook=dummy
+fi
+
+if (test "${plugin_phonebook}" = "ebook"); then
+	PKG_CHECK_MODULES(LIBEBOOK, [libebook-1.2 >= 3.3], dummy=yes,
+			AC_MSG_ERROR(libebook >= 3.3 is required))
+	AC_SUBST(LIBEBOOK_CFLAGS)
+	AC_SUBST(LIBEBOOK_LIBS)
+	PKG_CHECK_MODULES(LIBEDATESERVER, [libedataserver-1.2 >= 3.3],
+			dummy=yes,
+			AC_MSG_ERROR(libedataserver >= 3.3 is required))
+	AC_SUBST(LIBEDATESERVER_CFLAGS)
+	AC_SUBST(LIBEDATESERVER_LIBS)
+fi
+AC_SUBST(PLUGIN_PHONEBOOK, [${plugin_phonebook}])
 
 AC_ARG_ENABLE(jolla_dbus_access, AC_HELP_STRING([--enable-jolla-dbus-access],
 				[compile with Jolla D-Bus access control plugin]),
@@ -422,14 +460,6 @@ AC_ARG_ENABLE(sailfish_exclude, AC_HELP_STRING([--enable-sailfish-exclude],
 				[compile with Sailfish exclude plugin]),
 				[enable_sailfish_exclude=${enableval}])
 AM_CONDITIONAL(SAILFISHEXCLUDEPLUGIN, test "${enable_sailfish_exclude}" = "yes")
-
-AC_ARG_WITH([phonebook], AC_HELP_STRING([--with-phonebook=PLUGIN],
-				[obexd phonebook plugin (default=dummy)]),
-					[plugin_phonebook=${withval}])
-if (test -z "${plugin_phonebook}"); then
-	plugin_phonebook=dummy
-fi
-AC_SUBST(PLUGIN_PHONEBOOK, [${plugin_phonebook}])
 
 AC_ARG_WITH([contentfilter], AC_HELP_STRING([--with-contentfilter=PLUGIN],
 				[obexd contentfilter plugin (default=dummy)]),
@@ -452,4 +482,4 @@ AC_ARG_ENABLE(autopair, AC_HELP_STRING([--disable-autopair],
 		[disable autopair plugin]), [enable_autopair=${enableval}])
 AM_CONDITIONAL(AUTOPAIR, test "${enable_autopair}" != "no")
 
-AC_OUTPUT(Makefile src/bluetoothd.8 lib/bluez.pc)
+AC_OUTPUT(Makefile src/bluetoothd.rst lib/bluez.pc mesh/bluetooth-meshd.rst)

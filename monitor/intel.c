@@ -30,6 +30,7 @@
 
 #define COLOR_UNKNOWN_EVENT_MASK	COLOR_WHITE_BG
 #define COLOR_UNKNOWN_SCAN_STATUS	COLOR_WHITE_BG
+#define COLOR_UNKNOWN_EXT_EVENT		COLOR_WHITE_BG
 
 static void print_status(uint8_t status)
 {
@@ -163,6 +164,168 @@ static void reset_cmd(const void *data, uint8_t size)
 	print_field("Boot address: 0x%8.8x", boot_addr);
 }
 
+struct intel_version_tlv {
+	uint8_t type;
+	uint8_t len;
+	uint8_t val[];
+};
+
+static void print_version_tlv_u32(const struct intel_version_tlv *tlv,
+				  char *type_str)
+{
+	print_field("%s(%u): 0x%8.8x", type_str, tlv->type, get_le32(tlv->val));
+}
+
+static void print_version_tlv_u16(const struct intel_version_tlv *tlv,
+				  char *type_str)
+{
+	print_field("%s(%u): 0x%4.4x", type_str, tlv->type, get_le16(tlv->val));
+}
+
+static void print_version_tlv_u8(const struct intel_version_tlv *tlv,
+				 char *type_str)
+{
+	print_field("%s(%u): 0x%2.2x", type_str, tlv->type, get_u8(tlv->val));
+}
+
+static void print_version_tlv_enabled(const struct intel_version_tlv *tlv,
+				      char *type_str)
+{
+	print_field("%s(%u): %s(%u)", type_str, tlv->type,
+					tlv->val[0] ? "Enabled" : "Disabled",
+					tlv->val[0]);
+}
+
+static void print_version_tlv_img_type(const struct intel_version_tlv *tlv,
+				       char *type_str)
+{
+	const char *str;
+
+	switch (get_u8(tlv->val)) {
+	case 0x01:
+		str = "Bootloader";
+		break;
+	case 0x03:
+		str = "Firmware";
+		break;
+	default:
+		str = "Unknown";
+		break;
+	}
+	print_field("%s(%u): %s(0x%2.2x)", type_str, tlv->type, str,
+							get_u8(tlv->val));
+}
+
+static void print_version_tlv_timestamp(const struct intel_version_tlv *tlv,
+					char *type_str)
+{
+	print_field("%s(%u): %u-%u", type_str, tlv->type,
+				tlv->val[1], tlv->val[0]);
+}
+
+static void print_version_tlv_min_fw(const struct intel_version_tlv *tlv,
+				     char *type_str)
+{
+	print_field("%s(%u): %u-%u.%u", type_str, tlv->type,
+				tlv->val[0], tlv->val[1], 2000 + tlv->val[2]);
+}
+
+static void print_version_tlv_otp_bdaddr(const struct intel_version_tlv *tlv,
+					 char *type_str)
+{
+	packet_print_addr(type_str, tlv->val, 0x00);
+}
+
+static void print_version_tlv_unknown(const struct intel_version_tlv *tlv,
+				      char *type_str)
+{
+	print_field("%s(%u): ", type_str, tlv->type);
+	packet_hexdump(tlv->val, tlv->len);
+}
+
+static void print_version_tlv_mfg(const struct intel_version_tlv *tlv,
+					 char *type_str)
+{
+	uint16_t mfg_id = get_le16(tlv->val);
+
+	print_field("%s(%u): %s (%u)", type_str, tlv->type,
+						bt_compidtostr(mfg_id), mfg_id);
+}
+
+static const struct intel_version_tlv_desc {
+	uint8_t type;
+	char *type_str;
+	void (*func)(const struct intel_version_tlv *tlv, char *type_str);
+} intel_version_tlv_table[] = {
+	{ 16, "CNVi TOP", print_version_tlv_u32 },
+	{ 17, "CNVr TOP", print_version_tlv_u32 },
+	{ 18, "CNVi BT", print_version_tlv_u32 },
+	{ 19, "CNVr BT", print_version_tlv_u32 },
+	{ 20, "CNVi OTP", print_version_tlv_u16 },
+	{ 21, "CNVr OTP", print_version_tlv_u16 },
+	{ 22, "Device Rev ID", print_version_tlv_u16 },
+	{ 23, "USB VID", print_version_tlv_u16 },
+	{ 24, "USB PID", print_version_tlv_u16 },
+	{ 25, "PCIE VID", print_version_tlv_u16 },
+	{ 26, "PCIe DID", print_version_tlv_u16 },
+	{ 27, "PCIe Subsystem ID", print_version_tlv_u16 },
+	{ 28, "Image Type", print_version_tlv_img_type },
+	{ 29, "Time Stamp", print_version_tlv_timestamp },
+	{ 30, "Build Type", print_version_tlv_u8 },
+	{ 31, "Build Num", print_version_tlv_u32 },
+	{ 32, "FW Build Product", print_version_tlv_u8 },
+	{ 33, "FW Build HW", print_version_tlv_u8 },
+	{ 34, "FW Build Step", print_version_tlv_u8 },
+	{ 35, "BT Spec", print_version_tlv_u8 },
+	{ 36, "Manufacturer", print_version_tlv_mfg },
+	{ 37, "HCI Revision", print_version_tlv_u16 },
+	{ 38, "LMP SubVersion", print_version_tlv_u16 },
+	{ 39, "OTP Patch Version", print_version_tlv_u8 },
+	{ 40, "Secure Boot", print_version_tlv_enabled },
+	{ 41, "Key From Header", print_version_tlv_enabled },
+	{ 42, "OTP Lock", print_version_tlv_enabled },
+	{ 43, "API Lock", print_version_tlv_enabled },
+	{ 44, "Debug Lock", print_version_tlv_enabled },
+	{ 45, "Minimum FW", print_version_tlv_min_fw },
+	{ 46, "Limited CCE", print_version_tlv_enabled },
+	{ 47, "SBE Type", print_version_tlv_u8 },
+	{ 48, "OTP BDADDR", print_version_tlv_otp_bdaddr },
+	{ 49, "Unlocked State", print_version_tlv_enabled },
+	{ 0, NULL, NULL },
+};
+
+static void read_version_tlv_rsp(const void *data, uint8_t size)
+{
+	uint8_t status = get_u8(data);
+
+	print_status(status);
+
+	/* Consume the status */
+	data++;
+	size--;
+
+	while (size > 0) {
+		const struct intel_version_tlv *tlv = data;
+		const struct intel_version_tlv_desc *desc = NULL;
+		int i;
+
+		for (i = 0; intel_version_tlv_table[i].type > 0; i++) {
+			if (intel_version_tlv_table[i].type == tlv->type) {
+				desc = &intel_version_tlv_table[i];
+				break;
+			}
+		}
+
+		if (desc)
+			desc->func(tlv, desc->type_str);
+		else
+			print_version_tlv_unknown(tlv, "Unknown Type");
+
+		data += sizeof(*tlv) + tlv->len;
+		size -= sizeof(*tlv) + tlv->len;
+	}
+}
+
 static void read_version_rsp(const void *data, uint8_t size)
 {
 	uint8_t status = get_u8(data);
@@ -176,6 +339,16 @@ static void read_version_rsp(const void *data, uint8_t size)
 	uint8_t fw_build_yy = get_u8(data + 8);
 	uint8_t fw_patch = get_u8(data + 9);
 
+	/* There are two different formats of the response for the
+	 * HCI_Intel_Read_version command depends on the command parameters
+	 * If the size is fixed to 10 and hw_platform is 0x37, then it is the
+	 * legacy format, otherwise use the tlv based format.
+	 */
+	if (size != 10 && hw_platform != 0x37) {
+		read_version_tlv_rsp(data, size);
+		return;
+	}
+
 	print_status(status);
 	print_field("Hardware platform: 0x%2.2x", hw_platform);
 	print_field("Hardware variant: 0x%2.2x", hw_variant);
@@ -188,6 +361,49 @@ static void read_version_rsp(const void *data, uint8_t size)
 	print_field("Firmware build: %u-%u.%u", fw_build_nn,
 					fw_build_cw, 2000 + fw_build_yy);
 	print_field("Firmware patch: %u", fw_patch);
+}
+
+static void read_version_cmd(const void *data, uint8_t size)
+{
+	char *str;
+	uint8_t type;
+
+	/* This is the legacy read version command format and no further action
+	 * is needed
+	 */
+	if (size == 0)
+		return;
+
+	print_field("Requested Type:");
+
+	while (size > 0) {
+		const struct intel_version_tlv_desc *desc = NULL;
+		int i;
+
+		type = get_u8(data);
+
+		/* Get all supported types */
+		if (type == 0xff)
+			str = "All Supported Types";
+		else {
+			for (i = 0; intel_version_tlv_table[i].type > 0; i++) {
+				if (intel_version_tlv_table[i].type == type) {
+					desc = &intel_version_tlv_table[i];
+					break;
+				}
+			}
+
+			if (desc)
+				str = desc->type_str;
+			else
+				str = "Unknown Type";
+		}
+
+		print_field("  %s(0x%2.2x)", str, type);
+
+		data += sizeof(type);
+		size -= sizeof(type);
+	}
 }
 
 static void set_uart_baudrate_cmd(const void *data, uint8_t size)
@@ -319,7 +535,7 @@ static void write_bd_data_cmd(const void *data, uint8_t size)
 {
 	uint8_t features[8];
 
-	packet_print_addr("Address", data, false);
+	packet_print_addr("Address", data, 0x00);
 	packet_hexdump(data + 6, 6);
 
 	memcpy(features, data + 12, 8);
@@ -337,13 +553,13 @@ static void read_bd_data_rsp(const void *data, uint8_t size)
 	uint8_t status = get_u8(data);
 
 	print_status(status);
-	packet_print_addr("Address", data + 1, false);
+	packet_print_addr("Address", data + 1, 0x00);
 	packet_hexdump(data + 7, size - 7);
 }
 
 static void write_bd_address_cmd(const void *data, uint8_t size)
 {
-	packet_print_addr("Address", data, false);
+	packet_print_addr("Address", data, 0x00);
 }
 
 static void act_deact_traces_cmd(const void *data, uint8_t size)
@@ -471,14 +687,34 @@ static void memory_write_cmd(const void *data, uint8_t size)
 	packet_hexdump(data + 6, size - 6);
 }
 
+static void read_supported_features_cmd(const void *data, uint8_t size)
+{
+	uint8_t page = get_u8(data);
+
+	print_field("Page: 0x%2.2x", page);
+}
+
+static void read_supported_features_rsp(const void *data, uint8_t size)
+{
+	uint8_t status = get_u8(data);
+	uint8_t page = get_u8(data + 1);
+	uint8_t max_pages = get_u8(data + 2);
+
+	print_status(status);
+	print_field("Page: 0x%2.2x", page);
+	print_field("Max Pages: 0x%2.2x", max_pages);
+	print_field("Supported Features:");
+	packet_hexdump(data + 3, size - 3);
+}
+
 static const struct vendor_ocf vendor_ocf_table[] = {
 	{ 0x001, "Reset",
 			reset_cmd, 8, true,
 			status_rsp, 1, true },
 	{ 0x002, "No Operation" },
 	{ 0x005, "Read Version",
-			null_cmd, 0, true,
-			read_version_rsp, 10, true },
+			read_version_cmd, 0, false,
+			read_version_rsp, 1, false },
 	{ 0x006, "Set UART Baudrate",
 			set_uart_baudrate_cmd, 1, true,
 			status_rsp, 1, true },
@@ -533,6 +769,10 @@ static const struct vendor_ocf vendor_ocf_table[] = {
 	{ 0x08e, "Memory Write",
 			memory_write_cmd, 6, false,
 			status_rsp, 1, true },
+	{ 0x0a6, "Read Supported Features",
+			read_supported_features_cmd, 1, true,
+			read_supported_features_rsp, 19, true },
+
 	{ }
 };
 
@@ -879,7 +1119,7 @@ static void sco_rejected_via_lmp_evt(const void *data, uint8_t size)
 {
 	uint8_t reason = get_u8(data + 6);
 
-	packet_print_addr("Address", data, false);
+	packet_print_addr("Address", data, 0x00);
 	packet_print_error("Reason", reason);
 }
 
@@ -968,14 +1208,501 @@ static const struct vendor_evt vendor_evt_table[] = {
 	{ }
 };
 
-const struct vendor_evt *intel_vendor_evt(uint8_t evt)
+/*
+ * An Intel telemetry subevent is of the TLV format.
+ * - Type: takes 1 byte. This is the subevent_id.
+ * - Length: takes 1 byte.
+ * - Value: takes |Length| bytes.
+ */
+struct intel_tlv {
+	uint8_t subevent_id;
+	uint8_t length;
+	uint8_t value[];
+};
+
+#define TLV_SIZE(tlv) (*((const uint8_t *) tlv + 1) + 2 * sizeof(uint8_t))
+#define NEXT_TLV(tlv) (const struct intel_tlv *) \
+					((const uint8_t *) tlv + TLV_SIZE(tlv))
+
+static void ext_evt_type(const struct intel_tlv *tlv)
 {
+	uint8_t evt_type = get_u8(tlv->value);
+	const char *str;
+
+	switch (evt_type) {
+	case 0x00:
+		str = "System Exception";
+		break;
+	case 0x01:
+		str = "Fatal Exception";
+		break;
+	case 0x02:
+		str = "Debug Exception";
+		break;
+	case 0x03:
+		str = "Connection Event for BR/EDR Link Type";
+		break;
+	case 0x04:
+		str = "Disconnection Event";
+		break;
+	case 0x05:
+		str = "Audio Link Quality Report Type";
+		break;
+	case 0x06:
+		str = "Stats for BR/EDR Link Type";
+		break;
+	default:
+		print_text(COLOR_UNKNOWN_EXT_EVENT,
+			"Unknown extended telemetry event type (0x%2.2x)",
+			evt_type);
+		packet_hexdump((const void *) tlv,
+					tlv->length + 2 * sizeof(uint8_t));
+		return;
+	}
+
+	print_field("Extended event type (0x%2.2x): %s (0x%2.2x)",
+			tlv->subevent_id, str, evt_type);
+}
+
+static void ext_acl_evt_conn_handle(const struct intel_tlv *tlv)
+{
+	uint16_t conn_handle = get_le16(tlv->value);
+
+	print_field("ACL connection handle (0x%2.2x): 0x%4.4x",
+			tlv->subevent_id, conn_handle);
+}
+
+static void ext_acl_evt_hec_errors(const struct intel_tlv *tlv)
+{
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("Rx HEC errors (0x%2.2x): %d", tlv->subevent_id, num);
+}
+
+static void ext_acl_evt_crc_errors(const struct intel_tlv *tlv)
+{
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("Rx CRC errors (0x%2.2x): %d", tlv->subevent_id, num);
+}
+
+static void ext_acl_evt_num_pkt_from_host(const struct intel_tlv *tlv)
+{
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("Packets from host (0x%2.2x): %d",
+			tlv->subevent_id, num);
+}
+
+static void ext_acl_evt_num_tx_pkt_to_air(const struct intel_tlv *tlv)
+{
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("Tx packets (0x%2.2x): %d", tlv->subevent_id, num);
+}
+
+static void ext_acl_evt_num_tx_pkt_retry(const struct intel_tlv *tlv)
+{
+	char *subevent_str;
+	uint32_t num = get_le32(tlv->value);
+
+	switch (tlv->subevent_id) {
+	case 0x4f:
+		subevent_str = "Tx packets 0 retries";
+		break;
+	case 0x50:
+		subevent_str = "Tx packets 1 retries";
+		break;
+	case 0x51:
+		subevent_str = "Tx packets 2 retries";
+		break;
+	case 0x52:
+		subevent_str = "Tx packets 3 retries";
+		break;
+	case 0x53:
+		subevent_str = "Tx packets 4 retries and more";
+		break;
+	default:
+		subevent_str = "Unknown";
+		break;
+	}
+
+	print_field("%s (0x%2.2x): %d", subevent_str, tlv->subevent_id, num);
+}
+
+static void ext_acl_evt_num_tx_pkt_type(const struct intel_tlv *tlv)
+{
+	char *packet_type_str;
+	uint32_t num = get_le32(tlv->value);
+
+	switch (tlv->subevent_id) {
+	case 0x54:
+		packet_type_str = "DH1";
+		break;
+	case 0x55:
+		packet_type_str = "DH3";
+		break;
+	case 0x56:
+		packet_type_str = "DH5";
+		break;
+	case 0x57:
+		packet_type_str = "2DH1";
+		break;
+	case 0x58:
+		packet_type_str = "2DH3";
+		break;
+	case 0x59:
+		packet_type_str = "2DH5";
+		break;
+	case 0x5a:
+		packet_type_str = "3DH1";
+		break;
+	case 0x5b:
+		packet_type_str = "3DH3";
+		break;
+	case 0x5c:
+		packet_type_str = "3DH5";
+		break;
+	default:
+		packet_type_str = "Unknown";
+		break;
+	}
+
+	print_field("Tx %s packets (0x%2.2x): %d",
+			packet_type_str, tlv->subevent_id, num);
+}
+
+static void ext_acl_evt_num_rx_pkt_from_air(const struct intel_tlv *tlv)
+{
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("Rx packets (0x%2.2x): %d",
+			tlv->subevent_id, num);
+}
+
+static void ext_acl_evt_link_throughput(const struct intel_tlv *tlv)
+{
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("ACL link throughput (KBps) (0x%2.2x): %d",
+			tlv->subevent_id, num);
+}
+
+static void ext_acl_evt_max_packet_latency(const struct intel_tlv *tlv)
+{
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("ACL max packet latency (ms) (0x%2.2x): %d",
+			tlv->subevent_id, num);
+}
+
+static void ext_acl_evt_avg_packet_latency(const struct intel_tlv *tlv)
+{
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("ACL avg packet latency (ms) (0x%2.2x): %d",
+			tlv->subevent_id, num);
+}
+
+static void ext_sco_evt_conn_handle(const struct intel_tlv *tlv)
+{
+	uint16_t conn_handle = get_le16(tlv->value);
+
+	print_field("SCO/eSCO connection handle (0x%2.2x): 0x%4.4x",
+			tlv->subevent_id, conn_handle);
+}
+
+static void ext_sco_evt_num_rx_pkt_from_air(const struct intel_tlv *tlv)
+{
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("Packets from host (0x%2.2x): %d", tlv->subevent_id, num);
+}
+
+static void ext_sco_evt_num_tx_pkt_to_air(const struct intel_tlv *tlv)
+{
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("Tx packets (0x%2.2x): %d", tlv->subevent_id, num);
+}
+
+static void ext_sco_evt_num_rx_payloads_lost(const struct intel_tlv *tlv)
+{
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("Rx payload lost (0x%2.2x): %d", tlv->subevent_id, num);
+}
+
+static void ext_sco_evt_num_tx_payloads_lost(const struct intel_tlv *tlv)
+{
+
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("Tx payload lost (0x%2.2x): %d", tlv->subevent_id, num);
+}
+
+static void slots_errors(const struct intel_tlv *tlv, const char *type_str)
+{
+	/* The subevent has 5 slots where each slot is of the uint32_t type. */
+	uint32_t num[5];
+	const uint8_t *data = tlv->value;
 	int i;
 
+	if (tlv->length != 5 * sizeof(uint32_t)) {
+		print_text(COLOR_UNKNOWN_EXT_EVENT,
+				"  Invalid subevent length (%d)", tlv->length);
+		return;
+	}
+
+	for (i = 0; i < 5; i++) {
+		num[i] = get_le32(data);
+		data += sizeof(uint32_t);
+	}
+
+	print_field("%s (0x%2.2x): %d %d %d %d %d", type_str, tlv->subevent_id,
+			num[0], num[1], num[2], num[3], num[4]);
+}
+
+static void ext_sco_evt_num_no_sync_errors(const struct intel_tlv *tlv)
+{
+	slots_errors(tlv, "Rx No SYNC errors");
+}
+
+static void ext_sco_evt_num_hec_errors(const struct intel_tlv *tlv)
+{
+	slots_errors(tlv, "Rx HEC errors");
+}
+
+static void ext_sco_evt_num_crc_errors(const struct intel_tlv *tlv)
+{
+	slots_errors(tlv, "Rx CRC errors");
+}
+
+static void ext_sco_evt_num_naks(const struct intel_tlv *tlv)
+{
+	slots_errors(tlv, "Rx NAK errors");
+}
+
+static void ext_sco_evt_num_failed_tx_by_wifi(const struct intel_tlv *tlv)
+{
+	slots_errors(tlv, "Failed Tx due to Wifi coex");
+}
+
+static void ext_sco_evt_num_failed_rx_by_wifi(const struct intel_tlv *tlv)
+{
+	slots_errors(tlv, "Failed Rx due to Wifi coex");
+}
+
+static void ext_sco_evt_samples_inserted(const struct intel_tlv *tlv)
+{
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("Late samples inserted based on CDC (0x%2.2x): %d",
+			tlv->subevent_id, num);
+}
+
+static void ext_sco_evt_samples_dropped(const struct intel_tlv *tlv)
+{
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("Samples dropped (0x%2.2x): %d", tlv->subevent_id, num);
+}
+
+static void ext_sco_evt_mute_samples(const struct intel_tlv *tlv)
+{
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("Mute samples sent at initial connection (0x%2.2x): %d",
+			tlv->subevent_id, num);
+}
+
+static void ext_sco_evt_plc_injection_data(const struct intel_tlv *tlv)
+{
+	uint32_t num = get_le32(tlv->value);
+
+	print_field("PLC injection data (0x%2.2x): %d", tlv->subevent_id, num);
+}
+
+static const struct intel_ext_subevent {
+	uint8_t subevent_id;
+	uint8_t length;
+	void (*func)(const struct intel_tlv *tlv);
+} intel_ext_subevent_table[] = {
+	{ 0x01, 1, ext_evt_type },
+
+	/* ACL audio link quality subevents */
+	{ 0x4a, 2, ext_acl_evt_conn_handle },
+	{ 0x4b, 4, ext_acl_evt_hec_errors },
+	{ 0x4c, 4, ext_acl_evt_crc_errors },
+	{ 0x4d, 4, ext_acl_evt_num_pkt_from_host },
+	{ 0x4e, 4, ext_acl_evt_num_tx_pkt_to_air },
+	{ 0x4f, 4, ext_acl_evt_num_tx_pkt_retry },
+	{ 0x50, 4, ext_acl_evt_num_tx_pkt_retry },
+	{ 0x51, 4, ext_acl_evt_num_tx_pkt_retry },
+	{ 0x52, 4, ext_acl_evt_num_tx_pkt_retry },
+	{ 0x53, 4, ext_acl_evt_num_tx_pkt_retry },
+	{ 0x54, 4, ext_acl_evt_num_tx_pkt_type },
+	{ 0x55, 4, ext_acl_evt_num_tx_pkt_type },
+	{ 0x56, 4, ext_acl_evt_num_tx_pkt_type },
+	{ 0x57, 4, ext_acl_evt_num_tx_pkt_type },
+	{ 0x58, 4, ext_acl_evt_num_tx_pkt_type },
+	{ 0x59, 4, ext_acl_evt_num_tx_pkt_type },
+	{ 0x5a, 4, ext_acl_evt_num_tx_pkt_type },
+	{ 0x5b, 4, ext_acl_evt_num_tx_pkt_type },
+	{ 0x5c, 4, ext_acl_evt_num_tx_pkt_type },
+	{ 0x5d, 4, ext_acl_evt_num_rx_pkt_from_air },
+	{ 0x5e, 4, ext_acl_evt_link_throughput },
+	{ 0x5f, 4, ext_acl_evt_max_packet_latency },
+	{ 0x60, 4, ext_acl_evt_avg_packet_latency },
+
+	/* SCO/eSCO audio link quality subevents */
+	{ 0x6a, 2, ext_sco_evt_conn_handle },
+	{ 0x6b, 4, ext_sco_evt_num_rx_pkt_from_air },
+	{ 0x6c, 4, ext_sco_evt_num_tx_pkt_to_air },
+	{ 0x6d, 4, ext_sco_evt_num_rx_payloads_lost },
+	{ 0x6e, 4, ext_sco_evt_num_tx_payloads_lost },
+	{ 0x6f, 20, ext_sco_evt_num_no_sync_errors },
+	{ 0x70, 20, ext_sco_evt_num_hec_errors },
+	{ 0x71, 20, ext_sco_evt_num_crc_errors },
+	{ 0x72, 20, ext_sco_evt_num_naks },
+	{ 0x73, 20, ext_sco_evt_num_failed_tx_by_wifi },
+	{ 0x74, 20, ext_sco_evt_num_failed_rx_by_wifi },
+	{ 0x75, 4, ext_sco_evt_samples_inserted },
+	{ 0x76, 4, ext_sco_evt_samples_dropped },
+	{ 0x77, 4, ext_sco_evt_mute_samples },
+	{ 0x78, 4, ext_sco_evt_plc_injection_data },
+
+	/* end */
+	{ 0x0, 0}
+};
+
+static const struct intel_tlv *process_ext_subevent(const struct intel_tlv *tlv,
+					const struct intel_tlv *last_tlv)
+{
+	const struct intel_tlv *next_tlv = NEXT_TLV(tlv);
+	const struct intel_ext_subevent *subevent = NULL;
+	int i;
+
+	for (i = 0; intel_ext_subevent_table[i].length > 0; i++) {
+		if (intel_ext_subevent_table[i].subevent_id ==
+							tlv->subevent_id) {
+			subevent = &intel_ext_subevent_table[i];
+			break;
+		}
+	}
+
+	if (!subevent) {
+		print_text(COLOR_UNKNOWN_EXT_EVENT,
+				"Unknown extended subevent 0x%2.2x",
+				tlv->subevent_id);
+		return NULL;
+	}
+
+	if (tlv->length != subevent->length) {
+		print_text(COLOR_ERROR, "Invalid length %d of subevent 0x%2.2x",
+				tlv->length, tlv->subevent_id);
+		return NULL;
+	}
+
+	if (next_tlv > last_tlv) {
+		print_text(COLOR_ERROR, "Subevent exceeds the buffer size.");
+		return NULL;
+	}
+
+	subevent->func(tlv);
+
+	return next_tlv;
+}
+
+static void intel_vendor_ext_evt(const void *data, uint8_t size)
+{
+	/* The data pointer points to a number of tlv.*/
+	const struct intel_tlv *tlv = data;
+	const struct intel_tlv *last_tlv = data + size;
+
+	/* Process every tlv subevent until reaching last_tlv.
+	 * The decoding process terminates normally when tlv == last_tlv.
+	 */
+	while (tlv && tlv < last_tlv)
+		tlv = process_ext_subevent(tlv, last_tlv);
+
+	/* If an error occurs in decoding the subevents, hexdump the packet. */
+	if (!tlv)
+		packet_hexdump(data, size);
+}
+
+/* Vendor extended events with a vendor prefix. */
+static const struct vendor_evt vendor_prefix_evt_table[] = {
+	{ 0x03, "Extended Telemetry", intel_vendor_ext_evt },
+	{ }
+};
+
+const uint8_t intel_vendor_prefix[] = {0x87, 0x80};
+#define INTEL_VENDOR_PREFIX_SIZE sizeof(intel_vendor_prefix)
+
+/*
+ * The vendor event with Intel vendor prefix.
+ * Its format looks like
+ *   0xff <length> <vendor_prefix> <subopcode> <data>
+ *   where Intel's <vendor_prefix> is 0x8780.
+ *
+ *   When <subopcode> == 0x03, it is a telemetry event; and
+ *   <data> is a number of tlv data.
+ */
+struct vendor_prefix_evt {
+	uint8_t prefix_data[INTEL_VENDOR_PREFIX_SIZE];
+	uint8_t subopcode;
+};
+
+static const struct vendor_evt *intel_vendor_prefix_evt(const void *data,
+							int *consumed_size)
+{
+	unsigned int i;
+	const struct vendor_prefix_evt *vnd = data;
+	char prefix_string[INTEL_VENDOR_PREFIX_SIZE * 2 + 1] = { 0 };
+
+	/* Check if the vendor prefix matches. */
+	for (i = 0; i < INTEL_VENDOR_PREFIX_SIZE; i++) {
+		if (vnd->prefix_data[i] != intel_vendor_prefix[i])
+			return NULL;
+		sprintf(prefix_string + i * 2, "%02x", vnd->prefix_data[i]);
+	}
+	print_field("Vendor Prefix (0x%s)", prefix_string);
+
+	/*
+	 * Handle the vendor event with a vendor prefix.
+	 *   0xff <length> <vendor_prefix> <subopcode> <data>
+	 * This loop checks whether the <subopcode> exists in the
+	 * vendor_prefix_evt_table.
+	 */
+	for (i = 0; vendor_prefix_evt_table[i].str; i++) {
+		if (vendor_prefix_evt_table[i].evt == vnd->subopcode) {
+			*consumed_size = sizeof(struct vendor_prefix_evt);
+			return &vendor_prefix_evt_table[i];
+		}
+	}
+
+	return NULL;
+}
+
+const struct vendor_evt *intel_vendor_evt(const void *data, int *consumed_size)
+{
+	uint8_t evt = *((const uint8_t *) data);
+	int i;
+
+	/*
+	 * Handle the vendor event without a vendor prefix.
+	 *   0xff <length> <evt> <data>
+	 * This loop checks whether the <evt> exists in the vendor_evt_table.
+	 */
 	for (i = 0; vendor_evt_table[i].str; i++) {
 		if (vendor_evt_table[i].evt == evt)
 			return &vendor_evt_table[i];
 	}
 
-	return NULL;
+	/*
+	 * It is not a regular event. Check whether it is a vendor extended
+	 * event that comes with a vendor prefix followed by a subopcode.
+	 */
+	return intel_vendor_prefix_evt(data, consumed_size);
 }

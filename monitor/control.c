@@ -305,19 +305,19 @@ static void mgmt_new_long_term_key(uint16_t len, const void *buf)
 		return;
 	}
 
-	/* LE SC keys are both for master and slave */
+	/* LE SC keys are both for central and peripheral */
 	switch (ev->key.type) {
 	case 0x00:
-		if (ev->key.master)
-			type = "Master (Unauthenticated)";
+		if (ev->key.central)
+			type = "Central (Unauthenticated)";
 		else
-			type = "Slave (Unauthenticated)";
+			type = "Peripheral (Unauthenticated)";
 		break;
 	case 0x01:
-		if (ev->key.master)
-			type = "Master (Authenticated)";
+		if (ev->key.central)
+			type = "Central (Authenticated)";
 		else
-			type = "Slave (Authenticated)";
+			type = "Peripheral (Authenticated)";
 		break;
 	case 0x02:
 		type = "SC (Unauthenticated)";
@@ -1165,14 +1165,12 @@ static int server_fd = -1;
 void control_server(const char *path)
 {
 	struct sockaddr_un addr;
-	size_t len;
 	int fd;
 
 	if (server_fd >= 0)
 		return;
 
-	len = strlen(path);
-	if (len > sizeof(addr.sun_path) - 1) {
+	if (strlen(path) > sizeof(addr.sun_path) - 1) {
 		fprintf(stderr, "Socket name too long\n");
 		return;
 	}
@@ -1187,7 +1185,7 @@ void control_server(const char *path)
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
-	strncpy(addr.sun_path, path, len - 1);
+	strcpy(addr.sun_path, path);
 
 	if (bind(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
 		perror("Failed to bind server socket");

@@ -104,6 +104,7 @@ struct characteristic {
 	char *path;
 
 	unsigned int ready_id;
+	unsigned int exchange_id;
 	struct sock_io *write_io;
 	struct sock_io *notify_io;
 
@@ -368,7 +369,8 @@ static void desc_read_cb(bool success, uint8_t att_ecode,
 	}
 
 	/* Read the stored data from db */
-	if (!gatt_db_attribute_read(desc->attr, 0, 0, NULL, read_op_cb, op)) {
+	if (!gatt_db_attribute_read(desc->attr, op->offset, 0, NULL, read_op_cb,
+									op)) {
 		error("Failed to read database");
 		att_ecode = BT_ATT_ERROR_UNLIKELY;
 		goto fail;
@@ -872,6 +874,30 @@ characteristic_notify_acquired_exists(const GDBusPropertyTable *property,
 	return (chrc->props & BT_GATT_CHRC_PROP_NOTIFY);
 }
 
+static gboolean characteristic_get_mtu(const GDBusPropertyTable *property,
+				       DBusMessageIter *iter, void *data)
+{
+	struct characteristic *chrc = data;
+	struct bt_gatt_client *gatt = chrc->service->client->gatt;
+	struct bt_att *att;
+	uint16_t mtu;
+
+	att = bt_gatt_client_get_att(gatt);
+	mtu = att ? bt_att_get_mtu(att) : BT_ATT_DEFAULT_LE_MTU;
+
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_UINT16, &mtu);
+
+	return TRUE;
+}
+
+static gboolean characteristic_mtu_exists(const GDBusPropertyTable *property,
+								void *data)
+{
+	struct characteristic *chrc = data;
+
+	return chrc->service->client->gatt ? TRUE : FALSE;
+}
+
 static void write_characteristic_cb(struct gatt_db_attribute *attr, int err,
 								void *user_data)
 {
@@ -906,7 +932,8 @@ static void chrc_read_cb(bool success, uint8_t att_ecode, const uint8_t *value,
 	}
 
 	/* Read the stored data from db */
-	if (!gatt_db_attribute_read(chrc->attr, 0, 0, NULL, read_op_cb, op)) {
+	if (!gatt_db_attribute_read(chrc->attr, op->offset, 0, NULL, read_op_cb,
+									op)) {
 		error("Failed to read database");
 		att_ecode = BT_ATT_ERROR_UNLIKELY;
 		goto fail;
@@ -1644,6 +1671,7 @@ static const GDBusPropertyTable characteristic_properties[] = {
 				characteristic_write_acquired_exists },
 	{ "NotifyAcquired", "b", characteristic_get_notify_acquired, NULL,
 				characteristic_notify_acquired_exists },
+	{ "MTU", "q", characteristic_get_mtu, NULL, characteristic_mtu_exists },
 	{ }
 };
 
@@ -1685,6 +1713,8 @@ static void remove_client(void *data)
 static void characteristic_free(void *data)
 {
 	struct characteristic *chrc = data;
+	struct bt_gatt_client *gatt = chrc->service->client->gatt;
+	struct bt_att *att;
 
 	/* List should be empty here */
 	queue_destroy(chrc->descs, NULL);
@@ -1701,8 +1731,20 @@ static void characteristic_free(void *data)
 
 	queue_destroy(chrc->notify_clients, remove_client);
 
+	att = bt_gatt_client_get_att(gatt);
+	if (att)
+		bt_att_unregister_exchange(att, chrc->exchange_id);
+
 	g_free(chrc->path);
 	free(chrc);
+}
+
+static void att_exchange(uint16_t mtu, void *user_data)
+{
+	struct characteristic *chrc = user_data;
+
+	g_dbus_emit_property_changed(btd_get_dbus_connection(), chrc->path,
+					GATT_CHARACTERISTIC_IFACE, "MTU");
 }
 
 static struct characteristic *characteristic_create(
@@ -1710,6 +1752,8 @@ static struct characteristic *characteristic_create(
 						struct service *service)
 {
 	struct characteristic *chrc;
+	struct bt_gatt_client *gatt = service->client->gatt;
+	struct bt_att *att;
 	bt_uuid_t uuid;
 
 	chrc = new0(struct characteristic, 1);
@@ -1747,6 +1791,11 @@ static struct characteristic *characteristic_create(
 
 		return NULL;
 	}
+
+	att = bt_gatt_client_get_att(gatt);
+	if (att)
+		chrc->exchange_id = bt_att_register_exchange(att, att_exchange,
+								chrc, NULL);
 
 	DBG("Exported GATT characteristic: %s", chrc->path);
 
@@ -2154,6 +2203,38 @@ static void register_notify(void *data, void *user_data)
 	notify_client_free(notify_client);
 }
 
+void btd_gatt_client_ready(struct btd_gatt_client *client)
+{
+	if (!client)
+		return;
+
+	if (!client->gatt) {
+		struct bt_gatt_client *gatt;
+
+		gatt = btd_device_get_gatt_client(client->device);
+		client->gatt = bt_gatt_client_clone(gatt);
+		if (!client->gatt) {
+			error("GATT client not initialized");
+			return;
+		}
+	}
+
+	client->ready = true;
+
+	DBG("GATT client ready");
+
+	create_services(client);
+
+	DBG("Features 0x%02x", client->features);
+
+	if (!client->features) {
+		client->features = bt_gatt_client_get_features(client->gatt);
+		DBG("Update Features 0x%02x", client->features);
+		if (client->features & BT_GATT_CHRC_CLI_FEAT_EATT)
+			btd_gatt_client_eatt_connect(client);
+	}
+}
+
 static void eatt_connect_cb(GIOChannel *io, GError *gerr, gpointer user_data)
 {
 	struct btd_gatt_client *client = user_data;
@@ -2164,7 +2245,7 @@ static void eatt_connect_cb(GIOChannel *io, GError *gerr, gpointer user_data)
 	device_attach_att(client->device, io);
 }
 
-static void eatt_connect(struct btd_gatt_client *client)
+void btd_gatt_client_eatt_connect(struct btd_gatt_client *client)
 {
 	struct bt_att *att = bt_gatt_client_get_att(client->gatt);
 	struct btd_device *dev = client->device;
@@ -2173,6 +2254,9 @@ static void eatt_connect(struct btd_gatt_client *client)
 	GError *gerr = NULL;
 	char addr[18];
 	int i;
+
+	if (!(client->features & BT_GATT_CHRC_CLI_FEAT_EATT))
+		return;
 
 	if (bt_att_get_channels(att) == btd_opts.gatt_channels)
 		return;
@@ -2230,38 +2314,6 @@ static void eatt_connect(struct btd_gatt_client *client)
 	}
 }
 
-void btd_gatt_client_ready(struct btd_gatt_client *client)
-{
-	if (!client)
-		return;
-
-	if (!client->gatt) {
-		struct bt_gatt_client *gatt;
-
-		gatt = btd_device_get_gatt_client(client->device);
-		client->gatt = bt_gatt_client_clone(gatt);
-		if (!client->gatt) {
-			error("GATT client not initialized");
-			return;
-		}
-	}
-
-	client->ready = true;
-
-	DBG("GATT client ready");
-
-	create_services(client);
-
-	DBG("Features 0x%02x", client->features);
-
-	if (!client->features) {
-		client->features = bt_gatt_client_get_features(client->gatt);
-		DBG("Update Features 0x%02x", client->features);
-		if (client->features & BT_GATT_CHRC_CLI_FEAT_EATT)
-			eatt_connect(client);
-	}
-}
-
 void btd_gatt_client_connected(struct btd_gatt_client *client)
 {
 	struct bt_gatt_client *gatt;
@@ -2282,11 +2334,6 @@ void btd_gatt_client_connected(struct btd_gatt_client *client)
 	 * for any pre-registered notification sessions.
 	 */
 	queue_foreach(client->all_notify_clients, register_notify, client);
-
-	if (!(client->features & BT_GATT_CHRC_CLI_FEAT_EATT))
-		return;
-
-	eatt_connect(client);
 }
 
 void btd_gatt_client_service_added(struct btd_gatt_client *client,

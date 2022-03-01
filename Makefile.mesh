@@ -17,6 +17,8 @@ mesh_sources = mesh/mesh.h mesh/mesh.c \
 				mesh/error.h mesh/mesh-io-api.h \
 				mesh/mesh-io-generic.h \
 				mesh/mesh-io-generic.c \
+				mesh/mesh-io-unit.h \
+				mesh/mesh-io-unit.c \
 				mesh/net.h mesh/net.c \
 				mesh/crypto.h mesh/crypto.c \
 				mesh/friend.h mesh/friend.c \
@@ -44,6 +46,11 @@ mesh_bluetooth_meshd_SOURCES = $(mesh_sources) mesh/main.c
 mesh_bluetooth_meshd_LDADD = src/libshared-ell.la $(ell_ldadd) -ljson-c
 mesh_bluetooth_meshd_DEPENDENCIES = $(ell_dependencies) src/libshared-ell.la \
 				mesh/bluetooth-mesh.service
+
+if MANPAGES
+man_MANS += mesh/bluetooth-meshd.8
+endif
+manual_pages += mesh/bluetooth-meshd.8
 
 CLEANFILES += mesh/bluetooth-mesh.service
 

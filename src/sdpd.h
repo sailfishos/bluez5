@@ -27,7 +27,10 @@ typedef struct request {
 	int      flags;
 	uint8_t  *buf;
 	int      len;
+	uint8_t  opcode;
 } sdp_req_t;
+
+void sdp_cstate_cleanup(int sock);
 
 void handle_internal_request(int sk, int mtu, void *data, int len);
 void handle_request(int sk, uint8_t *data, int len);
@@ -61,7 +64,7 @@ uint32_t sdp_next_handle(void);
 uint32_t sdp_get_time(void);
 
 #define SDP_SERVER_COMPAT (1 << 0)
-#define SDP_SERVER_MASTER (1 << 1)
+#define SDP_SERVER_CENTRAL (1 << 1)
 
 int start_sdp_server(uint16_t mtu, uint32_t flags);
 void stop_sdp_server(void);

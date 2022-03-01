@@ -352,6 +352,16 @@ static int cmd_exec(const struct bt_shell_menu_entry *entry,
 	int flags = WRDE_NOCMD;
 	bool optargs = false;
 
+	if (argc == 2 && (!memcmp(argv[1], "help", 4) ||
+				!memcmp(argv[1], "--help", 6))) {
+		printf("%s\n", entry->desc);
+		printf(COLOR_HIGHLIGHT "Usage:" COLOR_OFF "\n");
+		printf("\t %s %-*s\n", entry->cmd,
+				(int)(CMD_LENGTH - strlen(entry->cmd)),
+					!entry->arg ? "" : entry->arg);
+		return 0;
+	}
+
 	if (!entry->arg || entry->arg[0] == '\0') {
 		if (argc > 1) {
 			print_text(COLOR_HIGHLIGHT, "Too many arguments");
@@ -611,6 +621,7 @@ void bt_shell_prompt_input(const char *label, const char *msg,
 		prompt->user_data = user_data;
 
 		queue_push_tail(data.prompts, prompt);
+		free(str);
 
 		return;
 	}
@@ -892,6 +903,8 @@ static char **shell_completion(const char *text, int start, int end)
 {
 	char **matches = NULL;
 
+	rl_attempted_completion_over = 1;
+
 	if (!data.menu)
 		return NULL;
 
@@ -913,9 +926,6 @@ static char **shell_completion(const char *text, int start, int end)
 		rl_completion_display_matches_hook = NULL;
 		matches = rl_completion_matches(text, cmd_generator);
 	}
-
-	if (!matches)
-		rl_attempted_completion_over = 1;
 
 	return matches;
 }

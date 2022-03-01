@@ -27,6 +27,8 @@ struct btd_adv_monitor_manager *btd_adv_monitor_manager_create(
 						struct mgmt *mgmt);
 void btd_adv_monitor_manager_destroy(struct btd_adv_monitor_manager *manager);
 
+bool btd_adv_monitor_offload_enabled(struct btd_adv_monitor_manager *manager);
+
 struct queue *btd_adv_monitor_content_filter(
 				struct btd_adv_monitor_manager *manager,
 				struct bt_ad *ad);
@@ -37,5 +39,7 @@ void btd_adv_monitor_notify_monitors(struct btd_adv_monitor_manager *manager,
 
 void btd_adv_monitor_device_remove(struct btd_adv_monitor_manager *manager,
 				   struct btd_device *device);
+
+void btd_adv_monitor_power_down(struct btd_adv_monitor_manager *manager);
 
 #endif /* __ADV_MONITOR_H */

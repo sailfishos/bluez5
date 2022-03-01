@@ -20,20 +20,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/uio.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "lib/bluetooth.h"
 #include "lib/hci.h"
 
-#include "src/shared/mainloop.h"
+#include "src/shared/io.h"
 #include "monitor/bt.h"
 #include "btdev.h"
 #include "vhci.h"
 
-#define uninitialized_var(x) x = x
+#define DEBUGFS_PATH "/sys/kernel/debug/bluetooth"
 
 struct vhci {
-	enum vhci_type type;
-	int fd;
+	enum btdev_type type;
+	uint16_t index;
+	struct io *io;
 	struct btdev *btdev;
 };
 
@@ -42,8 +45,7 @@ static void vhci_destroy(void *user_data)
 	struct vhci *vhci = user_data;
 
 	btdev_destroy(vhci->btdev);
-
-	close(vhci->fd);
+	io_destroy(vhci->io);
 
 	free(vhci);
 }
@@ -54,23 +56,21 @@ static void vhci_write_callback(const struct iovec *iov, int iovlen,
 	struct vhci *vhci = user_data;
 	ssize_t written;
 
-	written = writev(vhci->fd, iov, iovlen);
+	written = io_send(vhci->io, iov, iovlen);
 	if (written < 0)
 		return;
 }
 
-static void vhci_read_callback(int fd, uint32_t events, void *user_data)
+static bool vhci_read_callback(struct io *io, void *user_data)
 {
 	struct vhci *vhci = user_data;
+	int fd = io_get_fd(vhci->io);
 	unsigned char buf[4096];
 	ssize_t len;
 
-	if (events & (EPOLLERR | EPOLLHUP))
-		return;
-
-	len = read(vhci->fd, buf, sizeof(buf));
+	len = read(fd, buf, sizeof(buf));
 	if (len < 1)
-		return;
+		return false;
 
 	switch (buf[0]) {
 	case BT_H4_CMD_PKT:
@@ -80,6 +80,8 @@ static void vhci_read_callback(int fd, uint32_t events, void *user_data)
 		btdev_receive_h4(vhci->btdev, buf, len);
 		break;
 	}
+
+	return true;
 }
 
 bool vhci_set_debug(struct vhci *vhci, vhci_debug_func_t callback,
@@ -91,69 +93,75 @@ bool vhci_set_debug(struct vhci *vhci, vhci_debug_func_t callback,
 	return btdev_set_debug(vhci->btdev, callback, user_data, destroy);
 }
 
-struct vhci *vhci_open(enum vhci_type type)
+struct vhci_create_req {
+	uint8_t  pkt_type;
+	uint8_t  opcode;
+} __attribute__((packed));
+
+struct vhci_create_rsp {
+	uint8_t  pkt_type;
+	uint8_t  opcode;
+	uint16_t index;
+} __attribute__((packed));
+
+struct vhci *vhci_open(uint8_t type)
 {
 	struct vhci *vhci;
-	enum btdev_type uninitialized_var(btdev_type);
-	unsigned char uninitialized_var(ctrl_type);
-	unsigned char setup_cmd[2];
-	static uint8_t id = 0x23;
+	struct vhci_create_req req;
+	struct vhci_create_rsp rsp;
+	int fd;
+
+	fd = open("/dev/vhci", O_RDWR | O_NONBLOCK);
+	if (fd < 0)
+		return NULL;
+
+	memset(&req, 0, sizeof(req));
+	req.pkt_type = HCI_VENDOR_PKT;
 
 	switch (type) {
-	case VHCI_TYPE_BREDRLE:
-		btdev_type = BTDEV_TYPE_BREDRLE52;
-		ctrl_type = HCI_PRIMARY;
+	case BTDEV_TYPE_AMP:
+		req.opcode = HCI_AMP;
 		break;
-	case VHCI_TYPE_BREDR:
-		btdev_type = BTDEV_TYPE_BREDR;
-		ctrl_type = HCI_PRIMARY;
+	default:
+		req.opcode = HCI_PRIMARY;
 		break;
-	case VHCI_TYPE_LE:
-		btdev_type = BTDEV_TYPE_LE;
-		ctrl_type = HCI_PRIMARY;
-		break;
-	case VHCI_TYPE_AMP:
-		btdev_type = BTDEV_TYPE_AMP;
-		ctrl_type = HCI_AMP;
-		break;
+	}
+
+	if (write(fd, &req, sizeof(req)) < 0) {
+		close(fd);
+		return NULL;
+	}
+
+	memset(&rsp, 0, sizeof(rsp));
+
+	if (read(fd, &rsp, sizeof(rsp)) < 0) {
+		close(fd);
+		return NULL;
 	}
 
 	vhci = malloc(sizeof(*vhci));
-	if (!vhci)
+	if (!vhci) {
+		close(fd);
 		return NULL;
+	}
 
 	memset(vhci, 0, sizeof(*vhci));
 	vhci->type = type;
+	vhci->index = rsp.index;
+	vhci->io = io_new(fd);
 
-	vhci->fd = open("/dev/vhci", O_RDWR | O_NONBLOCK);
-	if (vhci->fd < 0) {
-		free(vhci);
-		return NULL;
-	}
+	io_set_close_on_destroy(vhci->io, true);
 
-	setup_cmd[0] = HCI_VENDOR_PKT;
-	setup_cmd[1] = ctrl_type;
-
-	if (write(vhci->fd, setup_cmd, sizeof(setup_cmd)) < 0) {
-		close(vhci->fd);
-		free(vhci);
-		return NULL;
-	}
-
-	vhci->btdev = btdev_create(btdev_type, id++);
+	vhci->btdev = btdev_create(type, rsp.index);
 	if (!vhci->btdev) {
-		close(vhci->fd);
-		free(vhci);
+		vhci_destroy(vhci);
 		return NULL;
 	}
 
 	btdev_set_send_handler(vhci->btdev, vhci_write_callback, vhci);
 
-	if (mainloop_add_fd(vhci->fd, EPOLLIN, vhci_read_callback,
-						vhci, vhci_destroy) < 0) {
-		btdev_destroy(vhci->btdev);
-		close(vhci->fd);
-		free(vhci);
+	if (!io_set_read_handler(vhci->io, vhci_read_callback, vhci, NULL)) {
+		vhci_destroy(vhci);
 		return NULL;
 	}
 
@@ -165,5 +173,82 @@ void vhci_close(struct vhci *vhci)
 	if (!vhci)
 		return;
 
-	mainloop_remove_fd(vhci->fd);
+	vhci_destroy(vhci);
+}
+
+struct btdev *vhci_get_btdev(struct vhci *vhci)
+{
+	if (!vhci)
+		return NULL;
+
+	return vhci->btdev;
+}
+
+static int vhci_debugfs_write(struct vhci *vhci, char *option, void *data,
+			      size_t len)
+{
+	char path[64];
+	int fd, err;
+	size_t n;
+
+	if (!vhci)
+		return -EINVAL;
+
+	memset(path, 0, sizeof(path));
+	sprintf(path, DEBUGFS_PATH "/hci%d/%s", vhci->index, option);
+
+	fd = open(path, O_RDWR);
+	if (fd < 0)
+		return -errno;
+
+	n = write(fd, data, len);
+	if (n == len)
+		err = 0;
+	else
+		err = -errno;
+
+	close(fd);
+
+	return err;
+}
+
+int vhci_set_force_suspend(struct vhci *vhci, bool enable)
+{
+	char val;
+
+	val = (enable) ? 'Y' : 'N';
+
+	return vhci_debugfs_write(vhci, "force_suspend", &val, sizeof(val));
+}
+
+int vhci_set_force_wakeup(struct vhci *vhci, bool enable)
+{
+	char val;
+
+	val = (enable) ? 'Y' : 'N';
+
+	return vhci_debugfs_write(vhci, "force_wakeup", &val, sizeof(val));
+}
+
+int vhci_set_msft_opcode(struct vhci *vhci, uint16_t opcode)
+{
+	int err;
+	char val[7];
+
+	snprintf(val, sizeof(val), "0x%4x", opcode);
+
+	err = vhci_debugfs_write(vhci, "msft_opcode", &val, sizeof(val));
+	if (err)
+		return err;
+
+	return btdev_set_msft_opcode(vhci->btdev, opcode);
+}
+
+int vhci_set_aosp_capable(struct vhci *vhci, bool enable)
+{
+	char val;
+
+	val = (enable) ? 'Y' : 'N';
+
+	return vhci_debugfs_write(vhci, "aosp_capable", &val, sizeof(val));
 }

@@ -1210,10 +1210,10 @@ static struct option cc_options[] = {
 
 static const char *cc_help =
 	"Usage:\n"
-	"\tcc [--role=m|s] [--ptype=pkt_types] <bdaddr>\n"
+	"\tcc [--role=c|p] [--ptype=pkt_types] <bdaddr>\n"
 	"Example:\n"
 	"\tcc --ptype=dm1,dh3,dh5 01:02:03:04:05:06\n"
-	"\tcc --role=m 01:02:03:04:05:06\n";
+	"\tcc --role=c 01:02:03:04:05:06\n";
 
 static void cmd_cc(int dev_id, int argc, char **argv)
 {
@@ -1233,7 +1233,7 @@ static void cmd_cc(int dev_id, int argc, char **argv)
 			break;
 
 		case 'r':
-			role = optarg[0] == 'm' ? 0 : 1;
+			role = optarg[0] == 'm' || optarg[0] == 'c' ? 0 : 1;
 			break;
 
 		default:
@@ -1360,10 +1360,12 @@ static void cmd_sr(int dev_id, int argc, char **argv)
 
 	str2ba(argv[0], &bdaddr);
 	switch (argv[1][0]) {
-	case 'm':
+	case 'm': /* Deprecated. Kept for compatibility. */
+	case 'c':
 		role = 0;
 		break;
-	case 's':
+	case 's': /* Deprecated. Kept for compatibility. */
+	case 'p':
 		role = 1;
 		break;
 	default:
@@ -2474,7 +2476,8 @@ static struct option lescan_options[] = {
 	{ "static",	0, 0, 's' },
 	{ "privacy",	0, 0, 'p' },
 	{ "passive",	0, 0, 'P' },
-	{ "whitelist",	0, 0, 'w' },
+	{ "whitelist",	0, 0, 'w' }, /* Deprecated. Kept for compatibility. */
+	{ "acceptlist",	0, 0, 'a' },
 	{ "discovery",	1, 0, 'd' },
 	{ "duplicates",	0, 0, 'D' },
 	{ 0, 0, 0, 0 }
@@ -2484,7 +2487,7 @@ static const char *lescan_help =
 	"Usage:\n"
 	"\tlescan [--privacy] enable privacy\n"
 	"\tlescan [--passive] set scan type passive (default active)\n"
-	"\tlescan [--whitelist] scan for address in the whitelist only\n"
+	"\tlescan [--acceptlist] scan for address in the accept list only\n"
 	"\tlescan [--discovery=g|l] enable general or limited discovery"
 		"procedure\n"
 	"\tlescan [--duplicates] don't filter duplicates\n";
@@ -2511,8 +2514,9 @@ static void cmd_lescan(int dev_id, int argc, char **argv)
 		case 'P':
 			scan_type = 0x00; /* Passive */
 			break;
-		case 'w':
-			filter_policy = 0x01; /* Whitelist */
+		case 'w': /* Deprecated. Kept for compatibility. */
+		case 'a':
+			filter_policy = 0x01; /* Accept list */
 			break;
 		case 'd':
 			filter_type = optarg[0];
@@ -2678,14 +2682,15 @@ static struct option lecc_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ "static",	0, 0, 's' },
 	{ "random",	0, 0, 'r' },
-	{ "whitelist",	0, 0, 'w' },
+	{ "whitelist",	0, 0, 'w' }, /* Deprecated. Kept for compatibility. */
+	{ "acceptlist",	0, 0, 'a' },
 	{ 0, 0, 0, 0 }
 };
 
 static const char *lecc_help =
 	"Usage:\n"
 	"\tlecc [--static] [--random] <bdaddr>\n"
-	"\tlecc --whitelist\n";
+	"\tlecc --acceptlist\n";
 
 static void cmd_lecc(int dev_id, int argc, char **argv)
 {
@@ -2707,8 +2712,9 @@ static void cmd_lecc(int dev_id, int argc, char **argv)
 		case 'r':
 			peer_bdaddr_type = LE_RANDOM_ADDRESS;
 			break;
-		case 'w':
-			initiator_filter = 0x01; /* Use white list */
+		case 'w': /* Deprecated. Kept for compatibility. */
+		case 'a':
+			initiator_filter = 0x01; /* Use accept list */
 			break;
 		default:
 			printf("%s", lecc_help);
@@ -2753,34 +2759,34 @@ static void cmd_lecc(int dev_id, int argc, char **argv)
 	hci_close_dev(dd);
 }
 
-static struct option lewladd_options[] = {
+static struct option lealadd_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ "random",	0, 0, 'r' },
 	{ 0, 0, 0, 0 }
 };
 
-static const char *lewladd_help =
+static const char *lealadd_help =
 	"Usage:\n"
-	"\tlewladd [--random] <bdaddr>\n";
+	"\tlealadd [--random] <bdaddr>\n";
 
-static void cmd_lewladd(int dev_id, int argc, char **argv)
+static void cmd_lealadd(int dev_id, int argc, char **argv)
 {
 	int err, opt, dd;
 	bdaddr_t bdaddr;
 	uint8_t bdaddr_type = LE_PUBLIC_ADDRESS;
 
-	for_each_opt(opt, lewladd_options, NULL) {
+	for_each_opt(opt, lealadd_options, NULL) {
 		switch (opt) {
 		case 'r':
 			bdaddr_type = LE_RANDOM_ADDRESS;
 			break;
 		default:
-			printf("%s", lewladd_help);
+			printf("%s", lealadd_help);
 			return;
 		}
 	}
 
-	helper_arg(1, 1, &argc, &argv, lewladd_help);
+	helper_arg(1, 1, &argc, &argv, lealadd_help);
 
 	if (dev_id < 0)
 		dev_id = hci_get_route(NULL);
@@ -2798,35 +2804,35 @@ static void cmd_lewladd(int dev_id, int argc, char **argv)
 
 	if (err < 0) {
 		err = -errno;
-		fprintf(stderr, "Can't add to white list: %s(%d)\n",
+		fprintf(stderr, "Can't add to accept list: %s(%d)\n",
 							strerror(-err), -err);
 		exit(1);
 	}
 }
 
-static struct option lewlrm_options[] = {
+static struct option lealrm_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ 0, 0, 0, 0 }
 };
 
-static const char *lewlrm_help =
+static const char *lealrm_help =
 	"Usage:\n"
-	"\tlewlrm <bdaddr>\n";
+	"\tlealrm <bdaddr>\n";
 
-static void cmd_lewlrm(int dev_id, int argc, char **argv)
+static void cmd_lealrm(int dev_id, int argc, char **argv)
 {
 	int err, opt, dd;
 	bdaddr_t bdaddr;
 
-	for_each_opt(opt, lewlrm_options, NULL) {
+	for_each_opt(opt, lealrm_options, NULL) {
 		switch (opt) {
 		default:
-			printf("%s", lewlrm_help);
+			printf("%s", lealrm_help);
 			return;
 		}
 	}
 
-	helper_arg(1, 1, &argc, &argv, lewlrm_help);
+	helper_arg(1, 1, &argc, &argv, lealrm_help);
 
 	if (dev_id < 0)
 		dev_id = hci_get_route(NULL);
@@ -2844,35 +2850,35 @@ static void cmd_lewlrm(int dev_id, int argc, char **argv)
 
 	if (err < 0) {
 		err = errno;
-		fprintf(stderr, "Can't remove from white list: %s(%d)\n",
+		fprintf(stderr, "Can't remove from accept list: %s(%d)\n",
 							strerror(err), err);
 		exit(1);
 	}
 }
 
-static struct option lewlsz_options[] = {
+static struct option lealsz_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ 0, 0, 0, 0 }
 };
 
-static const char *lewlsz_help =
+static const char *lealsz_help =
 	"Usage:\n"
-	"\tlewlsz\n";
+	"\tlealsz\n";
 
-static void cmd_lewlsz(int dev_id, int argc, char **argv)
+static void cmd_lealsz(int dev_id, int argc, char **argv)
 {
 	int err, dd, opt;
 	uint8_t size;
 
-	for_each_opt(opt, lewlsz_options, NULL) {
+	for_each_opt(opt, lealsz_options, NULL) {
 		switch (opt) {
 		default:
-			printf("%s", lewlsz_help);
+			printf("%s", lealsz_help);
 			return;
 		}
 	}
 
-	helper_arg(0, 0, &argc, &argv, lewlsz_help);
+	helper_arg(0, 0, &argc, &argv, lealsz_help);
 
 	if (dev_id < 0)
 		dev_id = hci_get_route(NULL);
@@ -2888,36 +2894,36 @@ static void cmd_lewlsz(int dev_id, int argc, char **argv)
 
 	if (err < 0) {
 		err = -errno;
-		fprintf(stderr, "Can't read white list size: %s(%d)\n",
+		fprintf(stderr, "Can't read accept list size: %s(%d)\n",
 							strerror(-err), -err);
 		exit(1);
 	}
 
-	printf("White list size: %d\n", size);
+	printf("Accept list size: %d\n", size);
 }
 
-static struct option lewlclr_options[] = {
+static struct option lealclr_options[] = {
 	{ "help",	0, 0, 'h' },
 	{ 0, 0, 0, 0 }
 };
 
-static const char *lewlclr_help =
+static const char *lealclr_help =
 	"Usage:\n"
-	"\tlewlclr\n";
+	"\tlealclr\n";
 
-static void cmd_lewlclr(int dev_id, int argc, char **argv)
+static void cmd_lealclr(int dev_id, int argc, char **argv)
 {
 	int err, dd, opt;
 
-	for_each_opt(opt, lewlclr_options, NULL) {
+	for_each_opt(opt, lealclr_options, NULL) {
 		switch (opt) {
 		default:
-			printf("%s", lewlclr_help);
+			printf("%s", lealclr_help);
 			return;
 		}
 	}
 
-	helper_arg(0, 0, &argc, &argv, lewlclr_help);
+	helper_arg(0, 0, &argc, &argv, lealclr_help);
 
 	if (dev_id < 0)
 		dev_id = hci_get_route(NULL);
@@ -2933,7 +2939,7 @@ static void cmd_lewlclr(int dev_id, int argc, char **argv)
 
 	if (err < 0) {
 		err = -errno;
-		fprintf(stderr, "Can't clear white list: %s(%d)\n",
+		fprintf(stderr, "Can't clear accept list: %s(%d)\n",
 							strerror(-err), -err);
 		exit(1);
 	}
@@ -3287,7 +3293,7 @@ static const char *lecup_help =
 	"\t    --handle=<0xXXXX>  LE connection handle\n"
 	"\t    --min=<interval>   Range: 0x0006 to 0x0C80\n"
 	"\t    --max=<interval>   Range: 0x0006 to 0x0C80\n"
-	"\t    --latency=<range>  Slave latency. Range: 0x0000 to 0x03E8\n"
+	"\t    --latency=<range>  Peripheral latency. Range: 0x0000 to 0x03E8\n"
 	"\t    --timeout=<time>   N * 10ms. Range: 0x000A to 0x0C80\n"
 	"\n\t min/max range: 7.5ms to 4s. Multiply factor: 1.25ms"
 	"\n\t timeout range: 100ms to 32.0s. Larger than max interval\n";
@@ -3379,7 +3385,7 @@ static struct {
 	{ "con",      cmd_con,     "Display active connections"           },
 	{ "cc",       cmd_cc,      "Create connection to remote device"   },
 	{ "dc",       cmd_dc,      "Disconnect from remote device"        },
-	{ "sr",       cmd_sr,      "Switch master/slave role"             },
+	{ "sr",       cmd_sr,      "Switch central/peripheral role"       },
 	{ "cpt",      cmd_cpt,     "Change connection packet type"        },
 	{ "rssi",     cmd_rssi,    "Display connection RSSI"              },
 	{ "lq",       cmd_lq,      "Display link quality"                 },
@@ -3394,10 +3400,14 @@ static struct {
 	{ "clock",    cmd_clock,   "Read local or remote clock"           },
 	{ "lescan",   cmd_lescan,  "Start LE scan"                        },
 	{ "leinfo",   cmd_leinfo,  "Get LE remote information"            },
-	{ "lewladd",  cmd_lewladd, "Add device to LE White List"          },
-	{ "lewlrm",   cmd_lewlrm,  "Remove device from LE White List"     },
-	{ "lewlsz",   cmd_lewlsz,  "Read size of LE White List"           },
-	{ "lewlclr",  cmd_lewlclr, "Clear LE White List"                  },
+	{ "lealadd",  cmd_lealadd, "Add device to LE Accept List"         },
+	{ "lealrm",   cmd_lealrm,  "Remove device from LE Accept List"    },
+	{ "lealsz",   cmd_lealsz,  "Read size of LE Accept List"          },
+	{ "lealclr",  cmd_lealclr, "Clear LE Accept List"                 },
+	{ "lewladd",  cmd_lealadd, "Deprecated. Use lealadd instead."     },
+	{ "lewlrm",   cmd_lealrm,  "Deprecated. Use lealrm instead."      },
+	{ "lewlsz",   cmd_lealsz,  "Deprecated. Use lealsz instead."      },
+	{ "lewlclr",  cmd_lealclr, "Deprecated. Use lealclr instead."     },
 	{ "lerladd",  cmd_lerladd, "Add device to LE Resolving List"      },
 	{ "lerlrm",   cmd_lerlrm,  "Remove device from LE Resolving List" },
 	{ "lerlclr",  cmd_lerlclr, "Clear LE Resolving List"              },

@@ -44,7 +44,6 @@
 #define AVDTP_PSM 25
 
 #define MAX_SEID 0x3E
-static unsigned int seids;
 
 #ifndef MAX
 # define MAX(x, y) ((x) > (y) ? (x) : (y))
@@ -1305,43 +1304,53 @@ struct avdtp_remote_sep *avdtp_find_remote_sep(struct avdtp *session,
 	return NULL;
 }
 
-static GSList *caps_to_list(uint8_t *data, int size,
+static GSList *caps_to_list(uint8_t *data, size_t size,
 				struct avdtp_service_capability **codec,
 				gboolean *delay_reporting)
 {
+	struct avdtp_service_capability *cap;
 	GSList *caps;
-	int processed;
 
 	if (delay_reporting)
 		*delay_reporting = FALSE;
 
-	for (processed = 0, caps = NULL; processed + 2 <= size;) {
-		struct avdtp_service_capability *cap;
-		uint8_t length, category;
+	if (size < sizeof(*cap))
+		return NULL;
 
-		category = data[0];
-		length = data[1];
+	for (caps = NULL; size >= sizeof(*cap);) {
+		struct avdtp_service_capability *cpy;
 
-		if (processed + 2 + length > size) {
+		cap = (struct avdtp_service_capability *)data;
+
+		if (sizeof(*cap) + cap->length > size) {
 			error("Invalid capability data in getcap resp");
 			break;
 		}
 
-		cap = g_malloc(sizeof(struct avdtp_service_capability) +
-					length);
-		memcpy(cap, data, 2 + length);
+		if (cap->category == AVDTP_MEDIA_CODEC &&
+					cap->length < sizeof(**codec)) {
+			error("Invalid codec data in getcap resp");
+			break;
+		}
 
-		processed += 2 + length;
-		data += 2 + length;
+		cpy = btd_malloc(sizeof(*cpy) + cap->length);
+		memcpy(cpy, cap, sizeof(*cap) + cap->length);
 
-		caps = g_slist_append(caps, cap);
+		size -= sizeof(*cap) + cap->length;
+		data += sizeof(*cap) + cap->length;
 
-		if (category == AVDTP_MEDIA_CODEC &&
-				length >=
-				sizeof(struct avdtp_media_codec_capability))
-			*codec = cap;
-		else if (category == AVDTP_DELAY_REPORTING && delay_reporting)
-			*delay_reporting = TRUE;
+		caps = g_slist_append(caps, cpy);
+
+		switch (cap->category) {
+		case AVDTP_MEDIA_CODEC:
+			if (codec)
+				*codec = cpy;
+			break;
+		case AVDTP_DELAY_REPORTING:
+			if (delay_reporting)
+				*delay_reporting = TRUE;
+			break;
+		}
 	}
 
 	return caps;
@@ -1540,6 +1549,12 @@ static gboolean avdtp_setconf_cmd(struct avdtp *session, uint8_t transaction,
 					size - sizeof(struct setconf_req),
 					&stream->codec,
 					&stream->delay_reporting);
+
+	if (!stream->caps || !stream->codec) {
+		err = AVDTP_UNSUPPORTED_CONFIGURATION;
+		category = 0x00;
+		goto failed_stream;
+	}
 
 	/* Verify that the Media Transport capability's length = 0. Reject otherwise */
 	for (l = stream->caps; l != NULL; l = g_slist_next(l)) {
@@ -3358,6 +3373,19 @@ struct avdtp_remote_sep *avdtp_register_remote_sep(struct avdtp *session,
 	return sep;
 }
 
+int avdtp_unregister_remote_sep(struct avdtp *session,
+						struct avdtp_remote_sep *rsep)
+{
+	if (!session || !rsep)
+		return -EINVAL;
+
+	session->seps = g_slist_remove(session->seps, rsep);
+
+	sep_free(rsep);
+
+	return 0;
+}
+
 void avdtp_remote_sep_set_destroy(struct avdtp_remote_sep *sep, void *user_data,
 					avdtp_remote_sep_destroy_t destroy)
 {
@@ -3749,7 +3777,9 @@ int avdtp_delay_report(struct avdtp *session, struct avdtp_stream *stream,
 							&req, sizeof(req));
 }
 
-struct avdtp_local_sep *avdtp_register_sep(struct queue *lseps, uint8_t type,
+struct avdtp_local_sep *avdtp_register_sep(struct queue *lseps,
+						uint64_t *seid_pool,
+						uint8_t type,
 						uint8_t media_type,
 						uint8_t codec_type,
 						gboolean delay_reporting,
@@ -3758,7 +3788,7 @@ struct avdtp_local_sep *avdtp_register_sep(struct queue *lseps, uint8_t type,
 						void *user_data)
 {
 	struct avdtp_local_sep *sep;
-	uint8_t seid = util_get_uid(&seids, MAX_SEID);
+	uint8_t seid = util_get_uid(seid_pool, MAX_SEID);
 
 	if (!seid)
 		return NULL;
@@ -3775,18 +3805,21 @@ struct avdtp_local_sep *avdtp_register_sep(struct queue *lseps, uint8_t type,
 	sep->user_data = user_data;
 	sep->delay_reporting = delay_reporting;
 
-	DBG("SEP %p registered: type:%d codec:%d seid:%d", sep,
-			sep->info.type, sep->codec, sep->info.seid);
+	DBG("SEP %p registered: type:%d codec:%d seid_pool:%p seid:%d", sep,
+			sep->info.type, sep->codec, seid_pool,
+			sep->info.seid);
 
 	if (!queue_push_tail(lseps, sep)) {
 		g_free(sep);
+		util_clear_uid(seid_pool, seid);
 		return NULL;
 	}
 
 	return sep;
 }
 
-int avdtp_unregister_sep(struct queue *lseps, struct avdtp_local_sep *sep)
+int avdtp_unregister_sep(struct queue *lseps, uint64_t *seid_pool,
+						struct avdtp_local_sep *sep)
 {
 	if (!sep)
 		return -EINVAL;
@@ -3794,10 +3827,11 @@ int avdtp_unregister_sep(struct queue *lseps, struct avdtp_local_sep *sep)
 	if (sep->stream)
 		release_stream(sep->stream, sep->stream->session);
 
-	DBG("SEP %p unregistered: type:%d codec:%d seid:%d", sep,
-			sep->info.type, sep->codec, sep->info.seid);
+	DBG("SEP %p unregistered: type:%d codec:%d seid_pool:%p seid:%d", sep,
+			sep->info.type, sep->codec, seid_pool,
+			sep->info.seid);
 
-	util_clear_uid(&seids, sep->info.seid);
+	util_clear_uid(seid_pool, sep->info.seid);
 	queue_remove(lseps, sep);
 	g_free(sep);
 

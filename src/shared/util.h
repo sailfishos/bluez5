@@ -102,11 +102,12 @@ void util_hexdump(const char dir, const unsigned char *buf, size_t len,
 
 unsigned char util_get_dt(const char *parent, const char *name);
 
-uint8_t util_get_uid(unsigned int *bitmap, uint8_t max);
-void util_clear_uid(unsigned int *bitmap, uint8_t id);
+uint8_t util_get_uid(uint64_t *bitmap, uint8_t max);
+void util_clear_uid(uint64_t *bitmap, uint8_t id);
 
 const char *bt_uuid16_to_str(uint16_t uuid);
 const char *bt_uuid32_to_str(uint32_t uuid);
+const char *bt_uuid128_to_str(const uint8_t uuid[16]);
 const char *bt_uuidstr_to_str(const char *uuid);
 const char *bt_appear_to_str(uint16_t appearance);
 
@@ -128,6 +129,20 @@ static inline uint16_t get_le16(const void *ptr)
 static inline uint16_t get_be16(const void *ptr)
 {
 	return be16_to_cpu(get_unaligned((const uint16_t *) ptr));
+}
+
+static inline uint32_t get_le24(const void *ptr)
+{
+	const uint8_t *src = ptr;
+
+	return ((uint32_t)src[2] << 16) | get_le16(ptr);
+}
+
+static inline uint32_t get_be24(const void *ptr)
+{
+	const uint8_t *src = ptr;
+
+	return ((uint32_t)src[0] << 16) | get_be16(&src[1]);
 }
 
 static inline uint32_t get_le32(const void *ptr)
@@ -158,6 +173,18 @@ static inline void put_le16(uint16_t val, void *dst)
 static inline void put_be16(uint16_t val, const void *ptr)
 {
 	put_unaligned(cpu_to_be16(val), (uint16_t *) ptr);
+}
+
+static inline void put_le24(uint32_t val, void *ptr)
+{
+	put_le16(val, ptr);
+	put_unaligned(val >> 16, (uint8_t *) ptr + 2);
+}
+
+static inline void put_be24(uint32_t val, void *ptr)
+{
+	put_unaligned(val >> 16, (uint8_t *) ptr + 2);
+	put_be16(val, ptr + 1);
 }
 
 static inline void put_le32(uint32_t val, void *dst)

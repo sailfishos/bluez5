@@ -779,6 +779,20 @@ static uint8_t authorize_req(struct bt_gatt_server *server,
 						server->authorize_data);
 }
 
+static uint8_t check_length(uint16_t length, uint16_t offset)
+{
+	if (length > BT_ATT_MAX_VALUE_LEN)
+		return BT_ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LEN;
+
+	if (offset > BT_ATT_MAX_VALUE_LEN)
+		return BT_ATT_ERROR_INVALID_OFFSET;
+
+	if (length + offset > BT_ATT_MAX_VALUE_LEN)
+		return BT_ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LEN;
+
+	return 0;
+}
+
 static void write_cb(struct bt_att_chan *chan, uint8_t opcode, const void *pdu,
 					uint16_t length, void *user_data)
 {
@@ -808,6 +822,10 @@ static void write_cb(struct bt_att_chan *chan, uint8_t opcode, const void *pdu,
 				"Write %s - handle: 0x%04x",
 				(opcode == BT_ATT_OP_WRITE_REQ) ? "Req" : "Cmd",
 				handle);
+
+	ecode = check_length(length, 0);
+	if (ecode)
+		goto error;
 
 	ecode = check_permissions(server, attr, BT_ATT_PERM_WRITE_MASK);
 	if (ecode)
@@ -1101,8 +1119,6 @@ static void read_multiple_cb(struct bt_att_chan *chan, uint8_t opcode,
 	}
 
 	data = read_mult_data_new(server, chan, opcode, length / 2);
-	if (!data)
-		goto error;
 
 	for (i = 0; i < data->num_handles; i++)
 		data->handles[i] = get_le16(pdu + i * 2);
@@ -1298,6 +1314,10 @@ static void prep_write_cb(struct bt_att_chan *chan, uint8_t opcode,
 
 	util_debug(server->debug_callback, server->debug_data,
 				"Prep Write Req - handle: 0x%04x", handle);
+
+	ecode = check_length(length, offset);
+	if (ecode)
+		goto error;
 
 	ecode = check_permissions(server, attr, BT_ATT_PERM_WRITE_MASK);
 	if (ecode)
@@ -1690,6 +1710,17 @@ static bool notify_multiple(void *user_data)
 	return false;
 }
 
+static bool notify_append_le16(struct nfy_mult_data *data, uint16_t value)
+{
+	if (data->offset + sizeof(value) > data->len)
+		return false;
+
+	put_le16(value, data->pdu + data->offset);
+	data->offset += sizeof(value);
+
+	return true;
+}
+
 bool bt_gatt_server_send_notification(struct bt_gatt_server *server,
 					uint16_t handle, const uint8_t *value,
 					uint16_t length, bool multiple)
@@ -1700,8 +1731,19 @@ bool bt_gatt_server_send_notification(struct bt_gatt_server *server,
 	if (!server || (length && !value))
 		return false;
 
-	if (multiple)
+	if (multiple) {
 		data = server->nfy_mult;
+
+		/* flush buffered data if this request hits buffer size limit */
+		if (data && data->offset > 0 &&
+				data->len - data->offset < 4 + length) {
+			if (server->nfy_mult->id)
+				timeout_remove(server->nfy_mult->id);
+			notify_multiple(server);
+			/* data has been freed by notify_multiple */
+			data = NULL;
+		}
+	}
 
 	if (!data) {
 		data = new0(struct nfy_mult_data, 1);
@@ -1709,14 +1751,15 @@ bool bt_gatt_server_send_notification(struct bt_gatt_server *server,
 		data->pdu = malloc(data->len);
 	}
 
-	put_le16(handle, data->pdu + data->offset);
-	data->offset += 2;
-
-	length = MIN(data->len - data->offset, length);
+	if (!notify_append_le16(data, handle))
+		goto error;
 
 	if (multiple) {
-		put_le16(length, data->pdu + data->offset);
-		data->offset += 2;
+		length = MIN(data->len - data->offset - 2, length);
+		if (!notify_append_le16(data, length))
+			goto error;
+	} else {
+		length = MIN(data->len - data->offset, length);
 	}
 
 	memcpy(data->pdu + data->offset, value, length);
@@ -1740,6 +1783,12 @@ bool bt_gatt_server_send_notification(struct bt_gatt_server *server,
 	free(data);
 
 	return result;
+
+error:
+	if (data)
+		free(data);
+
+	return false;
 }
 
 struct ind_data {

@@ -215,6 +215,8 @@ struct avdtp_remote_sep *avdtp_register_remote_sep(struct avdtp *session,
 							uint8_t type,
 							GSList *caps,
 							bool delay_reporting);
+int avdtp_unregister_remote_sep(struct avdtp *session,
+						struct avdtp_remote_sep *rsep);
 
 typedef void (*avdtp_remote_sep_destroy_t)(void *user_data);
 
@@ -276,7 +278,9 @@ int avdtp_abort(struct avdtp *session, struct avdtp_stream *stream);
 int avdtp_delay_report(struct avdtp *session, struct avdtp_stream *stream,
 							uint16_t delay);
 
-struct avdtp_local_sep *avdtp_register_sep(struct queue *lseps, uint8_t type,
+struct avdtp_local_sep *avdtp_register_sep(struct queue *lseps,
+						uint64_t *seid_pool,
+						uint8_t type,
 						uint8_t media_type,
 						uint8_t codec_type,
 						gboolean delay_reporting,
@@ -288,7 +292,8 @@ struct avdtp_local_sep *avdtp_register_sep(struct queue *lseps, uint8_t type,
 struct avdtp_remote_sep *avdtp_find_remote_sep(struct avdtp *session,
 						struct avdtp_local_sep *lsep);
 
-int avdtp_unregister_sep(struct queue *lseps, struct avdtp_local_sep *sep);
+int avdtp_unregister_sep(struct queue *lseps, uint64_t *seid_pool,
+						struct avdtp_local_sep *sep);
 
 avdtp_state_t avdtp_sep_get_state(struct avdtp_local_sep *sep);
 uint8_t avdtp_sep_get_seid(struct avdtp_local_sep *sep);

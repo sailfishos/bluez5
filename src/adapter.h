@@ -25,6 +25,7 @@
 
 struct btd_adapter;
 struct btd_device;
+struct queue;
 
 struct btd_adapter *btd_adapter_get_default(void);
 bool btd_adapter_is_default(struct btd_adapter *adapter);
@@ -86,6 +87,15 @@ struct btd_device *btd_adapter_find_device(struct btd_adapter *adapter,
 struct btd_device *btd_adapter_find_device_by_path(struct btd_adapter *adapter,
 						   const char *path);
 
+void btd_adapter_update_found_device(struct btd_adapter *adapter,
+					const bdaddr_t *bdaddr,
+					uint8_t bdaddr_type, int8_t rssi,
+					bool confirm, bool legacy,
+					bool not_connectable,
+					bool name_resolve_failed,
+					const uint8_t *data, uint8_t data_len,
+					bool monitored);
+
 const char *adapter_get_path(struct btd_adapter *adapter);
 const bdaddr_t *btd_adapter_get_address(struct btd_adapter *adapter);
 uint8_t btd_adapter_get_address_type(struct btd_adapter *adapter);
@@ -97,6 +107,8 @@ void adapter_service_remove(struct btd_adapter *adapter, uint32_t handle);
 
 struct agent *adapter_get_agent(struct btd_adapter *adapter);
 
+bool btd_adapter_uuid_is_allowed(struct btd_adapter *adapter, const char *uuid);
+
 struct btd_adapter *btd_adapter_ref(struct btd_adapter *adapter);
 void btd_adapter_unref(struct btd_adapter *adapter);
 
@@ -105,11 +117,19 @@ void btd_adapter_set_class(struct btd_adapter *adapter, uint8_t major,
 
 struct btd_adapter_driver {
 	const char *name;
-	int (*probe) (struct btd_adapter *adapter);
-	void (*remove) (struct btd_adapter *adapter);
-	void (*resume) (struct btd_adapter *adapter);
+	int (*probe)(struct btd_adapter *adapter);
+	void (*remove)(struct btd_adapter *adapter);
+	void (*resume)(struct btd_adapter *adapter);
+	void (*device_added)(struct btd_adapter *adapter,
+						struct btd_device *device);
+	void (*device_removed)(struct btd_adapter *adapter,
+						struct btd_device *device);
+	void (*device_resolved)(struct btd_adapter *adapter,
+						struct btd_device *device);
 };
 
+void device_resolved_drivers(struct btd_adapter *adapter,
+						struct btd_device *device);
 typedef void (*service_auth_cb) (DBusError *derr, void *user_data);
 
 void adapter_add_profile(struct btd_adapter *adapter, gpointer p);
@@ -208,15 +228,20 @@ int adapter_connect_list_add(struct btd_adapter *adapter,
 					struct btd_device *device);
 void adapter_connect_list_remove(struct btd_adapter *adapter,
 						struct btd_device *device);
-void adapter_set_device_wakeable(struct btd_adapter *adapter,
-				 struct btd_device *dev, bool wakeable);
+typedef void (*adapter_set_device_flags_func_t)(uint8_t status, uint16_t length,
+						const void *param,
+						void *user_data);
+void adapter_set_device_flags(struct btd_adapter *adapter,
+				struct btd_device *device, uint32_t flags,
+				adapter_set_device_flags_func_t func,
+				void *user_data);
 void adapter_auto_connect_add(struct btd_adapter *adapter,
 					struct btd_device *device);
 void adapter_auto_connect_remove(struct btd_adapter *adapter,
 					struct btd_device *device);
-void adapter_whitelist_add(struct btd_adapter *adapter,
+void adapter_accept_list_add(struct btd_adapter *adapter,
 						struct btd_device *dev);
-void adapter_whitelist_remove(struct btd_adapter *adapter,
+void adapter_accept_list_remove(struct btd_adapter *adapter,
 						struct btd_device *dev);
 
 void btd_adapter_set_oob_handler(struct btd_adapter *adapter,
@@ -240,5 +265,10 @@ enum kernel_features {
 };
 
 bool btd_has_kernel_features(uint32_t feature);
+
+bool btd_adapter_set_allowed_uuids(struct btd_adapter *adapter,
+							struct queue *uuids);
+bool btd_adapter_is_uuid_allowed(struct btd_adapter *adapter,
+							const char *uuid_str);
 int btd_adapter_set_did(struct btd_adapter *adapter, uint16_t vendor,
 			uint16_t product, uint16_t version, uint16_t source);

@@ -41,7 +41,7 @@ static int l2cap_sock = -1, unix_sock = -1;
  * l2cap and unix sockets over which discovery and registration clients
  * access us respectively
  */
-static int init_server(uint16_t mtu, int master, int compat)
+static int init_server(uint16_t mtu, int central, int compat)
 {
 	struct l2cap_options opts;
 	struct sockaddr_l2 l2addr;
@@ -71,7 +71,7 @@ static int init_server(uint16_t mtu, int master, int compat)
 		return -1;
 	}
 
-	if (master) {
+	if (central) {
 		int opt = L2CAP_LM_MASTER;
 		if (setsockopt(l2cap_sock, SOL_L2CAP, L2CAP_LM, &opt, sizeof(opt)) < 0) {
 			error("setsockopt: %s", strerror(errno));
@@ -146,16 +146,12 @@ static gboolean io_session_event(GIOChannel *chan, GIOCondition cond, gpointer d
 
 	sk = g_io_channel_unix_get_fd(chan);
 
-	if (cond & (G_IO_HUP | G_IO_ERR)) {
-		sdp_svcdb_collect_all(sk);
-		return FALSE;
-	}
+	if (cond & (G_IO_HUP | G_IO_ERR))
+		goto cleanup;
 
 	len = recv(sk, &hdr, sizeof(sdp_pdu_hdr_t), MSG_PEEK);
-	if (len < 0 || (unsigned int) len < sizeof(sdp_pdu_hdr_t)) {
-		sdp_svcdb_collect_all(sk);
-		return FALSE;
-	}
+	if (len < 0 || (unsigned int) len < sizeof(sdp_pdu_hdr_t))
+		goto cleanup;
 
 	size = sizeof(sdp_pdu_hdr_t) + ntohs(hdr.plen);
 	buf = malloc(size);
@@ -168,14 +164,18 @@ static gboolean io_session_event(GIOChannel *chan, GIOCondition cond, gpointer d
 	 * inside handle_request() in order to produce ErrorResponse.
 	 */
 	if (len <= 0) {
-		sdp_svcdb_collect_all(sk);
 		free(buf);
-		return FALSE;
+		goto cleanup;
 	}
 
 	handle_request(sk, buf, len);
 
 	return TRUE;
+
+cleanup:
+	sdp_svcdb_collect_all(sk);
+	sdp_cstate_cleanup(sk);
+	return FALSE;
 }
 
 static gboolean io_accept_event(GIOChannel *chan, GIOCondition cond, gpointer data)
@@ -218,12 +218,12 @@ static gboolean io_accept_event(GIOChannel *chan, GIOCondition cond, gpointer da
 int start_sdp_server(uint16_t mtu, uint32_t flags)
 {
 	int compat = flags & SDP_SERVER_COMPAT;
-	int master = flags & SDP_SERVER_MASTER;
+	int central = flags & SDP_SERVER_CENTRAL;
 	GIOChannel *io;
 
 	info("Starting SDP server");
 
-	if (init_server(mtu, master, compat) < 0) {
+	if (init_server(mtu, central, compat) < 0) {
 		error("Server initialization failed");
 		return -1;
 	}

@@ -17,6 +17,7 @@
 #include <ctype.h>
 #include <dbus/dbus.h>
 #include <errno.h>
+#include <libgen.h>
 #include <stdio.h>
 #include <time.h>
 
@@ -51,6 +52,7 @@
 #define MAX_CRPL_SIZE		0x7fff
 
 #define DEFAULT_CFG_FILE	"config_db.json"
+#define DEFAULT_EXPORT_FILE	"export_db.json"
 
 struct meshcfg_el {
 	const char *path;
@@ -104,7 +106,17 @@ static struct model_info *cfgcli;
 static struct l_queue *devices;
 
 static bool prov_in_progress;
-static const char *caps[] = {"static-oob", "out-numeric", "in-numeric"};
+static const char * const caps[] = {"static-oob",
+				"push",
+				"twist",
+				"blink",
+				"beep",
+				"vibrate",
+				"public-oob",
+				"out-alpha",
+				"in-alpha",
+				"out-numeric",
+				"in-numeric"};
 
 static bool have_config;
 
@@ -419,7 +431,7 @@ static void agent_input_done(oob_type_t type, void *buf, uint16_t len,
 	struct l_dbus_message *reply = NULL;
 	struct l_dbus_message_builder *builder;
 	uint32_t val_u32;
-	uint8_t oob_data[16];
+	uint8_t oob_data[64];
 
 	switch (type) {
 	case NONE:
@@ -435,15 +447,15 @@ static void agent_input_done(oob_type_t type, void *buf, uint16_t len,
 		/* Fall Through */
 
 	case HEXADECIMAL:
-		if (len > 16) {
+		if (len > sizeof(oob_data)) {
 			bt_shell_printf("Bad input length\n");
 			break;
 		}
-		memset(oob_data, 0, 16);
+		memset(oob_data, 0, sizeof(oob_data));
 		memcpy(oob_data, buf, len);
 		reply = l_dbus_message_new_method_return(msg);
 		builder = l_dbus_message_builder_new(reply);
-		append_byte_array(builder, oob_data, 16);
+		append_byte_array(builder, oob_data, len);
 		l_dbus_message_builder_finalize(builder);
 		l_dbus_message_builder_destroy(builder);
 		break;
@@ -580,6 +592,16 @@ static struct l_dbus_message *prompt_numeric_call(struct l_dbus *dbus,
 	return NULL;
 }
 
+static struct l_dbus_message *prompt_public_call(struct l_dbus *dbus,
+						struct l_dbus_message *msg,
+						void *user_data)
+{
+	l_dbus_message_ref(msg);
+	agent_input_request(HEXADECIMAL, 64, "Enter 512 bit Public Key",
+			agent_input_done, msg);
+	return NULL;
+}
+
 static struct l_dbus_message *prompt_static_call(struct l_dbus *dbus,
 						struct l_dbus_message *msg,
 						void *user_data)
@@ -618,6 +640,8 @@ static void setup_agent_iface(struct l_dbus_interface *iface)
 						"u", "s", "number", "type");
 	l_dbus_interface_method(iface, "PromptStatic", 0, prompt_static_call,
 						"ay", "s", "data", "type");
+	l_dbus_interface_method(iface, "PublicKey", 0, prompt_public_call,
+							"ay", "", "data");
 }
 
 static bool register_agent(void)
@@ -698,7 +722,7 @@ static void attach_node_reply(struct l_dbus_proxy *proxy,
 							ivi != iv_index) {
 		iv_index = ivi;
 		mesh_db_set_iv_index(ivi);
-		remote_clear_blacklisted_addresses(ivi);
+		remote_clear_rejected_addresses(ivi);
 	}
 
 	return;
@@ -813,6 +837,197 @@ static void cmd_scan_unprov(int argc, char *argv[])
 
 }
 
+static uint8_t *parse_key(struct l_dbus_message_iter *iter, uint16_t id,
+							const char *name)
+{
+	uint8_t *val;
+	uint32_t len;
+
+	if (!l_dbus_message_iter_get_fixed_array(iter, &val, &len)
+								|| len != 16) {
+		bt_shell_printf("Failed to parse %s %4.4x\n", name, id);
+		return NULL;
+	}
+
+	return val;
+}
+
+static bool parse_app_keys(struct l_dbus_message_iter *iter, uint16_t net_idx,
+								void *user_data)
+{
+	struct l_dbus_message_iter app_keys, app_key, opts;
+	uint16_t app_idx;
+
+	if (!l_dbus_message_iter_get_variant(iter, "a(qaya{sv})", &app_keys))
+		return false;
+
+	while (l_dbus_message_iter_next_entry(&app_keys, &app_idx, &app_key,
+								&opts)) {
+		struct l_dbus_message_iter var;
+		uint8_t *val, *old_val = NULL;
+		const char *key;
+
+		val = parse_key(&app_key, app_idx, "AppKey");
+		if (!val)
+			return false;
+
+		while (l_dbus_message_iter_next_entry(&opts, &key, &var)) {
+			if (!strcmp(key, "OldKey")) {
+				if (!l_dbus_message_iter_get_variant(&var, "ay",
+								&app_key))
+					return false;
+
+				old_val = parse_key(&app_key, app_idx,
+								"old NetKey");
+
+				if (!old_val)
+					return false;
+			}
+		}
+
+		mesh_db_set_app_key(user_data, net_idx, app_idx, val, old_val);
+	}
+
+	return true;
+}
+
+static bool parse_net_keys(struct l_dbus_message_iter *iter, void *user_data)
+{
+	struct l_dbus_message_iter net_keys, net_key, opts;
+	uint16_t idx;
+
+	if (!l_dbus_message_iter_get_variant(iter, "a(qaya{sv})", &net_keys))
+		return false;
+
+	while (l_dbus_message_iter_next_entry(&net_keys, &idx, &net_key,
+								&opts)) {
+		struct l_dbus_message_iter var;
+		uint8_t *val, *old_val = NULL;
+		uint8_t phase = KEY_REFRESH_PHASE_NONE;
+		const char *key;
+
+		val = parse_key(&net_key, idx, "NetKey");
+		if (!val)
+			return false;
+
+		while (l_dbus_message_iter_next_entry(&opts, &key, &var)) {
+			if (!strcmp(key, "AppKeys")) {
+				if (!parse_app_keys(&var, idx, user_data))
+					return false;
+			} else if (!strcmp(key, "Phase")) {
+				if (!l_dbus_message_iter_get_variant(&var, "y",
+									&phase))
+					return false;
+			} else if (!strcmp(key, "OldKey")) {
+				if (!l_dbus_message_iter_get_variant(&var, "ay",
+								&net_key))
+					return false;
+
+				old_val = parse_key(&net_key, idx,
+								"old NetKey");
+
+				if (!old_val)
+					return false;
+			}
+		}
+
+		mesh_db_set_net_key(user_data, idx, val, old_val, phase);
+	}
+
+	return true;
+}
+
+static bool parse_dev_keys(struct l_dbus_message_iter *iter, void *user_data)
+{
+	struct l_dbus_message_iter keys, dev_key;
+	uint16_t unicast;
+
+	if (!l_dbus_message_iter_get_variant(iter, "a(qay)", &keys))
+		return false;
+
+	while (l_dbus_message_iter_next_entry(&keys, &unicast, &dev_key)) {
+		uint8_t *data;
+
+		data = parse_key(&dev_key, unicast, "Device Key");
+		if (!data)
+			return false;
+
+		mesh_db_set_device_key(user_data, unicast, data);
+	}
+
+	return true;
+}
+
+static void export_keys_reply(struct l_dbus_proxy *proxy,
+				struct l_dbus_message *msg, void *user_data)
+{
+	struct l_dbus_message_iter iter, var;
+	char *cfg_dir = NULL, *fname = NULL;
+	const char *key;
+	bool is_error = true;
+
+	if (l_dbus_message_is_error(msg)) {
+		const char *name;
+
+		l_dbus_message_get_error(msg, &name, NULL);
+		bt_shell_printf("Failed to export keys: %s", name);
+		goto done;
+
+	}
+
+	if (!l_dbus_message_get_arguments(msg, "a{sv}", &iter)) {
+		bt_shell_printf("Malformed ExportKeys reply");
+		goto done;
+	}
+
+	while (l_dbus_message_iter_next_entry(&iter, &key, &var)) {
+		if (!strcmp(key, "NetKeys")) {
+			if (!parse_net_keys(&var, user_data))
+				goto done;
+		} else if (!strcmp(key, "DevKeys")) {
+			if (!parse_dev_keys(&var, user_data))
+				goto done;
+		}
+	}
+
+	is_error = false;
+
+	cfg_dir = l_strdup(cfg_fname);
+	cfg_dir = dirname(cfg_dir);
+
+	fname = l_strdup_printf("%s/%s", cfg_dir, DEFAULT_EXPORT_FILE);
+
+done:
+	if (mesh_db_finish_export(is_error, user_data, fname)) {
+		if (!is_error)
+			bt_shell_printf("Config DB is exported to %s\n", fname);
+	}
+
+	l_free(cfg_dir);
+	l_free(fname);
+}
+
+static void cmd_export_db(int argc, char *argv[])
+{
+	void *cfg_export;
+
+	if (!local || !local->proxy || !local->mgmt_proxy) {
+		bt_shell_printf("Node is not attached\n");
+		return;
+	}
+
+	/* Generate a properly formatted DB from the local config */
+	cfg_export = mesh_db_prepare_export();
+	if (!cfg_export) {
+		bt_shell_printf("Failed to prepare config db\n");
+		return;
+	}
+
+	/* Export the keys from the daemon */
+	l_dbus_proxy_method_call(local->mgmt_proxy, "ExportKeys", NULL,
+					export_keys_reply, cfg_export, NULL);
+}
+
 static void cmd_list_unprov(int argc, char *argv[])
 {
 	bt_shell_printf(COLOR_YELLOW "Unprovisioned devices:\n" COLOR_OFF);
@@ -914,7 +1129,7 @@ static void cmd_import_node(int argc, char *argv[])
 
 	/* Number of elements */
 	if (sscanf(argv[4], "%u", &req->arg3) != 1)
-		return;
+		goto fail;
 
 	/* DevKey */
 	req->data2 = l_util_from_hexstring(argv[5], &sz);
@@ -1019,15 +1234,15 @@ static void mgr_key_reply(struct l_dbus_proxy *proxy,
 
 	if (!strcmp("CreateSubnet", method)) {
 		keys_add_net_key(idx);
-		mesh_db_net_key_add(idx);
+		mesh_db_add_net_key(idx);
 	} else if (!strcmp("DeleteSubnet", method)) {
 		keys_del_net_key(idx);
-		mesh_db_net_key_del(idx);
+		mesh_db_del_net_key(idx);
 	} else if (!strcmp("UpdateSubnet", method)) {
 		keys_set_net_key_phase(idx, KEY_REFRESH_PHASE_ONE, true);
 	} else if (!strcmp("DeleteAppKey", method)) {
 		keys_del_app_key(idx);
-		mesh_db_app_key_del(idx);
+		mesh_db_del_app_key(idx);
 	}
 }
 
@@ -1111,13 +1326,13 @@ static void add_key_reply(struct l_dbus_proxy *proxy,
 
 	if (!strcmp(method, "ImportSubnet")) {
 		keys_add_net_key(net_idx);
-		mesh_db_net_key_add(net_idx);
+		mesh_db_add_net_key(net_idx);
 		return;
 	}
 
 	app_idx = (uint16_t) req->arg2;
 	keys_add_app_key(net_idx, app_idx);
-	mesh_db_app_key_add(net_idx, app_idx);
+	mesh_db_add_app_key(net_idx, app_idx);
 }
 
 static void import_appkey_setup(struct l_dbus_message *msg, void *user_data)
@@ -1373,6 +1588,8 @@ static const struct bt_shell_menu main_menu = {
 			"List remote mesh nodes"},
 	{ "keys", NULL, cmd_keys,
 			"List available keys"},
+	{ "export-db", NULL, cmd_export_db,
+			"Export mesh configuration database"},
 	{ } },
 };
 
@@ -1801,12 +2018,15 @@ static struct l_dbus_message *join_complete(struct l_dbus *dbus,
 		return l_dbus_message_new_error(message, dbus_err_fail, NULL);
 	}
 
-	mesh_db_set_addr_range(low_addr, high_addr);
 	keys_add_net_key(PRIMARY_NET_IDX);
-	mesh_db_net_key_add(PRIMARY_NET_IDX);
+	mesh_db_add_net_key(PRIMARY_NET_IDX);
 
 	remote_add_node(app.uuid, 0x0001, 1, PRIMARY_NET_IDX);
 	mesh_db_add_node(app.uuid, 0x0001, 1, PRIMARY_NET_IDX);
+
+	mesh_db_add_provisioner("BlueZ mesh-cfgclient", app.uuid,
+					low_addr, high_addr,
+					GROUP_ADDRESS_LOW, GROUP_ADDRESS_HIGH);
 
 	l_idle_oneshot(attach_node, NULL, NULL);
 
@@ -1836,7 +2056,7 @@ static void property_changed(struct l_dbus_proxy *proxy, const char *name,
 
 			iv_index = ivi;
 			mesh_db_set_iv_index(ivi);
-			remote_clear_blacklisted_addresses(ivi);
+			remote_clear_rejected_addresses(ivi);
 		}
 	}
 }

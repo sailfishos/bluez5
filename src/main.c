@@ -42,6 +42,7 @@
 #include "shared/att-types.h"
 #include "shared/mainloop.h"
 #include "shared/timeout.h"
+#include "shared/queue.h"
 #include "lib/uuid.h"
 #include "shared/util.h"
 #include "btd.h"
@@ -54,9 +55,10 @@
 
 #define BLUEZ_NAME "org.bluez"
 
-#define DEFAULT_PAIRABLE_TIMEOUT       0 /* disabled */
-#define DEFAULT_DISCOVERABLE_TIMEOUT 180 /* 3 minutes */
-#define DEFAULT_TEMPORARY_TIMEOUT     30 /* 30 seconds */
+#define DEFAULT_PAIRABLE_TIMEOUT           0 /* disabled */
+#define DEFAULT_DISCOVERABLE_TIMEOUT     180 /* 3 minutes */
+#define DEFAULT_TEMPORARY_TIMEOUT         30 /* 30 seconds */
+#define DEFAULT_NAME_REQUEST_RETRY_DELAY 300 /* 5 minutes */
 
 #define SHUTDOWN_GRACE_SECONDS 10
 
@@ -80,6 +82,8 @@ static const char *supported_options[] = {
 	"Privacy",
 	"JustWorksRepairing",
 	"TemporaryTimeout",
+	"Experimental",
+	"RemoteNameRequestRetryDelay",
 	NULL
 };
 
@@ -145,6 +149,11 @@ static const char *avdtp_options[] = {
 	NULL
 };
 
+static const char *advmon_options[] = {
+	"RSSISamplingPeriod",
+	NULL
+};
+
 static const struct group_table {
 	const char *name;
 	const char **options;
@@ -155,6 +164,7 @@ static const struct group_table {
 	{ "Policy",	policy_options },
 	{ "GATT",	gatt_options },
 	{ "AVDTP",	avdtp_options },
+	{ "AdvMon",	advmon_options },
 	{ }
 };
 
@@ -538,10 +548,78 @@ static void parse_le_config(GKeyFile *config)
 	parse_mode_config(config, "LE", params, ARRAY_SIZE(params));
 }
 
+static bool match_experimental(const void *data, const void *match_data)
+{
+	const char *value = data;
+	const char *uuid = match_data;
+
+	if (!strcmp(value, "*"))
+		return true;
+
+	return !strcasecmp(value, uuid);
+}
+
+bool btd_experimental_enabled(const char *uuid)
+{
+	if (!btd_opts.experimental)
+		false;
+
+	return queue_find(btd_opts.experimental, match_experimental, uuid);
+}
+
+static const char *valid_uuids[] = {
+	"d4992530-b9ec-469f-ab01-6c481c47da1c",
+	"671b10b5-42c0-4696-9227-eb28d1b049d6",
+	"15c0a148-c273-11ea-b3de-0242ac130004",
+	"330859bc-7506-492d-9370-9a6f0614037f",
+	"a6695ace-ee7f-4fb9-881a-5fac66c629af",
+	"*"
+};
+
+static void btd_parse_experimental(char **list)
+{
+	int i;
+
+	if (btd_opts.experimental) {
+		warn("Unable to parse Experimental: list already set");
+		return;
+	}
+
+	btd_opts.experimental = queue_new();
+
+	for (i = 0; list[i]; i++) {
+		size_t j;
+		const char *uuid = list[i];
+
+		if (!strcasecmp("false", uuid) || !strcasecmp("off", uuid)) {
+			queue_destroy(btd_opts.experimental, free);
+			btd_opts.experimental = NULL;
+		}
+
+		if (!strcasecmp("true", uuid) || !strcasecmp("on", uuid))
+			uuid = "*";
+
+		for (j = 0; j < ARRAY_SIZE(valid_uuids); j++) {
+			if (!strcasecmp(valid_uuids[j], uuid))
+				break;
+		}
+
+		/* Ignored if UUID is considered invalid */
+		if (j == ARRAY_SIZE(valid_uuids)) {
+			warn("Invalid Experimental UUID: %s", uuid);
+			continue;
+		}
+
+		DBG("%s", uuid);
+
+		queue_push_tail(btd_opts.experimental, strdup(uuid));
+	}
+}
+
 static void parse_config(GKeyFile *config)
 {
 	GError *err = NULL;
-	char *str;
+	char *str, **strlist;
 	int val;
 	gboolean boolean;
 
@@ -590,11 +668,27 @@ static void parse_config(GKeyFile *config)
 	} else {
 		DBG("privacy=%s", str);
 
-		if (!strcmp(str, "device"))
+		if (!strcmp(str, "network") || !strcmp(str, "on")) {
 			btd_opts.privacy = 0x01;
-		else if (!strcmp(str, "off"))
+		} else if (!strcmp(str, "device")) {
+			btd_opts.privacy = 0x01;
+			btd_opts.device_privacy = true;
+		} else if (!strcmp(str, "limited-network")) {
+			if (btd_opts.mode != BT_MODE_DUAL) {
+				DBG("Invalid privacy option: %s", str);
+				btd_opts.privacy = 0x00;
+			}
+			btd_opts.privacy = 0x01;
+		} else if (!strcmp(str, "limited-device")) {
+			if (btd_opts.mode != BT_MODE_DUAL) {
+				DBG("Invalid privacy option: %s", str);
+				btd_opts.privacy = 0x00;
+			}
+			btd_opts.privacy = 0x02;
+			btd_opts.device_privacy = true;
+		} else if (!strcmp(str, "off")) {
 			btd_opts.privacy = 0x00;
-		else {
+		} else {
 			DBG("Invalid privacy option: %s", str);
 			btd_opts.privacy = 0x00;
 		}
@@ -715,6 +809,25 @@ static void parse_config(GKeyFile *config)
 	else
 		btd_opts.refresh_discovery = boolean;
 
+	strlist = g_key_file_get_string_list(config, "General", "Experimental",
+						NULL, &err);
+	if (err)
+		g_clear_error(&err);
+	else {
+		btd_parse_experimental(strlist);
+		g_strfreev(strlist);
+	}
+
+	val = g_key_file_get_integer(config, "General",
+					"RemoteNameRequestRetryDelay", &err);
+	if (err) {
+		DBG("%s", err->message);
+		g_clear_error(&err);
+	} else {
+		DBG("RemoteNameRequestRetryDelay=%d", val);
+		btd_opts.name_request_retry_delay = val;
+	}
+
 	str = g_key_file_get_string(config, "GATT", "Cache", &err);
 	if (err) {
 		DBG("%s", err->message);
@@ -774,9 +887,10 @@ static void parse_config(GKeyFile *config)
 			DBG("Invalid mode option: %s", str);
 			btd_opts.avdtp.session_mode = BT_IO_MODE_BASIC;
 		}
+		g_free(str);
 	}
 
-	val = g_key_file_get_integer(config, "AVDTP", "StreamMode", &err);
+	str = g_key_file_get_string(config, "AVDTP", "StreamMode", &err);
 	if (err) {
 		DBG("%s", err->message);
 		g_clear_error(&err);
@@ -791,6 +905,19 @@ static void parse_config(GKeyFile *config)
 			DBG("Invalid mode option: %s", str);
 			btd_opts.avdtp.stream_mode = BT_IO_MODE_BASIC;
 		}
+		g_free(str);
+	}
+
+	val = g_key_file_get_integer(config, "AdvMon", "RSSISamplingPeriod",
+									&err);
+	if (err) {
+		DBG("%s", err->message);
+		g_clear_error(&err);
+	} else {
+		val = MIN(val, 0xFF);
+		val = MAX(val, 0);
+		DBG("RSSISamplingPeriod=%d", val);
+		btd_opts.advmon.rssi_sampling_period = val;
 	}
 
 	parse_br_config(config);
@@ -812,6 +939,7 @@ static void init_defaults(void)
 	btd_opts.name_resolv = TRUE;
 	btd_opts.debug_keys = FALSE;
 	btd_opts.refresh_discovery = TRUE;
+	btd_opts.name_request_retry_delay = DEFAULT_NAME_REQUEST_RETRY_DELAY;
 
 	btd_opts.defaults.num_entries = 0;
 	btd_opts.defaults.br.page_scan_type = 0xFFFF;
@@ -832,6 +960,8 @@ static void init_defaults(void)
 
 	btd_opts.avdtp.session_mode = BT_IO_MODE_BASIC;
 	btd_opts.avdtp.stream_mode = BT_IO_MODE_BASIC;
+
+	btd_opts.advmon.rssi_sampling_period = 0xFF;
 }
 
 static void log_handler(const gchar *log_domain, GLogLevelFlags log_level,
@@ -891,7 +1021,6 @@ static char *option_configfile = NULL;
 static gboolean option_compat = FALSE;
 static gboolean option_detach = TRUE;
 static gboolean option_version = FALSE;
-static gboolean option_experimental = FALSE;
 
 static void free_options(void)
 {
@@ -963,6 +1092,24 @@ static gboolean parse_debug(const char *key, const char *value,
 	return TRUE;
 }
 
+static gboolean parse_experimental(const char *key, const char *value,
+					gpointer user_data, GError **error)
+{
+	char **strlist;
+
+	if (value) {
+		strlist = g_strsplit(value, ",", -1);
+		btd_parse_experimental(strlist);
+		g_strfreev(strlist);
+	} else {
+		if (!btd_opts.experimental)
+			btd_opts.experimental = queue_new();
+		queue_push_head(btd_opts.experimental, strdup("*"));
+	}
+
+	return TRUE;
+}
+
 static GOptionEntry options[] = {
 	{ "debug", 'd', G_OPTION_FLAG_OPTIONAL_ARG,
 				G_OPTION_ARG_CALLBACK, parse_debug,
@@ -975,8 +1122,9 @@ static GOptionEntry options[] = {
 			"Specify an explicit path to the config file", "FILE"},
 	{ "compat", 'C', 0, G_OPTION_ARG_NONE, &option_compat,
 				"Provide deprecated command line interfaces" },
-	{ "experimental", 'E', 0, G_OPTION_ARG_NONE, &option_experimental,
-				"Enable experimental interfaces" },
+	{ "experimental", 'E', G_OPTION_FLAG_OPTIONAL_ARG,
+				G_OPTION_ARG_CALLBACK, parse_experimental,
+				"Enable experimental features/interfaces" },
 	{ "nodetach", 'n', G_OPTION_FLAG_REVERSE,
 				G_OPTION_ARG_NONE, &option_detach,
 				"Run with logging in foreground" },
@@ -1042,7 +1190,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	if (option_experimental)
+	if (btd_opts.experimental)
 		gdbus_flags = G_DBUS_FLAG_ENABLE_EXPERIMENTAL;
 
 	g_dbus_set_flags(gdbus_flags);
@@ -1104,6 +1252,9 @@ int main(int argc, char *argv[])
 
 	if (btd_opts.mode != BT_MODE_LE)
 		stop_sdp_server();
+
+	if (btd_opts.experimental)
+		queue_destroy(btd_opts.experimental, free);
 
 	if (main_conf)
 		g_key_file_free(main_conf);

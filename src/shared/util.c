@@ -124,30 +124,28 @@ unsigned char util_get_dt(const char *parent, const char *name)
 
 /* Helpers for bitfield operations */
 
-/* Find unique id in range from 1 to max but no bigger then
- * sizeof(int) * 8. ffs() is used since it is POSIX standard
- */
-uint8_t util_get_uid(unsigned int *bitmap, uint8_t max)
+/* Find unique id in range from 1 to max but no bigger than 64. */
+uint8_t util_get_uid(uint64_t *bitmap, uint8_t max)
 {
 	uint8_t id;
 
-	id = ffs(~*bitmap);
+	id = ffsll(~*bitmap);
 
 	if (!id || id > max)
 		return 0;
 
-	*bitmap |= 1u << (id - 1);
+	*bitmap |= ((uint64_t)1) << (id - 1);
 
 	return id;
 }
 
 /* Clear id bit in bitmap */
-void util_clear_uid(unsigned int *bitmap, uint8_t id)
+void util_clear_uid(uint64_t *bitmap, uint8_t id)
 {
-	if (!id)
+	if (!id || id > 64)
 		return;
 
-	*bitmap &= ~(1u << (id - 1));
+	*bitmap &= ~(((uint64_t)1) << (id - 1));
 }
 
 static const struct {
@@ -291,7 +289,21 @@ static const struct {
 	{ 0x1826, "Fitness Machine"				},
 	{ 0x1827, "Mesh Provisioning"				},
 	{ 0x1828, "Mesh Proxy"					},
-	/* 0x1829 to 0x27ff undefined */
+	{ 0x1843, "Audio Input Control"				},
+	{ 0x1844, "Volume Control"				},
+	{ 0x1845, "Volume Offset Control"			},
+	{ 0x1846, "Coordinated Set Identification"		},
+	{ 0x1848, "Media Control"				},
+	{ 0x1849, "Generic Media Control"			},
+	{ 0x184b, "Telephony Bearer"				},
+	{ 0x184c, "Generic Telephony Bearer"			},
+	{ 0x184c, "Microphone Control"				},
+	{ 0x184e, "Audio Stream Control"			},
+	{ 0x184f, "Broadcast Audio Scan"			},
+	{ 0x1850, "Published Audio Capabilities"		},
+	{ 0x1851, "Basic Audio Announcement"			},
+	{ 0x1852, "Broadcast Audio Announcement"		},
+	/* 0x1853 to 0x27ff undefined */
 	{ 0x2800, "Primary Service"				},
 	{ 0x2801, "Secondary Service"				},
 	{ 0x2802, "Include"					},
@@ -524,6 +536,74 @@ static const struct {
 	{ 0x2ade, "Mesh Proxy Data Out"				},
 	{ 0x2b29, "Client Supported Features"			},
 	{ 0x2b2A, "Database Hash"				},
+	{ 0x2b3a, "Server Supported Features"			},
+	{ 0x2b77, "Audio Input State"				},
+	{ 0x2b78, "Gain Settings Attribute"			},
+	{ 0x2b79, "Audio Input Type"				},
+	{ 0x2b7a, "Audio Input Status"				},
+	{ 0x2b7b, "Audio Input Control Point"			},
+	{ 0x2b7c, "Audio Input Description"			},
+	{ 0x2b7d, "Volume State"				},
+	{ 0x2b7e, "Volume Control Point"			},
+	{ 0x2b7f, "Volume Flags"				},
+	{ 0x2b80, "Offset State"				},
+	{ 0x2b81, "Audio Location"				},
+	{ 0x2b82, "Volume Offset Control Point"			},
+	{ 0x2b83, "Audio Output Description"			},
+	{ 0x2b84, "Set Identity Resolving Key"			},
+	{ 0x2b93, "Media Player Name"				},
+	{ 0x2b94, "Media Player Icon Object ID"			},
+	{ 0x2b95, "Media Player Icon URL"			},
+	{ 0x2b96, "Track Changed"				},
+	{ 0x2b97, "Track Title"					},
+	{ 0x2b98, "Track Duration"				},
+	{ 0x2b99, "Track Position"				},
+	{ 0x2b9a, "Playback Speed"				},
+	{ 0x2b9b, "Seeking Speed"				},
+	{ 0x2b9c, "Current Track Segments Object ID"		},
+	{ 0x2b9d, "Current Track Object ID"			},
+	{ 0x2b9e, "Next Track Object ID"			},
+	{ 0x2b9f, "Parent Group Object ID"			},
+	{ 0x2ba0, "Current Group Object ID"			},
+	{ 0x2ba1, "Playing Order"				},
+	{ 0x2ba2, "Playing Orders Supported"			},
+	{ 0x2ba3, "Media State"					},
+	{ 0x2ba4, "Media Control Point"				},
+	{ 0x2ba5, "Media Control Point Opcodes Supported"	},
+	{ 0x2ba6, "Search Results Object ID"			},
+	{ 0x2ba7, "Search Control Point"			},
+	{ 0x2ba9, "Media Player Icon Object Type"		},
+	{ 0x2baa, "Track Segments Object Type"			},
+	{ 0x2bab, "Track Object Type"				},
+	{ 0x2bac, "Group Object Type"				},
+	{ 0x2bb3, "Bearer Provider Name"			},
+	{ 0x2bb4, "Bearer UCI"					},
+	{ 0x2bb5, "Bearer Technology"				},
+	{ 0x2bb6, "Bearer URI Schemes Supported List"		},
+	{ 0x2bb7, "Bearer Signal Strength"			},
+	{ 0x2bb8, "Bearer Signal Strength Reporting Interval"	},
+	{ 0x2bb9, "Bearer List Current Calls"			},
+	{ 0x2bba, "Content Control ID"				},
+	{ 0x2bbb, "Status Flags"				},
+	{ 0x2bbc, "Incoming Call Target Bearer URI"		},
+	{ 0x2bbd, "Call State"					},
+	{ 0x2bbe, "Call Control Point"				},
+	{ 0x2bbf, "Call Control Point Optional Opcodes"		},
+	{ 0x2bc0, "Termination Reason"				},
+	{ 0x2bc1, "Incoming Call"				},
+	{ 0x2bc2, "Call Friendly Name"				},
+	{ 0x2bc3, "Mute"					},
+	{ 0x2bc4, "Sink ASE"					},
+	{ 0x2bc5, "Source ASE"					},
+	{ 0x2bc6, "ASE Control Point"				},
+	{ 0x2bc7, "Broadcast Audio Scan Control Point"		},
+	{ 0x2bc8, "Broadcast Receive State"			},
+	{ 0x2bc9, "Sink PAC"					},
+	{ 0x2bca, "Sink Audio Locations"			},
+	{ 0x2bcb, "Source PAC"					},
+	{ 0x2bcc, "Source Audio Locations"			},
+	{ 0x2bcd, "Available Audio Contexts"			},
+	{ 0x2bce, "Supported Audio Contexts"			},
 	/* vendor defined */
 	{ 0xfeff, "GN Netcom"					},
 	{ 0xfefe, "GN ReSound A/S"				},
@@ -1019,6 +1099,15 @@ static const struct {
 	{ "6e400001-b5a3-f393-e0a9-e50e24dcca9e", "Nordic UART Service" },
 	{ "6e400002-b5a3-f393-e0a9-e50e24dcca9e", "Nordic UART TX"	},
 	{ "6e400003-b5a3-f393-e0a9-e50e24dcca9e", "Nordic UART RX"	},
+	/* BlueZ Experimental Features */
+	{ "d4992530-b9ec-469f-ab01-6c481c47da1c", "BlueZ Experimental Debug" },
+	{ "671b10b5-42c0-4696-9227-eb28d1b049d6",
+		"BlueZ Experimental Simultaneous Central and Peripheral" },
+	{ "15c0a148-c273-11ea-b3de-0242ac130004",
+		"BlueZ Experimental LL privacy" },
+	{ "330859bc-7506-492d-9370-9a6f0614037f",
+		"BlueZ Experimental Bluetooth Quality Report" },
+	{ "a6695ace-ee7f-4fb9-881a-5fac66c629af", "BlueZ Offload Codecs"},
 	{ }
 };
 
@@ -1040,6 +1129,18 @@ const char *bt_uuid32_to_str(uint32_t uuid)
 		return bt_uuid16_to_str(uuid & 0x0000ffff);
 
 	return "Unknown";
+}
+
+const char *bt_uuid128_to_str(const uint8_t uuid[16])
+{
+	char uuidstr[37];
+
+	sprintf(uuidstr, "%8.8x-%4.4x-%4.4x-%4.4x-%8.8x%4.4x",
+				get_le32(&uuid[12]), get_le16(&uuid[10]),
+				get_le16(&uuid[8]), get_le16(&uuid[6]),
+				get_le32(&uuid[2]), get_le16(&uuid[0]));
+
+	return bt_uuidstr_to_str(uuidstr);
 }
 
 const char *bt_uuidstr_to_str(const char *uuid)

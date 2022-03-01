@@ -9,7 +9,9 @@ client_bluetoothctl_SOURCES = client/main.c \
 					client/advertising.c \
 					client/adv_monitor.h \
 					client/adv_monitor.c \
-					client/gatt.h client/gatt.c
+					client/gatt.h client/gatt.c \
+					client/admin.h \
+					client/admin.c
 client_bluetoothctl_LDADD = gdbus/libgdbus-internal.la src/libshared-glib.la \
 				$(GLIB_LIBS) $(DBUS_LIBS) -lreadline
 endif
@@ -49,7 +51,12 @@ monitor_btmon_SOURCES = monitor/main.c monitor/bt.h \
 				monitor/tty.h
 monitor_btmon_LDADD = lib/libbluetooth-internal.la \
 				src/libshared-mainloop.la $(UDEV_LIBS) -ldl
+
+if MANPAGES
+man_MANS += monitor/btmon.1
 endif
+endif
+manual_pages += monitor/btmon.1
 
 if LOGGER
 pkglibexec_PROGRAMS += tools/btmon-logger
@@ -108,6 +115,7 @@ tools_3dsp_LDADD = src/libshared-mainloop.la
 
 tools_mgmt_tester_SOURCES = tools/mgmt-tester.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
+				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
@@ -116,6 +124,7 @@ tools_mgmt_tester_LDADD = lib/libbluetooth-internal.la \
 
 tools_l2cap_tester_SOURCES = tools/l2cap-tester.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
+				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
@@ -124,6 +133,7 @@ tools_l2cap_tester_LDADD = lib/libbluetooth-internal.la \
 
 tools_rfcomm_tester_SOURCES = tools/rfcomm-tester.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
+				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
@@ -132,6 +142,7 @@ tools_rfcomm_tester_LDADD = lib/libbluetooth-internal.la \
 
 tools_bnep_tester_SOURCES = tools/bnep-tester.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
+				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
@@ -140,6 +151,7 @@ tools_bnep_tester_LDADD = lib/libbluetooth-internal.la \
 
 tools_smp_tester_SOURCES = tools/smp-tester.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
+				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
@@ -148,6 +160,7 @@ tools_smp_tester_LDADD = lib/libbluetooth-internal.la \
 
 tools_gap_tester_SOURCES = tools/gap-tester.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
+				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
@@ -158,6 +171,7 @@ tools_gap_tester_LDADD =  lib/libbluetooth-internal.la \
 
 tools_sco_tester_SOURCES = tools/sco-tester.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
+				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
@@ -169,6 +183,7 @@ tools_hci_tester_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 tools_userchan_tester_SOURCES = tools/userchan-tester.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
+				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
@@ -292,9 +307,9 @@ tools_gatt_service_LDADD = $(GLIB_LIBS) $(DBUS_LIBS) gdbus/libgdbus-internal.la
 profiles_iap_iapd_SOURCES = profiles/iap/main.c
 profiles_iap_iapd_LDADD = gdbus/libgdbus-internal.la $(GLIB_LIBS) $(DBUS_LIBS)
 
-dist_man_MANS += tools/rctest.1 tools/l2ping.1 tools/btattach.1
-
-EXTRA_DIST += tools/bdaddr.1
+if MANPAGES
+man_MANS += tools/rctest.1 tools/l2ping.1 tools/btattach.1
+endif
 
 if MESH
 bin_PROGRAMS += tools/meshctl
@@ -336,6 +351,12 @@ tools_mesh_cfgclient_SOURCES = tools/mesh-cfgclient.c \
 
 tools_mesh_cfgclient_LDADD = lib/libbluetooth-internal.la src/libshared-ell.la \
 						$(ell_ldadd) -ljson-c -lreadline
+
+bin_PROGRAMS +=  tools/mesh-cfgtest
+
+tools_mesh_cfgtest_SOURCES = tools/mesh-cfgtest.c
+tools_mesh_cfgtest_LDADD = lib/libbluetooth-internal.la src/libshared-ell.la \
+						$(ell_ldadd)
 endif
 
 EXTRA_DIST += tools/mesh-gatt/local_node.json tools/mesh-gatt/prov_db.json
@@ -394,17 +415,18 @@ tools_hcidump_LDADD = lib/libbluetooth-internal.la
 
 tools_rfcomm_LDADD = lib/libbluetooth-internal.la
 
-dist_man_MANS += tools/hciattach.1 tools/hciconfig.1 \
-			tools/hcitool.1 tools/hcidump.1 \
-			tools/rfcomm.1 tools/sdptool.1 tools/ciptool.1
-else
-EXTRA_DIST += tools/hciattach.1 tools/hciconfig.1 \
+if MANPAGES
+man_MANS += tools/hciattach.1 tools/hciconfig.1 \
 			tools/hcitool.1 tools/hcidump.1 \
 			tools/rfcomm.1 tools/sdptool.1 tools/ciptool.1
 endif
-else
-EXTRA_DIST += tools/rctest.1 tools/l2ping.1 tools/btattach.1
 endif
+endif
+manual_pages += tools/hciattach.1 tools/hciconfig.1 \
+			tools/hcitool.1 tools/hcidump.1 \
+			tools/rfcomm.1 tools/sdptool.1 tools/ciptool.1 \
+			tools/rctest.1 tools/l2ping.1 tools/btattach.1 \
+			tools/bdaddr.1
 
 if HID2HCI
 udevdir = $(UDEV_DIR)
@@ -413,10 +435,11 @@ udev_PROGRAMS = tools/hid2hci
 
 tools_hid2hci_LDADD = $(UDEV_LIBS)
 
-dist_man_MANS += tools/hid2hci.1
-else
-EXTRA_DIST += tools/hid2hci.1
+if MANPAGES
+man_MANS += tools/hid2hci.1
 endif
+endif
+manual_pages += tools/hid2hci.1
 
 if READLINE
 noinst_PROGRAMS += tools/btmgmt tools/obex-client-tool tools/obex-server-tool \
