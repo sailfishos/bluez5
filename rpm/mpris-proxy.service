@@ -6,6 +6,8 @@ After=lipstick.service
 [Service]
 Type=simple
 ExecStart=/usr/bin/mpris-proxy
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=post-user-session.target
