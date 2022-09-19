@@ -811,7 +811,7 @@ static uint8_t *str2bytearray(char *arg, size_t *val_len)
 
 	*val_len = i;
 
-	return g_memdup(value, i);
+	return util_memdup(value, i);
 }
 
 void gatt_write_attribute(GDBusProxy *proxy, int argc, char *argv[])
@@ -1527,8 +1527,10 @@ void gatt_register_service(DBusConnection *conn, GDBusProxy *proxy,
 
 	if (argc > 2) {
 		service->handle = parse_handle(argv[2]);
-		if (!service->handle)
+		if (!service->handle) {
+			service_free(service);
 			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
 	}
 
 	if (g_dbus_register_interface(conn, service->path,
@@ -2622,8 +2624,10 @@ void gatt_register_chrc(DBusConnection *conn, GDBusProxy *proxy,
 
 	if (argc > 3) {
 		chrc->handle = parse_handle(argv[3]);
-		if (!chrc->handle)
+		if (!chrc->handle) {
+			chrc_free(chrc);
 			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
 	}
 
 	if (g_dbus_register_interface(conn, chrc->path, CHRC_INTERFACE,
@@ -2902,8 +2906,10 @@ void gatt_register_desc(DBusConnection *conn, GDBusProxy *proxy,
 
 	if (argc > 3) {
 		desc->handle = parse_handle(argv[3]);
-		if (!desc->handle)
+		if (!desc->handle) {
+			desc_free(desc);
 			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
 	}
 
 	if (g_dbus_register_interface(conn, desc->path, DESC_INTERFACE,

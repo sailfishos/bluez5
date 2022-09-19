@@ -497,7 +497,9 @@ static gboolean avdtp_send(struct avdtp *session, uint8_t transaction,
 		single.signal_id = signal_id;
 
 		memcpy(session->buf, &single, sizeof(single));
-		memcpy(session->buf + sizeof(single), data, len);
+
+		if (data)
+			memcpy(session->buf + sizeof(single), data, len);
 
 		return try_send(sock, session->buf, sizeof(single) + len);
 	}
@@ -569,7 +571,7 @@ static void pending_req_free(void *data)
 
 	if (req->timeout)
 		timeout_remove(req->timeout);
-	g_free(req->data);
+	free(req->data);
 	g_free(req);
 }
 
@@ -1333,7 +1335,7 @@ static GSList *caps_to_list(uint8_t *data, size_t size,
 			break;
 		}
 
-		cpy = btd_malloc(sizeof(*cpy) + cap->length);
+		cpy = util_malloc(sizeof(*cpy) + cap->length);
 		memcpy(cpy, cap, sizeof(*cap) + cap->length);
 
 		size -= sizeof(*cap) + cap->length;
@@ -2697,7 +2699,7 @@ static int send_req(struct avdtp *session, gboolean priority,
 	return 0;
 
 failed:
-	g_free(req->data);
+	free(req->data);
 	g_free(req);
 	return err;
 }
@@ -2715,8 +2717,7 @@ static int send_request(struct avdtp *session, gboolean priority,
 
 	req = g_new0(struct pending_req, 1);
 	req->signal_id = signal_id;
-	req->data = g_malloc(size);
-	memcpy(req->data, buffer, size);
+	req->data = util_memdup(buffer, size);
 	req->data_size = size;
 	req->stream = stream;
 
@@ -2774,8 +2775,11 @@ static gboolean avdtp_discover_resp(struct avdtp *session,
 
 		ret = send_request(session, TRUE, NULL, getcap_cmd,
 							&req, sizeof(req));
-		if (ret < 0)
+		if (ret < 0) {
+			session->seps = g_slist_remove(session->seps, sep);
+			g_free(sep);
 			break;
+		}
 		getcap_pending = TRUE;
 	}
 
@@ -3333,7 +3337,9 @@ struct avdtp_service_capability *avdtp_service_cap_new(uint8_t category,
 	cap = g_malloc(sizeof(struct avdtp_service_capability) + length);
 	cap->category = category;
 	cap->length = length;
-	memcpy(cap->data, data, length);
+
+	if (data)
+		memcpy(cap->data, data, length);
 
 	return cap;
 }
@@ -3436,6 +3442,9 @@ int avdtp_discover(struct avdtp *session, avdtp_discover_cb_t cb,
 	if (err == 0) {
 		session->discover->cb = cb;
 		session->discover->user_data = user_data;
+	} else if (session->discover) {
+		g_free(session->discover);
+		session->discover = NULL;
 	}
 
 	return err;
@@ -3529,6 +3538,9 @@ int avdtp_set_configuration(struct avdtp *session,
 
 	if (!(lsep && rsep))
 		return -EINVAL;
+
+	if (lsep->stream)
+		return -EBUSY;
 
 	DBG("%p: int_seid=%u, acp_seid=%u", session,
 			lsep->info.seid, rsep->seid);

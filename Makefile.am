@@ -28,14 +28,14 @@ AM_CFLAGS = $(MISC_CFLAGS) $(WARNING_CFLAGS) $(UDEV_CFLAGS) $(LIBEBOOK_CFLAGS) \
 				$(LIBEDATASERVER_CFLAGS) $(ell_cflags)
 AM_LDFLAGS = $(MISC_LDFLAGS)
 
+confdir = $(sysconfdir)/bluetooth
+statedir = $(localstatedir)/lib/bluetooth
+
 if DATAFILES
 dbusdir = $(DBUS_CONFDIR)/dbus-1/system.d
 dbus_DATA = src/bluetooth.conf
 
-confdir = $(sysconfdir)/bluetooth
 conf_DATA =
-
-statedir = $(localstatedir)/lib/bluetooth
 state_DATA =
 endif
 
@@ -69,7 +69,7 @@ lib_headers = lib/bluetooth.h lib/hci.h lib/hci_lib.h \
 		lib/sco.h lib/l2cap.h lib/sdp.h lib/sdp_lib.h \
 		lib/rfcomm.h lib/bnep.h lib/cmtp.h lib/hidp.h
 
-extra_headers = lib/mgmt.h lib/uuid.h lib/a2mp.h lib/amp.h
+extra_headers = lib/mgmt.h lib/uuid.h lib/a2mp.h lib/amp.h lib/iso.h
 extra_sources = lib/uuid.c
 
 local_headers = $(foreach file,$(lib_headers), lib/bluetooth/$(notdir $(file)))
@@ -82,7 +82,7 @@ pkginclude_HEADERS += $(lib_headers)
 lib_LTLIBRARIES += lib/libbluetooth.la
 
 lib_libbluetooth_la_SOURCES = $(lib_headers) $(lib_sources)
-lib_libbluetooth_la_LDFLAGS = $(AM_LDFLAGS) -version-info 22:6:19
+lib_libbluetooth_la_LDFLAGS = $(AM_LDFLAGS) -version-info 22:7:19
 lib_libbluetooth_la_DEPENDENCIES = $(local_headers)
 endif
 
@@ -267,8 +267,7 @@ endif
 
 attrib_sources = attrib/att.h attrib/att-database.h attrib/att.c \
 		attrib/gatt.h attrib/gatt.c \
-		attrib/gattrib.h attrib/gattrib.c \
-		attrib/gatt-service.h attrib/gatt-service.c
+		attrib/gattrib.h attrib/gattrib.c
 
 btio_sources = btio/btio.h btio/btio.c
 
@@ -320,7 +319,6 @@ src_bluetoothd_SOURCES = $(builtin_sources) \
 			src/rfkill.c src/btd.h src/sdpd.h \
 			src/sdpd-server.c src/sdpd-request.c \
 			src/sdpd-service.c src/sdpd-database.c \
-			src/attrib-server.h src/attrib-server.c \
 			src/gatt-database.h src/gatt-database.c \
 			src/sdp-xml.h src/sdp-xml.c \
 			src/sdp-client.h src/sdp-client.c \
@@ -339,7 +337,8 @@ src_bluetoothd_SOURCES = $(builtin_sources) \
 			src/dbus-common.c src/dbus-common.h \
 			src/eir.h src/eir.c \
 			src/adv_monitor.h src/adv_monitor.c \
-			src/battery.h src/battery.c
+			src/battery.h src/battery.c \
+			src/settings.h src/settings.c
 src_bluetoothd_LDADD = lib/libbluetooth-internal.la \
 			gdbus/libgdbus-internal.la \
 			src/libshared-glib.la \
@@ -523,23 +522,23 @@ unit_tests += unit/test-gobex-header unit/test-gobex-packet unit/test-gobex \
 
 unit_test_gobex_SOURCES = $(gobex_sources) unit/util.c unit/util.h \
 						unit/test-gobex.c
-unit_test_gobex_LDADD = $(GLIB_LIBS)
+unit_test_gobex_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_test_gobex_packet_SOURCES = $(gobex_sources) unit/util.c unit/util.h \
 						unit/test-gobex-packet.c
-unit_test_gobex_packet_LDADD = $(GLIB_LIBS)
+unit_test_gobex_packet_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_test_gobex_header_SOURCES = $(gobex_sources) unit/util.c unit/util.h \
 						unit/test-gobex-header.c
-unit_test_gobex_header_LDADD = $(GLIB_LIBS)
+unit_test_gobex_header_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_test_gobex_transfer_SOURCES = $(gobex_sources) unit/util.c unit/util.h \
 						unit/test-gobex-transfer.c
-unit_test_gobex_transfer_LDADD = $(GLIB_LIBS)
+unit_test_gobex_transfer_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 
 unit_test_gobex_apparam_SOURCES = $(gobex_sources) unit/util.c unit/util.h \
 						unit/test-gobex-apparam.c
-unit_test_gobex_apparam_LDADD = $(GLIB_LIBS)
+unit_test_gobex_apparam_LDADD = src/libshared-glib.la $(GLIB_LIBS)
 endif
 
 unit_tests += unit/test-lib
@@ -645,6 +644,9 @@ MAINTAINERCLEANFILES = Makefile.in \
 
 SED_PROCESS = $(AM_V_GEN)$(MKDIR_P) $(dir $@) && \
 		$(SED) -e 's,@pkglibexecdir\@,$(pkglibexecdir),g' \
+		       -e 's,@libexecdir\@,$(libexecdir),g' \
+		       -e 's,@statedir\@,$(statedir),g' \
+		       -e 's,@confdir\@,$(confdir),g' \
 		< $< > $@
 
 if RUN_RST2MAN

@@ -37,7 +37,7 @@ struct mesh_node;
 #define SEGMENTED	0x80
 #define UNSEGMENTED	0x00
 #define SEG_HDR_SHIFT	31
-#define IS_SEGMENTED(hdr)	(!!((hdr) & (true << SEG_HDR_SHIFT)))
+#define IS_SEGMENTED(hdr)	(!!((hdr) & ((uint32_t) 0x1 << SEG_HDR_SHIFT)))
 
 #define KEY_ID_MASK	0x7f
 #define KEY_AID_MASK	0x3f
@@ -45,7 +45,7 @@ struct mesh_node;
 #define KEY_AID_SHIFT	0
 #define AKF_HDR_SHIFT	30
 #define KEY_HDR_SHIFT	24
-#define HAS_APP_KEY(hdr)	(!!((hdr) & (true << AKF_HDR_SHIFT)))
+#define HAS_APP_KEY(hdr)	(!!((hdr) & ((uint32_t) 0x1 << AKF_HDR_SHIFT)))
 
 #define OPCODE_MASK	0x7f
 #define OPCODE_HDR_SHIFT	24
@@ -55,8 +55,8 @@ struct mesh_node;
 #define SZMIC_HDR_SHIFT	23
 #define SEQ_ZERO_MASK	0x1fff
 #define SEQ_ZERO_HDR_SHIFT	10
-#define IS_RELAYED(hdr)	(!!((hdr) & (true << RELAY_HDR_SHIFT)))
-#define HAS_MIC64(hdr)	(!!((hdr) & (true << SZMIC_HDR_SHIFT)))
+#define IS_RELAYED(hdr)	(!!((hdr) & ((uint32_t) 0x1 << RELAY_HDR_SHIFT)))
+#define HAS_MIC64(hdr)	(!!((hdr) & ((uint32_t) 0x1 << SZMIC_HDR_SHIFT)))
 
 #define SEG_MASK	0x1f
 #define SEGO_HDR_SHIFT	5
@@ -186,31 +186,6 @@ struct mesh_friend {
 	} u;
 };
 
-struct mesh_frnd_pkt {
-	uint32_t iv_index;
-	uint32_t seq;
-	uint16_t src;
-	uint16_t dst;
-	uint16_t size;
-	uint8_t segN;
-	uint8_t segO;
-	uint8_t ttl;
-	uint8_t tc;
-	bool szmict;
-	union {
-		struct {
-			uint8_t key_id;
-		} m;
-		struct {
-			uint16_t seq0;
-		} a;
-		struct {
-			uint8_t opcode;
-		} c;
-	} u;
-	uint8_t data[];
-};
-
 struct mesh_friend_seg_one {
 	uint32_t hdr;
 	uint32_t seq;
@@ -261,7 +236,7 @@ void mesh_net_set_frnd_seq(struct mesh_net *net, bool seq);
 uint16_t mesh_net_get_address(struct mesh_net *net);
 bool mesh_net_register_unicast(struct mesh_net *net,
 					uint16_t unicast, uint8_t num_ele);
-void net_local_beacon(uint32_t key_id, uint8_t *beacon);
+void net_local_beacon(uint32_t net_key_id, uint8_t *beacon);
 bool mesh_net_set_beacon_mode(struct mesh_net *net, bool enable);
 bool mesh_net_set_proxy_mode(struct mesh_net *net, bool enable);
 bool mesh_net_set_relay_mode(struct mesh_net *net, bool enable, uint8_t cnt,
@@ -278,23 +253,23 @@ uint32_t mesh_net_get_iv_index(struct mesh_net *net);
 void mesh_net_get_snb_state(struct mesh_net *net,
 					uint8_t *flags, uint32_t *iv_index);
 bool mesh_net_get_key(struct mesh_net *net, bool new_key, uint16_t idx,
-							uint32_t *key_id);
+							uint32_t *net_key_id);
 bool mesh_net_attach(struct mesh_net *net, struct mesh_io *io);
 struct mesh_io *mesh_net_detach(struct mesh_net *net);
 struct l_queue *mesh_net_get_app_keys(struct mesh_net *net);
 
-void mesh_net_transport_send(struct mesh_net *net, uint32_t key_id,
+void mesh_net_transport_send(struct mesh_net *net, uint32_t net_key_id,
 				uint16_t net_idx, uint32_t iv_index,
 				uint8_t ttl, uint32_t seq, uint16_t src,
 				uint16_t dst, const uint8_t *msg,
 				uint16_t msg_len);
 
 bool mesh_net_app_send(struct mesh_net *net, bool frnd_cred, uint16_t src,
-				uint16_t dst, uint8_t key_id, uint16_t net_idx,
+				uint16_t dst, uint8_t key_aid, uint16_t net_idx,
 				uint8_t ttl, uint8_t cnt, uint16_t interval,
 				uint32_t seq, uint32_t iv_index, bool segmented,
 				bool szmic, const void *msg, uint16_t msg_len);
-void mesh_net_ack_send(struct mesh_net *net, uint32_t key_id,
+void mesh_net_ack_send(struct mesh_net *net, uint32_t net_key_id,
 				uint32_t iv_index, uint8_t ttl, uint32_t seq,
 				uint16_t src, uint16_t dst, bool rly,
 				uint16_t seqZero, uint32_t ack_flags);
@@ -317,7 +292,7 @@ int mesh_net_key_refresh_phase_set(struct mesh_net *net, uint16_t net_idx,
 							uint8_t transition);
 int mesh_net_key_refresh_phase_get(struct mesh_net *net, uint16_t net_idx,
 							uint8_t *phase);
-void mesh_net_send_seg(struct mesh_net *net, uint32_t key_id,
+void mesh_net_send_seg(struct mesh_net *net, uint32_t net_key_id,
 				uint32_t iv_index, uint8_t ttl, uint32_t seq,
 				uint16_t src, uint16_t dst, uint32_t hdr,
 				const void *seg, uint16_t seg_len);

@@ -20,7 +20,6 @@
 #include <getopt.h>
 #include <unistd.h>
 #include <errno.h>
-#include <sys/random.h>
 
 #include "lib/bluetooth.h"
 #include "lib/hci.h"
@@ -287,7 +286,7 @@ static bool hr_msrmt_cb(void *user_data)
 	uint32_t cur_ee;
 	uint32_t val;
 
-	if (getrandom(&val, sizeof(val), 0) < 0)
+	if (util_getrandom(&val, sizeof(val), 0) < 0)
 		return false;
 
 	pdu[0] = 0x06;
@@ -1081,12 +1080,15 @@ static void prompt_read_cb(int fd, uint32_t events, void *user_data)
 	}
 
 	read = getline(&line, &len, stdin);
-	if (read < 0)
+	if (read < 0) {
+		free(line);
 		return;
+	}
 
 	if (read <= 1) {
 		cmd_help(server, NULL);
 		print_prompt();
+		free(line);
 		return;
 	}
 

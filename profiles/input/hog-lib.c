@@ -23,6 +23,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <inttypes.h>
 
 #include <glib.h>
 
@@ -80,7 +81,8 @@ struct bt_hog {
 	struct bt_uhid		*uhid;
 	int			uhid_fd;
 	bool			uhid_created;
-	gboolean		has_report_id;
+	bool			uhid_start;
+	uint64_t		uhid_flags;
 	uint16_t		bcdhid;
 	uint8_t			bcountrycode;
 	uint16_t		proto_mode_handle;
@@ -90,6 +92,7 @@ struct bt_hog {
 	uint16_t		getrep_id;
 	unsigned int		setrep_att;
 	uint16_t		setrep_id;
+	unsigned int		report_map_id;
 	struct bt_scpp		*scpp;
 	struct bt_dis		*dis;
 	struct queue		*bas;
@@ -97,6 +100,7 @@ struct bt_hog {
 	struct queue		*gatt_op;
 	struct gatt_db		*gatt_db;
 	struct gatt_db_attribute	*report_map_attr;
+	struct queue		*input;
 };
 
 struct report_map {
@@ -106,6 +110,7 @@ struct report_map {
 
 struct report {
 	struct bt_hog		*hog;
+	bool			numbered;
 	uint8_t			id;
 	uint8_t			type;
 	uint16_t		handle;
@@ -146,11 +151,32 @@ static bool set_and_store_gatt_req(struct bt_hog *hog,
 	return queue_push_head(hog->gatt_op, req);
 }
 
-static void destroy_gatt_req(struct gatt_request *req)
+static void destroy_gatt_req(void *data)
 {
-	queue_remove(req->hog->gatt_op, req);
+	struct gatt_request *req = data;
+
 	bt_hog_unref(req->hog);
 	free(req);
+}
+
+static void read_report_map(struct bt_hog *hog);
+
+static void remove_gatt_req(struct gatt_request *req, uint8_t status)
+{
+	struct bt_hog *hog = req->hog;
+
+	queue_remove(hog->gatt_op, req);
+
+	if (!status && queue_isempty(hog->gatt_op)) {
+		/* Report Map must be read last since that can result
+		 * in uhid being created and the driver may start to
+		 * use UHID_SET_REPORT which requires the report->id to
+		 * be known what attribute to send to.
+		 */
+		read_report_map(hog);
+	}
+
+	destroy_gatt_req(req);
 }
 
 static void write_char(struct bt_hog *hog, GAttrib *attrib, uint16_t handle,
@@ -178,27 +204,31 @@ static void write_char(struct bt_hog *hog, GAttrib *attrib, uint16_t handle,
 	}
 }
 
-static void read_char(struct bt_hog *hog, GAttrib *attrib, uint16_t handle,
-				GAttribResultFunc func, gpointer user_data)
+static unsigned int read_char(struct bt_hog *hog, GAttrib *attrib,
+				uint16_t handle, GAttribResultFunc func,
+				gpointer user_data)
 {
 	struct gatt_request *req;
 	unsigned int id;
 
 	req = create_request(hog, user_data);
 	if (!req)
-		return;
+		return 0;
 
 	id = gatt_read_char(attrib, handle, func, req);
 	if (!id) {
 		error("hog: Could not read char");
-		return;
+		return 0;
 	}
 
 	if (!set_and_store_gatt_req(hog, req, id)) {
 		error("hog: Failed to queue read char req");
 		g_attrib_cancel(attrib, id);
 		free(req);
+		return 0;
 	}
+
+	return id;
 }
 
 static void discover_desc(struct bt_hog *hog, GAttrib *attrib,
@@ -318,7 +348,14 @@ static void report_value_cb(const guint8 *pdu, guint16 len, gpointer user_data)
 	ev.type = UHID_INPUT;
 	buf = ev.u.input.data;
 
-	if (hog->has_report_id) {
+	/* BLUETOOTH SPECIFICATION Page 16 of 26
+	 * HID Service Specification
+	 *
+	 * Report ID shall be nonzero in a Report Reference characteristic
+	 * descriptor where there is more than one instance of the Report
+	 * characteristic for any given Report Type.
+	 */
+	if (report->numbered && report->id) {
 		buf[0] = report->id;
 		len = MIN(len, sizeof(ev.u.input.data) - 1);
 		memcpy(buf + 1, pdu, len);
@@ -329,11 +366,18 @@ static void report_value_cb(const guint8 *pdu, guint16 len, gpointer user_data)
 		ev.u.input.size = len;
 	}
 
-	err = bt_uhid_send(hog->uhid, &ev);
-	if (err < 0) {
-		error("bt_uhid_send: %s (%d)", strerror(-err), -err);
+	/* If uhid had not sent UHID_START yet queue up the input */
+	if (!hog->uhid_created || !hog->uhid_start) {
+		if (!hog->input)
+			hog->input = queue_new();
+
+		queue_push_tail(hog->input, util_memdup(&ev, sizeof(ev)));
 		return;
 	}
+
+	err = bt_uhid_send(hog->uhid, &ev);
+	if (err < 0)
+		error("bt_uhid_send: %s (%d)", strerror(-err), -err);
 }
 
 static void report_ccc_written_cb(guint8 status, const guint8 *pdu,
@@ -343,16 +387,14 @@ static void report_ccc_written_cb(guint8 status, const guint8 *pdu,
 	struct report *report = req->user_data;
 	struct bt_hog *hog = report->hog;
 
-	destroy_gatt_req(req);
-
 	if (status != 0) {
 		error("Write report characteristic descriptor failed: %s",
 							att_ecode2str(status));
-		return;
+		goto remove;
 	}
 
 	if (report->notifyid)
-		return;
+		goto remove;
 
 	report->notifyid = g_attrib_register(hog->attrib,
 					ATT_OP_HANDLE_NOTIFY,
@@ -360,6 +402,9 @@ static void report_ccc_written_cb(guint8 status, const guint8 *pdu,
 					report_value_cb, report, NULL);
 
 	DBG("Report characteristic descriptor written: notifications enabled");
+
+remove:
+	remove_gatt_req(req, status);
 }
 
 static void write_ccc(struct bt_hog *hog, GAttrib *attrib, uint16_t handle,
@@ -379,14 +424,15 @@ static void ccc_read_cb(guint8 status, const guint8 *pdu, guint16 len,
 	struct gatt_request *req = user_data;
 	struct report *report = req->user_data;
 
-	destroy_gatt_req(req);
-
 	if (status != 0) {
 		error("Error reading CCC value: %s", att_ecode2str(status));
-		return;
+		goto remove;
 	}
 
 	write_ccc(report->hog, report->hog->attrib, report->ccc_handle, report);
+
+remove:
+	remove_gatt_req(req, status);
 }
 
 static const char *type_to_string(uint8_t type)
@@ -409,17 +455,15 @@ static void report_reference_cb(guint8 status, const guint8 *pdu,
 	struct gatt_request *req = user_data;
 	struct report *report = req->user_data;
 
-	destroy_gatt_req(req);
-
 	if (status != 0) {
 		error("Read Report Reference descriptor failed: %s",
 							att_ecode2str(status));
-		return;
+		goto remove;
 	}
 
 	if (plen != 3) {
 		error("Malformed ATT read response");
-		return;
+		goto remove;
 	}
 
 	report->id = pdu[1];
@@ -432,6 +476,9 @@ static void report_reference_cb(guint8 status, const guint8 *pdu,
 	if (report->type == HOG_REPORT_TYPE_INPUT)
 		read_char(report->hog, report->hog->attrib, report->ccc_handle,
 							ccc_read_cb, report);
+
+remove:
+	remove_gatt_req(req, status);
 }
 
 static void external_report_reference_cb(guint8 status, const guint8 *pdu,
@@ -442,12 +489,10 @@ static void discover_external_cb(uint8_t status, GSList *descs, void *user_data)
 	struct gatt_request *req = user_data;
 	struct bt_hog *hog = req->user_data;
 
-	destroy_gatt_req(req);
-
 	if (status != 0) {
 		error("Discover external descriptors failed: %s",
 							att_ecode2str(status));
-		return;
+		goto remove;
 	}
 
 	for ( ; descs; descs = descs->next) {
@@ -457,6 +502,9 @@ static void discover_external_cb(uint8_t status, GSList *descs, void *user_data)
 						external_report_reference_cb,
 						hog);
 	}
+
+remove:
+	remove_gatt_req(req, status);
 }
 
 static void discover_external(struct bt_hog *hog, GAttrib *attrib,
@@ -480,12 +528,10 @@ static void discover_report_cb(uint8_t status, GSList *descs, void *user_data)
 	struct report *report = req->user_data;
 	struct bt_hog *hog = report->hog;
 
-	destroy_gatt_req(req);
-
 	if (status != 0) {
 		error("Discover report descriptors failed: %s",
 							att_ecode2str(status));
-		return;
+		goto remove;
 	}
 
 	for ( ; descs; descs = descs->next) {
@@ -501,6 +547,9 @@ static void discover_report_cb(uint8_t status, GSList *descs, void *user_data)
 			break;
 		}
 	}
+
+remove:
+	remove_gatt_req(req, status);
 }
 
 static void discover_report(struct bt_hog *hog, GAttrib *attrib,
@@ -519,18 +568,19 @@ static void report_read_cb(guint8 status, const guint8 *pdu, guint16 len,
 	struct gatt_request *req = user_data;
 	struct report *report = req->user_data;
 
-	destroy_gatt_req(req);
-
 	if (status != 0) {
 		error("Error reading Report value: %s", att_ecode2str(status));
-		return;
+		goto remove;
 	}
 
 	if (report->value)
-		g_free(report->value);
+		free(report->value);
 
-	report->value = g_memdup(pdu, len);
+	report->value = util_memdup(pdu, len);
 	report->len = len;
+
+remove:
+	remove_gatt_req(req, status);
 }
 
 static int report_chrc_cmp(const void *data, const void *user_data)
@@ -572,12 +622,11 @@ static void external_service_char_cb(uint8_t status, GSList *chars,
 	struct report *report;
 	GSList *l;
 
-	destroy_gatt_req(req);
-
 	if (status != 0) {
 		const char *str = att_ecode2str(status);
+
 		DBG("Discover external service characteristic failed: %s", str);
-		return;
+		goto remove;
 	}
 
 	for (l = chars; l; l = g_slist_next(l)) {
@@ -595,6 +644,9 @@ static void external_service_char_cb(uint8_t status, GSList *chars,
 		end = (next ? next->handle - 1 : primary->range.end);
 		discover_report(hog, hog->attrib, start, end, report);
 	}
+
+remove:
+	remove_gatt_req(req, status);
 }
 
 static void external_report_reference_cb(guint8 status, const guint8 *pdu,
@@ -605,17 +657,15 @@ static void external_report_reference_cb(guint8 status, const guint8 *pdu,
 	uint16_t uuid16;
 	bt_uuid_t uuid;
 
-	destroy_gatt_req(req);
-
 	if (status != 0) {
 		error("Read External Report Reference descriptor failed: %s",
 							att_ecode2str(status));
-		return;
+		goto remove;
 	}
 
 	if (plen != 3) {
 		error("Malformed ATT read response");
-		return;
+		goto remove;
 	}
 
 	uuid16 = get_le16(&pdu[1]);
@@ -624,11 +674,14 @@ static void external_report_reference_cb(guint8 status, const guint8 *pdu,
 
 	/* Do not discover if is not a Report */
 	if (uuid16 != HOG_REPORT_UUID)
-		return;
+		goto remove;
 
 	bt_uuid16_create(&uuid, uuid16);
 	discover_char(hog, hog->attrib, 0x0001, 0xffff, &uuid,
 					external_service_char_cb, hog);
+
+remove:
+	remove_gatt_req(req, status);
 }
 
 static int report_cmp(gconstpointer a, gconstpointer b)
@@ -639,8 +692,8 @@ static int report_cmp(gconstpointer a, gconstpointer b)
 	if (ra->type != rb->type)
 		return ra->type - rb->type;
 
-	/* skip id check in case of report id 0 */
-	if (!rb->id)
+	/* skip id check in case of reports not being numbered  */
+	if (!ra->numbered && !rb->numbered)
 		return 0;
 
 	/* ..then by id */
@@ -652,8 +705,24 @@ static struct report *find_report(struct bt_hog *hog, uint8_t type, uint8_t id)
 	struct report cmp;
 	GSList *l;
 
+	memset(&cmp, 0, sizeof(cmp));
 	cmp.type = type;
-	cmp.id = hog->has_report_id ? id : 0;
+	cmp.id = id;
+
+	switch (type) {
+	case HOG_REPORT_TYPE_FEATURE:
+		if (hog->flags & UHID_DEV_NUMBERED_FEATURE_REPORTS)
+			cmp.numbered = true;
+		break;
+	case HOG_REPORT_TYPE_OUTPUT:
+		if (hog->flags & UHID_DEV_NUMBERED_OUTPUT_REPORTS)
+			cmp.numbered = true;
+		break;
+	case HOG_REPORT_TYPE_INPUT:
+		if (hog->flags & UHID_DEV_NUMBERED_INPUT_REPORTS)
+			cmp.numbered = true;
+		break;
+	}
 
 	l = g_slist_find_custom(hog->reports, &cmp, report_cmp);
 
@@ -687,12 +756,10 @@ static void output_written_cb(guint8 status, const guint8 *pdu,
 {
 	struct gatt_request *req = user_data;
 
-	destroy_gatt_req(req);
-
-	if (status != 0) {
+	if (status != 0)
 		error("Write output report failed: %s", att_ecode2str(status));
-		return;
-	}
+
+	remove_gatt_req(req, status);
 }
 
 static void forward_report(struct uhid_event *ev, void *user_data)
@@ -709,7 +776,8 @@ static void forward_report(struct uhid_event *ev, void *user_data)
 
 	data = ev->u.output.data;
 	size = ev->u.output.size;
-	if (hog->has_report_id && size > 0) {
+
+	if (report->numbered && size > 0) {
 		data++;
 		--size;
 	}
@@ -726,6 +794,57 @@ static void forward_report(struct uhid_event *ev, void *user_data)
 	else if (report->properties & GATT_CHR_PROP_WRITE_WITHOUT_RESP)
 		gatt_write_cmd(hog->attrib, report->value_handle,
 						data, size, NULL, NULL);
+}
+
+static void set_numbered(void *data, void *user_data)
+{
+	struct report *report = data;
+	struct bt_hog *hog = user_data;
+
+	switch (report->type) {
+	case HOG_REPORT_TYPE_INPUT:
+		if (hog->uhid_flags & UHID_DEV_NUMBERED_INPUT_REPORTS)
+			report->numbered = true;
+		break;
+	case HOG_REPORT_TYPE_OUTPUT:
+		if (hog->uhid_flags & UHID_DEV_NUMBERED_OUTPUT_REPORTS)
+			report->numbered = true;
+		break;
+	case HOG_REPORT_TYPE_FEATURE:
+		if (hog->uhid_flags & UHID_DEV_NUMBERED_FEATURE_REPORTS)
+			report->numbered = true;
+		break;
+	}
+}
+
+static bool input_dequeue(const void *data, const void *match_data)
+{
+	const struct uhid_event *ev = data;
+	const struct bt_hog *hog = match_data;
+	int err;
+
+	err = bt_uhid_send(hog->uhid, ev);
+	if (err < 0) {
+		error("bt_uhid_send: %s (%d)", strerror(-err), -err);
+		return false;
+	}
+
+	return true;
+}
+
+static void start_flags(struct uhid_event *ev, void *user_data)
+{
+	struct bt_hog *hog = user_data;
+
+	hog->uhid_start = true;
+	hog->uhid_flags = ev->u.start.dev_flags;
+
+	DBG("uHID device flags: 0x%16" PRIx64, hog->uhid_flags);
+
+	if (hog->uhid_flags)
+		g_slist_foreach(hog->reports, set_numbered, hog);
+
+	queue_remove_all(hog->input, input_dequeue, hog, free);
 }
 
 static void set_report_cb(guint8 status, const guint8 *pdu,
@@ -775,7 +894,8 @@ static void set_report(struct uhid_event *ev, void *user_data)
 
 	data = ev->u.set_report.data;
 	size = ev->u.set_report.size;
-	if (hog->has_report_id && size > 0) {
+
+	if (report->numbered && size > 0) {
 		data++;
 		--size;
 	}
@@ -802,7 +922,7 @@ fail:
 }
 
 static void report_reply(struct bt_hog *hog, uint8_t status, uint8_t id,
-				 uint16_t len, const uint8_t *data)
+			bool numbered, uint16_t len, const uint8_t *data)
 {
 	struct uhid_event rsp;
 	int err;
@@ -816,7 +936,7 @@ static void report_reply(struct bt_hog *hog, uint8_t status, uint8_t id,
 	if (status)
 		goto done;
 
-	if (hog->has_report_id && len > 0) {
+	if (numbered && len > 0) {
 		rsp.u.get_report_reply.size = len + 1;
 		rsp.u.get_report_reply.data[0] = id;
 		memcpy(&rsp.u.get_report_reply.data[1], data, len);
@@ -859,7 +979,7 @@ static void get_report_cb(guint8 status, const guint8 *pdu, guint16 len,
 	++pdu;
 
 exit:
-	report_reply(hog, status, report->id, len, pdu);
+	report_reply(hog, status, report->id, report->numbered, len, pdu);
 }
 
 static void get_report(struct uhid_event *ev, void *user_data)
@@ -895,120 +1015,32 @@ static void get_report(struct uhid_event *ev, void *user_data)
 
 fail:
 	/* reply with an error on failure */
-	report_reply(hog, err, 0, 0, NULL);
-}
-
-static bool get_descriptor_item_info(uint8_t *buf, ssize_t blen, ssize_t *len,
-								bool *is_long)
-{
-	if (!blen)
-		return false;
-
-	*is_long = (buf[0] == 0xfe);
-
-	if (*is_long) {
-		if (blen < 3)
-			return false;
-
-		/*
-		 * long item:
-		 * byte 0 -> 0xFE
-		 * byte 1 -> data size
-		 * byte 2 -> tag
-		 * + data
-		 */
-
-		*len = buf[1] + 3;
-	} else {
-		uint8_t b_size;
-
-		/*
-		 * short item:
-		 * byte 0[1..0] -> data size (=0, 1, 2, 4)
-		 * byte 0[3..2] -> type
-		 * byte 0[7..4] -> tag
-		 * + data
-		 */
-
-		b_size = buf[0] & 0x03;
-		*len = (b_size ? 1 << (b_size - 1) : 0) + 1;
-	}
-
-	/* item length should be no more than input buffer length */
-	return *len <= blen;
-}
-
-static char *item2string(char *str, uint8_t *buf, uint8_t len)
-{
-	char *p = str;
-	int i;
-
-	/*
-	 * Since long item tags are not defined except for vendor ones, we
-	 * just ensure that short items are printed properly (up to 5 bytes).
-	 */
-	for (i = 0; i < 6 && i < len; i++)
-		p += sprintf(p, " %02x", buf[i]);
-
-	/*
-	 * If there are some data left, just add continuation mark to indicate
-	 * this.
-	 */
-	if (i < len)
-		sprintf(p, " ...");
-
-	return str;
+	report_reply(hog, err, 0, false, 0, NULL);
 }
 
 static void uhid_create(struct bt_hog *hog, uint8_t *report_map,
-							ssize_t report_map_len)
+							size_t report_map_len)
 {
 	uint8_t *value = report_map;
 	struct uhid_event ev;
-	ssize_t vlen = report_map_len;
-	char itemstr[20]; /* 5x3 (data) + 4 (continuation) + 1 (null) */
+	size_t vlen = report_map_len;
 	int i, err;
 	GError *gerr = NULL;
 
-	DBG("Report MAP:");
-	for (i = 0; i < vlen;) {
-		ssize_t ilen = 0;
-		bool long_item = false;
-
-		if (get_descriptor_item_info(&value[i], vlen - i, &ilen,
-								&long_item)) {
-			/* Report ID is short item with prefix 100001xx */
-			if (!long_item && (value[i] & 0xfc) == 0x84)
-				hog->has_report_id = TRUE;
-
-			DBG("\t%s", item2string(itemstr, &value[i], ilen));
-
-			i += ilen;
-		} else {
-			error("Report Map parsing failed at %d", i);
-
-			/* Just print remaining items at once and break */
-			DBG("\t%s", item2string(itemstr, &value[i], vlen - i));
-			break;
-		}
+	if (vlen > sizeof(ev.u.create2.rd_data)) {
+		error("Report MAP too big: %zu > %zu", vlen,
+					sizeof(ev.u.create2.rd_data));
+		return;
 	}
 
 	/* create uHID device */
 	memset(&ev, 0, sizeof(ev));
-	ev.type = UHID_CREATE;
+	ev.type = UHID_CREATE2;
 
 	bt_io_get(g_attrib_get_channel(hog->attrib), &gerr,
-			BT_IO_OPT_SOURCE, ev.u.create.phys,
-			BT_IO_OPT_DEST, ev.u.create.uniq,
+			BT_IO_OPT_SOURCE, ev.u.create2.phys,
+			BT_IO_OPT_DEST, ev.u.create2.uniq,
 			BT_IO_OPT_INVALID);
-
-	/* Phys + uniq are the same size (hw address type) */
-	for (i = 0;
-	    i < (int)sizeof(ev.u.create.phys) && ev.u.create.phys[i] != 0;
-	    ++i) {
-		ev.u.create.phys[i] = tolower(ev.u.create.phys[i]);
-		ev.u.create.uniq[i] = tolower(ev.u.create.uniq[i]);
-	}
 
 	if (gerr) {
 		error("Failed to connection details: %s", gerr->message);
@@ -1016,15 +1048,24 @@ static void uhid_create(struct bt_hog *hog, uint8_t *report_map,
 		return;
 	}
 
-	strncpy((char *) ev.u.create.name, hog->name,
-						sizeof(ev.u.create.name) - 1);
-	ev.u.create.vendor = hog->vendor;
-	ev.u.create.product = hog->product;
-	ev.u.create.version = hog->version;
-	ev.u.create.country = hog->bcountrycode;
-	ev.u.create.bus = BUS_BLUETOOTH;
-	ev.u.create.rd_data = value;
-	ev.u.create.rd_size = vlen;
+	/* Phys + uniq are the same size (hw address type) */
+	for (i = 0;
+	    i < (int)sizeof(ev.u.create2.phys) && ev.u.create2.phys[i] != 0;
+	    ++i) {
+		ev.u.create2.phys[i] = tolower(ev.u.create2.phys[i]);
+		ev.u.create2.uniq[i] = tolower(ev.u.create2.uniq[i]);
+	}
+
+	strncpy((char *) ev.u.create2.name, hog->name,
+						sizeof(ev.u.create2.name) - 1);
+	ev.u.create2.vendor = hog->vendor;
+	ev.u.create2.product = hog->product;
+	ev.u.create2.version = hog->version;
+	ev.u.create2.country = hog->bcountrycode;
+	ev.u.create2.bus = BUS_BLUETOOTH;
+	ev.u.create2.rd_size = vlen;
+
+	memcpy(ev.u.create2.rd_data, value, vlen);
 
 	err = bt_uhid_send(hog->uhid, &ev);
 	if (err < 0) {
@@ -1032,11 +1073,13 @@ static void uhid_create(struct bt_hog *hog, uint8_t *report_map,
 		return;
 	}
 
+	bt_uhid_register(hog->uhid, UHID_START, start_flags, hog);
 	bt_uhid_register(hog->uhid, UHID_OUTPUT, forward_report, hog);
 	bt_uhid_register(hog->uhid, UHID_GET_REPORT, get_report, hog);
 	bt_uhid_register(hog->uhid, UHID_SET_REPORT, set_report, hog);
 
 	hog->uhid_created = true;
+	hog->uhid_start = false;
 
 	DBG("HoG created uHID device");
 }
@@ -1056,9 +1099,7 @@ static void report_map_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
 	uint8_t value[HOG_REPORT_MAP_MAX_SIZE];
 	ssize_t vlen;
 
-	destroy_gatt_req(req);
-
-	DBG("HoG inspecting report map");
+	remove_gatt_req(req, status);
 
 	if (status != 0) {
 		error("Report Map read failed: %s", att_ecode2str(status));
@@ -1081,6 +1122,19 @@ static void report_map_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
 	}
 }
 
+static void read_report_map(struct bt_hog *hog)
+{
+	uint16_t handle;
+
+	if (!hog->report_map_attr || hog->uhid_created || hog->report_map_id)
+		return;
+
+	handle = gatt_db_attribute_get_handle(hog->report_map_attr);
+
+	hog->report_map_id = read_char(hog, hog->attrib, handle,
+						report_map_read_cb, hog);
+}
+
 static void info_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
 							gpointer user_data)
 {
@@ -1089,18 +1143,16 @@ static void info_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
 	uint8_t value[HID_INFO_SIZE];
 	ssize_t vlen;
 
-	destroy_gatt_req(req);
-
 	if (status != 0) {
 		error("HID Information read failed: %s",
 						att_ecode2str(status));
-		return;
+		goto remove;
 	}
 
 	vlen = dec_read_resp(pdu, plen, value, sizeof(value));
 	if (vlen != 4) {
 		error("ATT protocol error");
-		return;
+		goto remove;
 	}
 
 	hog->bcdhid = get_le16(&value[0]);
@@ -1109,6 +1161,9 @@ static void info_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
 
 	DBG("bcdHID: 0x%04X bCountryCode: 0x%02X Flags: 0x%02X",
 			hog->bcdhid, hog->bcountrycode, hog->flags);
+
+remove:
+	remove_gatt_req(req, status);
 }
 
 static void proto_mode_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
@@ -1119,18 +1174,16 @@ static void proto_mode_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
 	uint8_t value;
 	ssize_t vlen;
 
-	destroy_gatt_req(req);
-
 	if (status != 0) {
 		error("Protocol Mode characteristic read failed: %s",
 							att_ecode2str(status));
-		return;
+		goto remove;
 	}
 
 	vlen = dec_read_resp(pdu, plen, &value, sizeof(value));
 	if (vlen < 0) {
 		error("ATT protocol error");
-		return;
+		goto remove;
 	}
 
 	if (value == HOG_PROTO_MODE_BOOT) {
@@ -1142,6 +1195,9 @@ static void proto_mode_read_cb(guint8 status, const guint8 *pdu, guint16 plen,
 						sizeof(nval), NULL, NULL);
 	} else if (value == HOG_PROTO_MODE_REPORT)
 		DBG("HoG is operating in Report Protocol Mode");
+
+remove:
+	remove_gatt_req(req, status);
 }
 
 static void char_discovered_cb(uint8_t status, GSList *chars, void *user_data)
@@ -1155,14 +1211,12 @@ static void char_discovered_cb(uint8_t status, GSList *chars, void *user_data)
 	GSList *l;
 	uint16_t info_handle = 0, proto_mode_handle = 0;
 
-	destroy_gatt_req(req);
-
 	DBG("HoG inspecting characteristics");
 
 	if (status != 0) {
-		const char *str = att_ecode2str(status);
-		DBG("Discover all characteristics failed: %s", str);
-		return;
+		DBG("Discover all characteristics failed: %s",
+					att_ecode2str(status));
+		goto remove;
 	}
 
 	bt_uuid16_create(&report_uuid, HOG_REPORT_UUID);
@@ -1211,20 +1265,25 @@ static void char_discovered_cb(uint8_t status, GSList *chars, void *user_data)
 
 	if (info_handle)
 		read_char(hog, hog->attrib, info_handle, info_read_cb, hog);
+
+remove:
+	remove_gatt_req(req, status);
 }
 
 static void report_free(void *data)
 {
 	struct report *report = data;
 
-	g_free(report->value);
+	free(report->value);
 	g_free(report);
 }
 
-static void cancel_gatt_req(struct gatt_request *req)
+static bool cancel_gatt_req(const void *data, const void *user_data)
 {
-	if (g_attrib_cancel(req->hog->attrib, req->id))
-		destroy_gatt_req(req);
+	struct gatt_request *req = (void *) data;
+	const struct bt_hog *hog = user_data;
+
+	return g_attrib_cancel(hog->attrib, req->id);
 }
 
 static void hog_free(void *data)
@@ -1233,6 +1292,7 @@ static void hog_free(void *data)
 
 	bt_hog_detach(hog);
 
+	queue_destroy(hog->input, free);
 	queue_destroy(hog->bas, (void *) bt_bas_unref);
 	g_slist_free_full(hog->instances, hog_free);
 
@@ -1241,7 +1301,7 @@ static void hog_free(void *data)
 	bt_uhid_unref(hog->uhid);
 	g_slist_free_full(hog->reports, report_free);
 	g_free(hog->name);
-	g_free(hog->primary);
+	free(hog->primary);
 	queue_destroy(hog->gatt_op, (void *) destroy_gatt_req);
 	if (hog->gatt_db)
 		gatt_db_unref(hog->gatt_db);
@@ -1386,13 +1446,9 @@ static void foreach_hog_chrc(struct gatt_db_attribute *attr, void *user_data)
 			 * UHID to optimize reconnection.
 			 */
 			uhid_create(hog, report_map.value, report_map.length);
-		} else {
-			read_char(hog, hog->attrib, value_handle,
-						report_map_read_cb, hog);
 		}
 
 		gatt_db_service_foreach_desc(attr, foreach_hog_external, hog);
-		return;
 	}
 
 	bt_uuid16_create(&info_uuid, HOG_INFO_UUID);
@@ -1462,6 +1518,7 @@ static void hog_attach_instance(struct bt_hog *hog,
 	if (!instance)
 		return;
 
+	instance->gatt_db = gatt_db_ref(hog->gatt_db);
 	hog->instances = g_slist_append(hog->instances, bt_hog_ref(instance));
 }
 
@@ -1501,6 +1558,8 @@ struct bt_hog *bt_hog_new(int fd, const char *name, uint16_t vendor,
 	if (!hog)
 		return NULL;
 
+	hog->gatt_db = gatt_db_ref(db);
+
 	if (db) {
 		bt_uuid_t uuid;
 
@@ -1517,8 +1576,6 @@ struct bt_hog *bt_hog_new(int fd, const char *name, uint16_t vendor,
 			hog->dis = bt_dis_new(db);
 			bt_dis_set_notification(hog->dis, dis_notify, hog);
 		}
-
-		hog->gatt_db = gatt_db_ref(db);
 	}
 
 	return bt_hog_ref(hog);
@@ -1552,12 +1609,9 @@ static void find_included_cb(uint8_t status, GSList *services, void *user_data)
 
 	DBG("");
 
-	destroy_gatt_req(req);
-
 	if (status) {
-		const char *str = att_ecode2str(status);
-		DBG("Find included failed: %s", str);
-		return;
+		DBG("Find included failed: %s", att_ecode2str(status));
+		goto remove;
 	}
 
 	for (l = services; l; l = l->next) {
@@ -1566,6 +1620,9 @@ static void find_included_cb(uint8_t status, GSList *services, void *user_data)
 		DBG("included: handle %x, uuid %s",
 			include->handle, include->uuid);
 	}
+
+remove:
+	remove_gatt_req(req, status);
 }
 
 static void hog_attach_scpp(struct bt_hog *hog, struct gatt_primary *primary)
@@ -1609,7 +1666,7 @@ static void hog_attach_hog(struct bt_hog *hog, struct gatt_primary *primary)
 	struct bt_hog *instance;
 
 	if (!hog->primary) {
-		hog->primary = g_memdup(primary, sizeof(*primary));
+		hog->primary = util_memdup(primary, sizeof(*primary));
 		discover_char(hog, hog->attrib, primary->range.start,
 						primary->range.end, NULL,
 						char_discovered_cb, hog);
@@ -1619,11 +1676,12 @@ static void hog_attach_hog(struct bt_hog *hog, struct gatt_primary *primary)
 	}
 
 	instance = bt_hog_new(hog->uhid_fd, hog->name, hog->vendor,
-					hog->product, hog->version, NULL);
+					hog->product, hog->version,
+					hog->gatt_db);
 	if (!instance)
 		return;
 
-	instance->primary = g_memdup(primary, sizeof(*primary));
+	instance->primary = util_memdup(primary, sizeof(*primary));
 	find_included(instance, hog->attrib, primary->range.start,
 			primary->range.end, find_included_cb, instance);
 
@@ -1640,17 +1698,14 @@ static void primary_cb(uint8_t status, GSList *services, void *user_data)
 
 	DBG("");
 
-	destroy_gatt_req(req);
-
 	if (status) {
-		const char *str = att_ecode2str(status);
-		DBG("Discover primary failed: %s", str);
-		return;
+		DBG("Discover primary failed: %s", att_ecode2str(status));
+		goto remove;
 	}
 
 	if (!services) {
 		DBG("No primary service found");
-		return;
+		goto remove;
 	}
 
 	for (l = services; l; l = l->next) {
@@ -1674,6 +1729,9 @@ static void primary_cb(uint8_t status, GSList *services, void *user_data)
 		if (strcmp(primary->uuid, HOG_UUID) == 0)
 			hog_attach_hog(hog, primary);
 	}
+
+remove:
+	remove_gatt_req(req, status);
 }
 
 bool bt_hog_attach(struct bt_hog *hog, void *gatt)
@@ -1790,7 +1848,7 @@ void bt_hog_detach(struct bt_hog *hog)
 	if (hog->dis)
 		bt_dis_detach(hog->dis);
 
-	queue_foreach(hog->gatt_op, (void *) cancel_gatt_req, NULL);
+	queue_remove_all(hog->gatt_op, cancel_gatt_req, hog, destroy_gatt_req);
 	g_attrib_unref(hog->attrib);
 	hog->attrib = NULL;
 	uhid_destroy(hog);

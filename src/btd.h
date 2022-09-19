@@ -113,7 +113,8 @@ struct btd_opts {
 	gboolean	debug_keys;
 	gboolean	fast_conn;
 	gboolean	refresh_discovery;
-	struct queue	*experimental;
+	gboolean	experimental;
+	struct queue	*kernel;
 
 	uint16_t	did_source;
 	uint16_t	did_vendor;
@@ -121,6 +122,7 @@ struct btd_opts {
 	uint16_t	did_version;
 
 	bt_mode_t	mode;
+	uint16_t	max_adapters;
 	bt_gatt_cache_t gatt_cache;
 	uint16_t	gatt_mtu;
 	uint8_t		gatt_channels;
@@ -144,6 +146,6 @@ void rfkill_init(void);
 void rfkill_exit(void);
 
 GKeyFile *btd_get_main_conf(void);
-bool btd_experimental_enabled(const char *uuid);
+bool btd_kernel_experimental_enabled(const char *uuid);
 
 void btd_exit(void);

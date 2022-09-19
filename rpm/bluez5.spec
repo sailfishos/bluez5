@@ -1,7 +1,7 @@
 Name:       bluez5
 
 Summary:    Bluetooth daemon
-Version:    5.63
+Version:    5.65
 Release:    1
 License:    GPLv2+
 URL:        http://www.bluez.org/
@@ -293,6 +293,7 @@ systemctl-user daemon-reload ||:
 %{_bindir}/hciconfig
 %{_bindir}/hcitool
 %{_bindir}/hex2hcd
+%{_bindir}/isotest
 %{_bindir}/l2ping
 %{_bindir}/l2test
 %{_bindir}/rctest

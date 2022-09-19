@@ -14,6 +14,7 @@
 #include <alloca.h>
 #include <byteswap.h>
 #include <string.h>
+#include <sys/types.h>
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 #define BIT(n)  (1 << (n))
@@ -75,7 +76,7 @@ do {						\
 		size_t __n = (size_t) (count);	\
 		size_t __s = sizeof(type);	\
 		void *__p;			\
-		__p = btd_malloc(__n * __s);	\
+		__p = util_malloc(__n * __s);	\
 		memset(__p, 0, __n * __s);	\
 		__p;				\
 	}))
@@ -86,7 +87,8 @@ do {						\
 char *strdelimit(char *str, char *del, char c);
 int strsuffix(const char *str, const char *suffix);
 
-void *btd_malloc(size_t size);
+void *util_malloc(size_t size);
+void *util_memdup(const void *src, size_t size);
 
 typedef void (*util_debug_func_t)(const char *str, void *user_data);
 
@@ -101,6 +103,8 @@ void util_hexdump(const char dir, const unsigned char *buf, size_t len,
 				util_debug_func_t function, void *user_data);
 
 unsigned char util_get_dt(const char *parent, const char *name);
+
+ssize_t util_getrandom(void *buf, size_t buflen, unsigned int flags);
 
 uint8_t util_get_uid(uint64_t *bitmap, uint8_t max);
 void util_clear_uid(uint64_t *bitmap, uint8_t id);

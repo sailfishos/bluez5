@@ -47,6 +47,9 @@ typedef void (*bthost_new_conn_cb) (uint16_t handle, void *user_data);
 void bthost_set_connect_cb(struct bthost *bthost, bthost_new_conn_cb cb,
 							void *user_data);
 
+void bthost_set_iso_cb(struct bthost *bthost, bthost_new_conn_cb cb,
+							void *user_data);
+
 void bthost_hci_connect(struct bthost *bthost, const uint8_t *bdaddr,
 							uint8_t addr_type);
 
@@ -62,9 +65,17 @@ typedef void (*bthost_cid_hook_func_t)(const void *data, uint16_t len,
 void bthost_add_cid_hook(struct bthost *bthost, uint16_t handle, uint16_t cid,
 				bthost_cid_hook_func_t func, void *user_data);
 
+typedef void (*bthost_iso_hook_func_t)(const void *data, uint16_t len,
+							void *user_data);
+
+void bthost_add_iso_hook(struct bthost *bthost, uint16_t handle,
+				bthost_iso_hook_func_t func, void *user_data);
+
 void bthost_send_cid(struct bthost *bthost, uint16_t handle, uint16_t cid,
 					const void *data, uint16_t len);
 void bthost_send_cid_v(struct bthost *bthost, uint16_t handle, uint16_t cid,
+					const struct iovec *iov, int iovcnt);
+void bthost_send_iso(struct bthost *bthost, uint16_t handle,
 					const struct iovec *iov, int iovcnt);
 
 typedef void (*bthost_l2cap_rsp_cb) (uint8_t code, const void *data,
@@ -84,7 +95,16 @@ void bthost_set_ext_adv_data(struct bthost *bthost, const uint8_t *data,
 								uint8_t len);
 void bthost_set_ext_adv_params(struct bthost *bthost);
 void bthost_set_ext_adv_enable(struct bthost *bthost, uint8_t enable);
+void bthost_set_pa_params(struct bthost *bthost);
+void bthost_set_pa_enable(struct bthost *bthost, uint8_t enable);
+void bthost_create_big(struct bthost *bthost, uint8_t num_bis);
 bool bthost_search_ext_adv_addr(struct bthost *bthost, const uint8_t *addr);
+
+void bthost_set_cig_params(struct bthost *bthost, uint8_t cig_id,
+						uint8_t cis_id);
+void bthost_create_cis(struct bthost *bthost, uint16_t cis_handle,
+						uint16_t acl_handle);
+
 
 void bthost_set_scan_params(struct bthost *bthost, uint8_t scan_type,
 				uint8_t addr_type, uint8_t filter_policy);

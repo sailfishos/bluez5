@@ -725,7 +725,6 @@ static bool send_tx(struct mesh_io *io, struct mesh_io_send_info *info,
 {
 	struct mesh_io_private *pvt = io->pvt;
 	struct tx_pkt *tx;
-	bool sending = false;
 
 	if (!info || !data || !len || len > sizeof(tx->pkt))
 		return false;
@@ -739,23 +738,21 @@ static bool send_tx(struct mesh_io *io, struct mesh_io_send_info *info,
 	if (info->type == MESH_IO_TIMING_TYPE_POLL_RSP)
 		l_queue_push_head(pvt->tx_pkts, tx);
 	else {
-		if (pvt->tx)
-			sending = true;
-		else
-			sending = !l_queue_isempty(pvt->tx_pkts);
-
-		l_queue_push_tail(pvt->tx_pkts, tx);
-
 		/*
 		 * If transmitter is idle, send packets at least twice to
 		 * guard against in-line cancelation of HCI command chain.
 		 */
-		if (info->type == MESH_IO_TIMING_TYPE_GENERAL && !sending &&
-							tx->info.u.gen.cnt == 1)
+		if (info->type == MESH_IO_TIMING_TYPE_GENERAL &&
+					!pvt->tx &&
+					l_queue_isempty(pvt->tx_pkts) &&
+					tx->info.u.gen.cnt == 1)
 			tx->info.u.gen.cnt++;
+
+		l_queue_push_tail(pvt->tx_pkts, tx);
 	}
 
-	if (!sending) {
+    /* If not already sending, schedule the tx worker */
+	if (!pvt->tx) {
 		l_timeout_remove(pvt->tx_timeout);
 		pvt->tx_timeout = NULL;
 		l_idle_oneshot(tx_worker, pvt, NULL);
@@ -810,10 +807,13 @@ static bool tx_cancel(struct mesh_io *io, const uint8_t *data, uint8_t len)
 
 static bool find_by_filter(const void *a, const void *b)
 {
-	const struct pvt_rx_reg *rx_reg = a;
-	const uint8_t *filter = b;
+	const struct pvt_rx_reg *rx_reg_old = a;
+	const struct pvt_rx_reg *rx_reg = b;
 
-	return !memcmp(rx_reg->filter, filter, rx_reg->len);
+	if (rx_reg_old->len != rx_reg->len)
+		return false;
+
+	return !memcmp(rx_reg_old->filter, rx_reg->filter, rx_reg->len);
 }
 
 static bool recv_register(struct mesh_io *io, const uint8_t *filter,
@@ -821,22 +821,23 @@ static bool recv_register(struct mesh_io *io, const uint8_t *filter,
 {
 	struct bt_hci_cmd_le_set_scan_enable cmd;
 	struct mesh_io_private *pvt = io->pvt;
-	struct pvt_rx_reg *rx_reg;
+	struct pvt_rx_reg *rx_reg, *rx_reg_old;
 	bool already_scanning;
 	bool active = false;
 
 	if (!cb || !filter || !len)
 		return false;
 
-	rx_reg = l_queue_remove_if(pvt->rx_regs, find_by_filter, filter);
-
-	l_free(rx_reg);
 	rx_reg = l_malloc(sizeof(*rx_reg) + len);
 
 	memcpy(rx_reg->filter, filter, len);
 	rx_reg->len = len;
 	rx_reg->cb = cb;
 	rx_reg->user_data = user_data;
+
+	rx_reg_old = l_queue_remove_if(pvt->rx_regs, find_by_filter, rx_reg);
+
+	l_free(rx_reg_old);
 
 	already_scanning = !l_queue_isempty(pvt->rx_regs);
 
@@ -863,13 +864,19 @@ static bool recv_deregister(struct mesh_io *io, const uint8_t *filter,
 {
 	struct bt_hci_cmd_le_set_scan_enable cmd = {0, 0};
 	struct mesh_io_private *pvt = io->pvt;
-	struct pvt_rx_reg *rx_reg;
+	struct pvt_rx_reg *rx_reg, *rx_reg_tmp;
 	bool active = false;
 
-	rx_reg = l_queue_remove_if(pvt->rx_regs, find_by_filter, filter);
+	rx_reg_tmp = l_malloc(sizeof(*rx_reg_tmp) + len);
+	memcpy(&rx_reg_tmp->filter, filter, len);
+	rx_reg_tmp->len = len;
+
+	rx_reg = l_queue_remove_if(pvt->rx_regs, find_by_filter, rx_reg_tmp);
 
 	if (rx_reg)
 		l_free(rx_reg);
+
+	l_free(rx_reg_tmp);
 
 	/* Look for any AD types requiring Active Scanning */
 	if (l_queue_find(pvt->rx_regs, find_active, NULL))

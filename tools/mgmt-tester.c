@@ -282,6 +282,7 @@ struct generic_data {
 	const void *setup_send_param;
 	uint16_t setup_send_len;
 	const struct setup_mgmt_cmd *setup_mgmt_cmd_arr;
+	size_t setup_mgmt_cmd_arr_size;
 	bool send_index_none;
 	const void *setup_discovery_param;
 	uint16_t send_opcode;
@@ -1861,11 +1862,6 @@ static const struct setup_mgmt_cmd set_advertising_mgmt_cmd_arr[] = {
 		.send_opcode = MGMT_OP_SET_LOCAL_NAME,
 		.send_param = set_adv_set_local_name_param,
 		.send_len = sizeof(set_adv_set_local_name_param),
-	},
-	{ /* last element should always have opcode 0x00 */
-		.send_opcode = 0x00,
-		.send_param = NULL,
-		.send_len = 0,
 	}
 };
 
@@ -1887,6 +1883,7 @@ static const uint8_t set_adv_scan_rsp_data_name_and_appearance[] = {
 static const struct generic_data set_adv_on_local_name_appear_test_1 = {
 	.setup_settings = settings_powered_le,
 	.setup_mgmt_cmd_arr = set_advertising_mgmt_cmd_arr,
+	.setup_mgmt_cmd_arr_size = ARRAY_SIZE(set_advertising_mgmt_cmd_arr),
 	.send_opcode = MGMT_OP_SET_ADVERTISING,
 	.send_param = set_adv_on_param,
 	.expect_param = set_adv_settings_param_2,
@@ -5620,11 +5617,6 @@ static const struct setup_mgmt_cmd set_dev_class_cmd_arr1[] = {
 		.send_opcode = MGMT_OP_ADD_UUID,
 		.send_param = add_spp_uuid_param,
 		.send_len = sizeof(add_spp_uuid_param),
-	},
-	{ /* last element should always have opcode 0x00 */
-		.send_opcode = 0x00,
-		.send_param = NULL,
-		.send_len = 0,
 	}
 };
 
@@ -5653,6 +5645,7 @@ static const char ext_ctrl_info2[] = {
 static const struct generic_data read_ext_ctrl_info2 = {
 	.setup_settings = settings_powered_le,
 	.setup_mgmt_cmd_arr = set_dev_class_cmd_arr1,
+	.setup_mgmt_cmd_arr_size = ARRAY_SIZE(set_dev_class_cmd_arr1),
 	.send_opcode = MGMT_OP_READ_EXT_INFO,
 	.expect_status = MGMT_STATUS_SUCCESS,
 	.expect_param = ext_ctrl_info2,
@@ -5745,11 +5738,6 @@ static const struct setup_mgmt_cmd set_dev_class_cmd_arr2[] = {
 		.send_opcode = MGMT_OP_SET_LOCAL_NAME,
 		.send_param = &set_local_name_cp,
 		.send_len = sizeof(set_local_name_cp),
-	},
-	{ /* last element should always have opcode 0x00 */
-		.send_opcode = 0x00,
-		.send_param = NULL,
-		.send_len = 0,
 	}
 };
 
@@ -5781,6 +5769,7 @@ static const char ext_ctrl_info5[] = {
 static const struct generic_data read_ext_ctrl_info5 = {
 	.setup_settings = settings_powered_le,
 	.setup_mgmt_cmd_arr = set_dev_class_cmd_arr2,
+	.setup_mgmt_cmd_arr_size = ARRAY_SIZE(set_dev_class_cmd_arr2),
 	.send_opcode = MGMT_OP_READ_EXT_INFO,
 	.expect_status = MGMT_STATUS_SUCCESS,
 	.expect_param = ext_ctrl_info5,
@@ -6166,6 +6155,23 @@ static void setup_pairing_acceptor(const void *test_data)
 
 	setup_bthost();
 }
+
+/* Generic callback for checking the mgmt evnet status
+ */
+static void generic_mgmt_status_callback(uint8_t status, uint16_t length,
+					const void *param, void *user_data)
+{
+	bool bthost = PTR_TO_INT(user_data);
+
+	if (status != MGMT_STATUS_SUCCESS) {
+		tester_setup_failed();
+		return;
+	}
+
+	if (bthost)
+		setup_bthost();
+}
+
 
 static void setup_powered_callback(uint8_t status, uint16_t length,
 					const void *param, void *user_data)
@@ -7001,6 +7007,66 @@ static void setup_ext_adv_params(const void *test_data)
 					NULL, NULL);
 }
 
+static const uint8_t hci_set_ext_adv_data_name[] = {
+	0x01, /* Handle */
+	0x03, /* Operation */
+	0x01, /* Complete name */
+	0x06, 0x05, 0x08, 0x74, 0x65, 0x73, 0x74
+};
+
+static const struct generic_data add_ext_adv_scan_resp_off_on = {
+	.send_opcode = MGMT_OP_ADD_EXT_ADV_DATA,
+	.send_param = ext_adv_data_valid,
+	.send_len = sizeof(ext_adv_data_valid),
+	.expect_status = MGMT_STATUS_SUCCESS,
+	.expect_param = ext_adv_data_mgmt_rsp_valid,
+	.expect_len = sizeof(ext_adv_data_mgmt_rsp_valid),
+	.expect_hci_command = BT_HCI_CMD_LE_SET_EXT_SCAN_RSP_DATA,
+	.expect_hci_param = hci_set_ext_adv_data_name,
+	.expect_hci_len = sizeof(hci_set_ext_adv_data_name),
+};
+
+static void setup_add_ext_adv_on_off(const void *test_data)
+{
+	struct test_data *data = tester_get_data();
+	unsigned char param[] = { 0x01 };
+	int enable_bthost = 1;
+
+	mgmt_send(data->mgmt, MGMT_OP_SET_LE, data->mgmt_index,
+					sizeof(param), &param,
+					NULL, NULL, NULL);
+
+	mgmt_send(data->mgmt, MGMT_OP_SET_POWERED, data->mgmt_index,
+					sizeof(param), &param,
+					generic_mgmt_status_callback,
+					NULL, NULL);
+
+	mgmt_send(data->mgmt, MGMT_OP_ADD_EXT_ADV_PARAMS, data->mgmt_index,
+					sizeof(ext_adv_params_valid),
+					&ext_adv_params_valid,
+					generic_mgmt_status_callback,
+					NULL, NULL);
+
+	mgmt_send(data->mgmt, MGMT_OP_ADD_EXT_ADV_DATA, data->mgmt_index,
+					sizeof(ext_adv_data_valid),
+					&ext_adv_data_valid,
+					generic_mgmt_status_callback,
+					NULL, NULL);
+
+	mgmt_send(data->mgmt, MGMT_OP_REMOVE_ADVERTISING, data->mgmt_index,
+					sizeof(remove_advertising_param_1),
+					&remove_advertising_param_1,
+					generic_mgmt_status_callback,
+					NULL, NULL);
+
+	mgmt_send(data->mgmt, MGMT_OP_ADD_EXT_ADV_PARAMS, data->mgmt_index,
+					sizeof(ext_adv_params_valid),
+					&ext_adv_params_valid,
+					generic_mgmt_status_callback,
+					INT_TO_PTR(enable_bthost), NULL);
+
+}
+
 static void pin_code_request_callback(uint16_t index, uint16_t length,
 					const void *param, void *user_data)
 {
@@ -7476,7 +7542,7 @@ static void setup_command_generic(const void *test_data)
 	const struct generic_data *test = data->test_data;
 	const void *send_param = test->setup_send_param;
 	uint16_t send_len = test->setup_send_len;
-	size_t i = 0;
+	size_t i;
 
 	if (test->setup_expect_hci_command) {
 		tester_print("Registering setup expected HCI command callback");
@@ -7500,11 +7566,8 @@ static void setup_command_generic(const void *test_data)
 	}
 
 	tester_print("Sending setup opcode array");
-	for (; test->setup_mgmt_cmd_arr + i; ++i) {
-		const struct setup_mgmt_cmd *cmd = test->setup_mgmt_cmd_arr + i;
-
-		if (cmd->send_opcode == 0x00)
-			break;
+	for (i = 0; i < test->setup_mgmt_cmd_arr_size; ++i) {
+		const struct setup_mgmt_cmd *cmd = &test->setup_mgmt_cmd_arr[i];
 
 		tester_print("Setup sending %s (0x%04x)",
 				mgmt_opstr(cmd->send_opcode),
@@ -7882,11 +7945,6 @@ static const struct setup_mgmt_cmd add_advertising_mgmt_cmd_arr[] = {
 		.send_opcode = MGMT_OP_SET_LOCAL_NAME,
 		.send_param = &set_local_name_cp,
 		.send_len = sizeof(set_local_name_cp),
-	},
-	{ /* last element should always have opcode 0x00 */
-		.send_opcode = 0x00,
-		.send_param = NULL,
-		.send_len = 0,
 	}
 };
 
@@ -7909,6 +7967,7 @@ static const uint8_t set_scan_rsp_data_name_data_appear[] = {
 static const struct generic_data add_advertising_name_data_appear = {
 	.setup_settings = settings_powered_le,
 	.setup_mgmt_cmd_arr = add_advertising_mgmt_cmd_arr,
+	.setup_mgmt_cmd_arr_size = ARRAY_SIZE(add_advertising_mgmt_cmd_arr),
 	.send_opcode = MGMT_OP_ADD_ADVERTISING,
 	.send_param = add_advertising_param_name_data_appear,
 	.send_len = sizeof(add_advertising_param_name_data_appear),
@@ -8925,6 +8984,7 @@ static const uint8_t set_ext_scan_rsp_data_name_data_appear[] = {
 static const struct generic_data add_ext_advertising_name_data_appear = {
 	.setup_settings = settings_powered_le,
 	.setup_mgmt_cmd_arr = add_advertising_mgmt_cmd_arr,
+	.setup_mgmt_cmd_arr_size = ARRAY_SIZE(add_advertising_mgmt_cmd_arr),
 	.send_opcode = MGMT_OP_ADD_ADVERTISING,
 	.send_param = add_advertising_param_name_data_appear,
 	.send_len = sizeof(add_advertising_param_name_data_appear),
@@ -9798,7 +9858,7 @@ static const struct generic_data set_dev_flags_fail_3 = {
 };
 
 static const uint8_t read_exp_feat_param_success[] = {
-	0x03, 0x00,				/* Feature Count */
+	0x04, 0x00,				/* Feature Count */
 	0xd6, 0x49, 0xb0, 0xd1, 0x28, 0xeb,	/* UUID - Simultaneous */
 	0x27, 0x92, 0x96, 0x46, 0xc0, 0x42,	/* Central Peripheral */
 	0xb5, 0x10, 0x1b, 0x67,
@@ -9810,7 +9870,11 @@ static const uint8_t read_exp_feat_param_success[] = {
 	0xaf, 0x29, 0xc6, 0x66, 0xac, 0x5f,	/* UUID - Codec Offload */
 	0x1a, 0x88, 0xb9, 0x4f, 0x7f, 0xee,
 	0xce, 0x5a, 0x69, 0xa6,
-	0x00, 0x00, 0x00, 0x00			/* Flags */
+	0x00, 0x00, 0x00, 0x00,			/* Flags */
+	0x3e, 0xe0, 0xb4, 0xfd, 0xdd, 0xd6,	/* UUID - ISO Socket */
+	0x85, 0x98, 0x6a, 0x49, 0xe0, 0x05,
+	0x88, 0xf1, 0xba, 0x6f,
+	0x00, 0x00, 0x00, 0x00,			/* Flags */
 };
 
 static const struct generic_data read_exp_feat_success = {
@@ -9822,10 +9886,14 @@ static const struct generic_data read_exp_feat_success = {
 
 
 static const uint8_t read_exp_feat_param_success_index_none[] = {
-	0x01, 0x00,				/* Feature Count */
+	0x02, 0x00,				/* Feature Count */
 	0x1c, 0xda, 0x47, 0x1c, 0x48, 0x6c,	/* UUID - Debug */
 	0x01, 0xab, 0x9f, 0x46, 0xec, 0xb9,
 	0x30, 0x25, 0x99, 0xd4,
+	0x00, 0x00, 0x00, 0x00,			/* Flags */
+	0x3e, 0xe0, 0xb4, 0xfd, 0xdd, 0xd6,	/* UUID - ISO Socket */
+	0x85, 0x98, 0x6a, 0x49, 0xe0, 0x05,
+	0x88, 0xf1, 0xba, 0x6f,
 	0x00, 0x00, 0x00, 0x00,			/* Flags */
 };
 
@@ -11960,12 +12028,14 @@ static void read_50_controller_cap_complete(uint8_t status, uint16_t length,
 		tester_warn("Failed to read advertising features: %s (0x%02x)",
 						mgmt_errstr(status), status);
 		tester_test_failed();
+		return;
 	}
 
 	if (sizeof(rp->cap_len) + rp->cap_len != length) {
 		tester_warn("Controller capabilities malformed, size %zu != %u",
 				sizeof(rp->cap_len) + rp->cap_len, length);
 		tester_test_failed();
+		return;
 	}
 
 	while (offset < rp->cap_len) {
@@ -13977,10 +14047,16 @@ int main(int argc, char *argv[])
 				setup_ext_adv_params,
 				test_command_generic);
 
-	test_bredrle50("zxcv Ext Adv MGMT - AD Scan Response (5.0) Success",
+	test_bredrle50("Ext Adv MGMT - AD Scan Response (5.0) Success",
 				&adv_scan_rsp_success,
 				setup_ext_adv_params,
 				test_command_generic);
+
+	test_bredrle50("Ext Adv MGMT - AD Scan Resp - Off and On",
+				&add_ext_adv_scan_resp_off_on,
+				setup_add_ext_adv_on_off,
+				test_command_generic);
+
 
 	/* MGMT_OP_SET_DEVICE_ID
 	 * Using Bluetooth SIG for source.

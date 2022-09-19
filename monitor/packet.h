@@ -23,6 +23,19 @@
 #define PACKET_FILTER_SHOW_A2DP_STREAM	(1 << 6)
 #define PACKET_FILTER_SHOW_MGMT_SOCKET	(1 << 7)
 
+struct packet_conn_data {
+	uint16_t index;
+	uint8_t  src[6];
+	uint16_t handle;
+	uint8_t  type;
+	uint8_t  dst[6];
+	uint8_t  dst_type;
+	void     *data;
+	void     (*destroy)(void *data);
+};
+
+struct packet_conn_data *packet_get_conn_data(uint16_t handle);
+
 bool packet_has_filter(unsigned long filter);
 void packet_set_filter(unsigned long filter);
 void packet_add_filter(unsigned long filter);
@@ -49,6 +62,21 @@ void packet_print_channel_map_lmp(const uint8_t *map);
 void packet_print_channel_map_ll(const uint8_t *map);
 void packet_print_io_capability(uint8_t capability);
 void packet_print_io_authentication(uint8_t authentication);
+void packet_print_codec_id(const char *label, uint8_t codec);
+
+#define LTV_DEC(_type, _func) \
+{ \
+	.type = _type, \
+	.func = _func, \
+}
+
+struct packet_ltv_decoder {
+	uint8_t  type;
+	void (*func)(const uint8_t *data, uint8_t len);
+};
+
+void packet_print_ltv(const char *label, const uint8_t *data, uint8_t len,
+			struct packet_ltv_decoder *decoder, size_t num);
 
 void packet_control(struct timeval *tv, struct ucred *cred,
 					uint16_t index, uint16_t opcode,

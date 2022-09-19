@@ -38,6 +38,8 @@
 #include "dbus-common.h"
 #include "profile.h"
 #include "service.h"
+#include "textfile.h"
+#include "settings.h"
 
 #define GATT_MANAGER_IFACE	"org.bluez.GattManager1"
 #define GATT_PROFILE_IFACE	"org.bluez.GattProfile1"
@@ -376,6 +378,18 @@ static bool get_dst_info(struct bt_att *att, bdaddr_t *dst, uint8_t *dst_type)
 
 	g_io_channel_unref(io);
 	return true;
+}
+
+static struct device_state *
+find_device_state_by_att(struct btd_gatt_database *database, struct bt_att *att)
+{
+	bdaddr_t bdaddr;
+	uint8_t bdaddr_type;
+
+	if (!get_dst_info(att, &bdaddr, &bdaddr_type))
+		return NULL;
+
+	return find_device_state(database, &bdaddr, bdaddr_type);
 }
 
 static struct device_state *get_device_state(struct btd_gatt_database *database,
@@ -1018,13 +1032,6 @@ static void gatt_ccc_write_cb(struct gatt_db_attribute *attrib,
 		goto done;
 	}
 
-	ccc_cb = queue_find(database->ccc_callbacks, ccc_cb_match_handle,
-			UINT_TO_PTR(gatt_db_attribute_get_handle(attrib)));
-	if (!ccc_cb) {
-		ecode = BT_ATT_ERROR_UNLIKELY;
-		goto done;
-	}
-
 	if (len == 1)
 		val = *value;
 	else
@@ -1034,7 +1041,9 @@ static void gatt_ccc_write_cb(struct gatt_db_attribute *attrib,
 	if (val == ccc->value)
 		goto done;
 
-	if (ccc_cb->callback) {
+	ccc_cb = queue_find(database->ccc_callbacks, ccc_cb_match_handle,
+			UINT_TO_PTR(gatt_db_attribute_get_handle(attrib)));
+	if (ccc_cb) {
 		struct pending_op *op;
 
 		op = pending_ccc_new(att, attrib, val,
@@ -1056,6 +1065,22 @@ done:
 	gatt_db_attribute_write_result(attrib, id, ecode);
 }
 
+static void ccc_add_cb(struct btd_gatt_database *database,
+			struct gatt_db_attribute *ccc,
+			btd_gatt_database_ccc_write_t callback,
+			void *user_data, btd_gatt_database_destroy_t destroy)
+{
+	struct ccc_cb_data *ccc_cb;
+
+	ccc_cb = new0(struct ccc_cb_data, 1);
+	ccc_cb->handle = gatt_db_attribute_get_handle(ccc);
+	ccc_cb->callback = callback;
+	ccc_cb->destroy = destroy;
+	ccc_cb->user_data = user_data;
+
+	queue_push_tail(database->ccc_callbacks, ccc_cb);
+}
+
 static struct gatt_db_attribute *
 service_add_ccc(struct gatt_db_attribute *service,
 				struct btd_gatt_database *database,
@@ -1064,34 +1089,14 @@ service_add_ccc(struct gatt_db_attribute *service,
 				btd_gatt_database_destroy_t destroy)
 {
 	struct gatt_db_attribute *ccc;
-	struct ccc_cb_data *ccc_cb;
-	bt_uuid_t uuid;
 
-	ccc_cb = new0(struct ccc_cb_data, 1);
+	ccc = gatt_db_service_add_ccc(service, perm);
+	if (!ccc)
+		return ccc;
 
-	/*
-	 * Provide a way for the permissions on a characteristic to dictate
-	 * the permissions on the CCC
-	 */
-	perm |= BT_ATT_PERM_READ | BT_ATT_PERM_WRITE;
-
-	bt_uuid16_create(&uuid, GATT_CLIENT_CHARAC_CFG_UUID);
-	ccc = gatt_db_service_add_descriptor(service, &uuid, perm,
-				gatt_ccc_read_cb, gatt_ccc_write_cb, database);
-	if (!ccc) {
-		error("Failed to create CCC entry in database");
-		free(ccc_cb);
-		return NULL;
-	}
-
-	gatt_db_attribute_set_fixed_length(ccc, 2);
-
-	ccc_cb->handle = gatt_db_attribute_get_handle(ccc);
-	ccc_cb->callback = write_callback;
-	ccc_cb->destroy = destroy;
-	ccc_cb->user_data = user_data;
-
-	queue_push_tail(database->ccc_callbacks, ccc_cb);
+	/* Only add ccc_cb if callback is set */
+	if (write_callback)
+		ccc_add_cb(database, ccc, write_callback, user_data, destroy);
 
 	return ccc;
 }
@@ -1308,13 +1313,6 @@ static void populate_devinfo_service(struct btd_gatt_database *database)
 	database_add_record(database, service);
 }
 
-static void register_core_services(struct btd_gatt_database *database)
-{
-	populate_gap_service(database);
-	populate_gatt_service(database);
-	populate_devinfo_service(database);
-}
-
 static void conf_cb(void *user_data)
 {
 	GDBusProxy *proxy = user_data;
@@ -1438,6 +1436,49 @@ remove:
 	}
 }
 
+static void gatt_notify_cb(struct gatt_db_attribute *attrib,
+					struct gatt_db_attribute *ccc,
+					const uint8_t *value, size_t len,
+					struct bt_att *att, void *user_data)
+{
+	struct btd_gatt_database *database = user_data;
+	struct notify notify;
+
+	memset(&notify, 0, sizeof(notify));
+
+	notify.database = database;
+	notify.handle = gatt_db_attribute_get_handle(attrib);
+	notify.ccc_handle = gatt_db_attribute_get_handle(ccc);
+	notify.value = (void *) value;
+	notify.len = len;
+
+	if (attrib == database->svc_chngd)
+		notify.conf = service_changed_conf;
+
+	/* If a specific att is provided notify only to that device */
+	if (att) {
+		struct device_state *state;
+
+		state = find_device_state_by_att(database, att);
+		if (!state)
+			return;
+
+		send_notification_to_device(state, &notify);
+	} else
+		queue_foreach(database->device_states,
+				send_notification_to_device, &notify);
+}
+
+static void register_core_services(struct btd_gatt_database *database)
+{
+	gatt_db_ccc_register(database->db, gatt_ccc_read_cb, gatt_ccc_write_cb,
+						gatt_notify_cb, database);
+
+	populate_gap_service(database);
+	populate_gatt_service(database);
+	populate_devinfo_service(database);
+}
+
 static void send_notification_to_devices(struct btd_gatt_database *database,
 					uint16_t handle, uint8_t *value,
 					uint16_t len, uint16_t ccc_handle,
@@ -1484,8 +1525,20 @@ static void send_service_changed(struct btd_gatt_database *database,
 	put_le16(start, value);
 	put_le16(end, value + 2);
 
-	send_notification_to_devices(database, handle, value, sizeof(value),
-					ccc_handle, service_changed_conf, NULL);
+	if (!gatt_db_attribute_notify(database->svc_chngd, value, sizeof(value),
+								NULL))
+		error("Failed to notify Service Changed");
+}
+
+static void database_store(struct btd_gatt_database *database)
+{
+	char filename[PATH_MAX];
+
+	create_filename(filename, PATH_MAX, "/%s/attributes",
+				btd_adapter_get_storage_dir(database->adapter));
+	create_file(filename, 0600);
+
+	btd_settings_gatt_db_store(database->db, filename);
 }
 
 static void gatt_db_service_added(struct gatt_db_attribute *attrib,
@@ -1498,6 +1551,8 @@ static void gatt_db_service_added(struct gatt_db_attribute *attrib,
 	database_add_record(database, attrib);
 
 	send_service_changed(database, attrib);
+
+	database_store(database);
 }
 
 static bool ccc_match_service(const void *data, const void *match_data)
@@ -3384,6 +3439,11 @@ static struct external_profile *create_profile(struct gatt_app *app,
 		goto fail;
 	}
 
+	if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_ARRAY) {
+		DBG("UUIDs wrongly formatted");
+		goto fail;
+	}
+
 	dbus_message_iter_recurse(&iter, &array);
 
 	while (dbus_message_iter_get_arg_type(&array) == DBUS_TYPE_STRING) {
@@ -3832,6 +3892,10 @@ void btd_gatt_database_server_connected(struct btd_gatt_database *database,
 
 	send_notification_to_device(state, state->pending);
 
+	state = find_device_state(database, &bdaddr, bdaddr_type);
+	if (!state || !state->pending)
+		return;
+
 	free(state->pending->value);
 	free(state->pending);
 	state->pending = NULL;
@@ -3923,6 +3987,7 @@ void btd_gatt_database_restore_svc_chng_ccc(struct btd_gatt_database *database)
 	put_le16(0x0001, value);
 	put_le16(0xffff, value + 2);
 
-	send_notification_to_devices(database, handle, value, sizeof(value),
-					ccc_handle, service_changed_conf, NULL);
+	if (!gatt_db_attribute_notify(database->svc_chngd, value, sizeof(value),
+								NULL))
+		error("Failed to notify Service Changed");
 }

@@ -244,6 +244,16 @@ static struct media_adapter *find_adapter(struct btd_device *device)
 	return NULL;
 }
 
+static void endpoint_remove_transport(struct media_endpoint *endpoint,
+					struct media_transport *transport)
+{
+	if (!endpoint || !transport)
+		return;
+
+	endpoint->transports = g_slist_remove(endpoint->transports, transport);
+	media_transport_destroy(transport);
+}
+
 static void clear_configuration(struct media_endpoint *endpoint,
 					struct media_transport *transport)
 {
@@ -263,8 +273,7 @@ static void clear_configuration(struct media_endpoint *endpoint,
 							DBUS_TYPE_INVALID);
 	g_dbus_send_message(btd_get_dbus_connection(), msg);
 done:
-	endpoint->transports = g_slist_remove(endpoint->transports, transport);
-	media_transport_destroy(transport);
+	endpoint_remove_transport(endpoint, transport);
 }
 
 static void clear_endpoint(struct media_endpoint *endpoint)
@@ -304,12 +313,8 @@ static void endpoint_reply(DBusPendingCall *call, void *user_data)
 
 		if (dbus_message_is_method_call(request->msg,
 					MEDIA_ENDPOINT_INTERFACE,
-					"SetConfiguration")) {
-			if (request->transport == NULL)
-				error("Expected to destroy transport");
-			else
-				media_transport_destroy(request->transport);
-		}
+					"SetConfiguration"))
+			endpoint_remove_transport(endpoint, request->transport);
 
 		dbus_error_free(&err);
 		goto done;
@@ -454,11 +459,11 @@ int8_t media_player_get_device_volume(struct btd_device *device)
 
 	target_player = avrcp_get_target_player_by_device(device);
 	if (!target_player)
-		return -1;
+		goto done;
 
 	adapter = find_adapter(device);
 	if (!adapter)
-		return -1;
+		goto done;
 
 	for (l = adapter->players; l; l = l->next) {
 		struct media_player *mp = l->data;
@@ -467,7 +472,9 @@ int8_t media_player_get_device_volume(struct btd_device *device)
 			return mp->volume;
 	}
 
-	return -1;
+done:
+	/* If media_player doesn't exists use device_volume */
+	return btd_device_get_volume(device);
 }
 
 static gboolean set_configuration(struct media_endpoint *endpoint,

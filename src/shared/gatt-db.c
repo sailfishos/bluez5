@@ -43,6 +43,15 @@ static const bt_uuid_t included_service_uuid = { .type = BT_UUID16,
 					.value.u16 = GATT_INCLUDE_UUID };
 static const bt_uuid_t ext_desc_uuid = { .type = BT_UUID16,
 				.value.u16 = GATT_CHARAC_EXT_PROPER_UUID };
+static const bt_uuid_t ccc_uuid = { .type = BT_UUID16,
+				.value.u16 = GATT_CLIENT_CHARAC_CFG_UUID };
+
+struct gatt_db_ccc {
+	gatt_db_read_t read_func;
+	gatt_db_write_t write_func;
+	gatt_db_notify_t notify_func;
+	void *user_data;
+};
 
 struct gatt_db {
 	int ref_count;
@@ -57,6 +66,8 @@ struct gatt_db {
 
 	gatt_db_authorize_cb_t authorize;
 	void *authorize_data;
+
+	struct gatt_db_ccc *ccc;
 };
 
 struct notify {
@@ -101,6 +112,7 @@ struct gatt_db_attribute {
 
 	gatt_db_read_t read_func;
 	gatt_db_write_t write_func;
+	gatt_db_notify_t notify_func;
 	void *user_data;
 
 	unsigned int read_id;
@@ -444,6 +456,7 @@ static void gatt_db_destroy(struct gatt_db *db)
 		timeout_remove(db->hash_id);
 
 	queue_destroy(db->services, gatt_db_service_destroy);
+	free(db->ccc);
 	free(db);
 }
 
@@ -1038,6 +1051,71 @@ gatt_db_service_add_descriptor(struct gatt_db_attribute *attrib,
 					user_data);
 }
 
+static void find_ccc_value(struct gatt_db_attribute *attrib, void *user_data)
+{
+	uint16_t *handle = user_data;
+
+	gatt_db_attribute_get_char_data(attrib, NULL, handle, NULL, NULL, NULL);
+}
+
+struct gatt_db_attribute *
+gatt_db_service_add_ccc(struct gatt_db_attribute *attrib, uint32_t permissions)
+{
+	struct gatt_db *db;
+	struct gatt_db_attribute *ccc;
+	struct gatt_db_attribute *value;
+	uint16_t handle = 0;
+
+	if (!attrib)
+		return NULL;
+
+	db = attrib->service->db;
+
+	if (!db->ccc)
+		return NULL;
+
+	/* Locate value handle */
+	gatt_db_service_foreach_char(attrib, find_ccc_value, &handle);
+
+	if (!handle)
+		return NULL;
+
+	value = gatt_db_get_attribute(db, handle);
+	if (!value || value->notify_func)
+		return NULL;
+
+	ccc = service_insert_descriptor(attrib->service, 0, &ccc_uuid,
+					permissions,
+					db->ccc->read_func,
+					db->ccc->write_func,
+					db->ccc->user_data);
+	if (!ccc)
+		return ccc;
+
+	gatt_db_attribute_set_fixed_length(ccc, 2);
+	ccc->notify_func = db->ccc->notify_func;
+	value->notify_func = db->ccc->notify_func;
+
+	return ccc;
+}
+
+void gatt_db_ccc_register(struct gatt_db *db, gatt_db_read_t read_func,
+				gatt_db_write_t write_func,
+				gatt_db_notify_t notify_func,
+				void *user_data)
+{
+	if (!db)
+		return;
+
+	if (!db->ccc)
+		db->ccc = new0(struct gatt_db_ccc, 1);
+
+	db->ccc->read_func = read_func;
+	db->ccc->write_func = write_func;
+	db->ccc->notify_func = notify_func;
+	db->ccc->user_data = user_data;
+}
+
 static struct gatt_db_attribute *
 service_insert_included(struct gatt_db_service *service, uint16_t handle,
 					struct gatt_db_attribute *include)
@@ -1450,32 +1528,71 @@ void gatt_db_service_foreach_char(struct gatt_db_attribute *attrib,
 	gatt_db_service_foreach(attrib, &characteristic_uuid, func, user_data);
 }
 
+static int gatt_db_attribute_get_index(const struct gatt_db_attribute *attrib)
+{
+	struct gatt_db_service *service;
+	int index;
+
+	if (!attrib)
+		return -1;
+
+	service = attrib->service;
+	for (index = 0; index < service->num_handles; index++) {
+		if (service->attributes[index] == attrib)
+			return index;
+	}
+
+	return -1;
+}
+
+static struct gatt_db_attribute *
+gatt_db_attribute_get_value(struct gatt_db_attribute *attrib)
+{
+	struct gatt_db_service *service;
+	int index;
+
+	if (!attrib)
+		return NULL;
+
+	index = gatt_db_attribute_get_index(attrib);
+	if (index < 0)
+		return NULL;
+
+	service = attrib->service;
+
+	if (!bt_uuid_cmp(&characteristic_uuid, &attrib->uuid))
+		index++;
+	else if (bt_uuid_cmp(&characteristic_uuid,
+				&service->attributes[index - 1]->uuid))
+		return NULL;
+
+	return service->attributes[index];
+}
+
 void gatt_db_service_foreach_desc(struct gatt_db_attribute *attrib,
 						gatt_db_attribute_cb_t func,
 						void *user_data)
 {
 	struct gatt_db_service *service;
 	struct gatt_db_attribute *attr;
+	int index;
 	uint16_t i;
 
 	if (!attrib || !func)
 		return;
 
-	/* Return if this attribute is not a characteristic declaration */
-	if (bt_uuid_cmp(&characteristic_uuid, &attrib->uuid))
+	attrib = gatt_db_attribute_get_value(attrib);
+	if (!attrib)
+		return;
+
+	index = gatt_db_attribute_get_index(attrib);
+	if (index < 0)
 		return;
 
 	service = attrib->service;
 
 	/* Start from the attribute following the value handle */
-	for (i = 0; i < service->num_handles; i++) {
-		if (service->attributes[i] == attrib) {
-			i += 2;
-			break;
-		}
-	}
-
-	for (; i < service->num_handles; i++) {
+	for (i = index + 1; i < service->num_handles; i++) {
 		attr = service->attributes[i];
 		if (!attr)
 			continue;
@@ -1736,8 +1853,18 @@ bool gatt_db_attribute_get_char_data(const struct gatt_db_attribute *attrib,
 	if (!attrib)
 		return false;
 
-	if (bt_uuid_cmp(&characteristic_uuid, &attrib->uuid))
-		return false;
+	if (bt_uuid_cmp(&characteristic_uuid, &attrib->uuid)) {
+		int index;
+
+		/* Check if Characteristic Value was passed instead */
+		index = gatt_db_attribute_get_index(attrib);
+		if (index < 0)
+			return NULL;
+
+		attrib = attrib->service->attributes[index - 1];
+		if (bt_uuid_cmp(&characteristic_uuid, &attrib->uuid))
+			return false;
+	}
 
 	/*
 	 * Characteristic declaration value:
@@ -2046,6 +2173,54 @@ bool gatt_db_attribute_write_result(struct gatt_db_attribute *attrib,
 		return false;
 
 	pending_write_result(p, err);
+
+	return true;
+}
+
+static void find_ccc(struct gatt_db_attribute *attrib, void *user_data)
+{
+	struct gatt_db_attribute **ccc = user_data;
+
+	if (*ccc)
+		return;
+
+	if (bt_uuid_cmp(&ccc_uuid, &attrib->uuid))
+		return;
+
+	*ccc = attrib;
+}
+
+struct gatt_db_attribute *
+gatt_db_attribute_get_ccc(struct gatt_db_attribute *attrib)
+{
+	struct gatt_db_attribute *ccc = NULL;
+
+	if (!attrib)
+		return NULL;
+
+	gatt_db_service_foreach_desc(attrib, find_ccc, &ccc);
+
+	return ccc;
+}
+
+bool gatt_db_attribute_notify(struct gatt_db_attribute *attrib,
+					const uint8_t *value, size_t len,
+					struct bt_att *att)
+{
+	struct gatt_db_attribute *ccc;
+
+	if (!attrib || !attrib->notify_func)
+		return false;
+
+	attrib = gatt_db_attribute_get_value(attrib);
+	if (!attrib)
+		return false;
+
+	ccc = gatt_db_attribute_get_ccc(attrib);
+	if (!ccc)
+		return false;
+
+	attrib->notify_func(attrib, ccc, value, len, att, ccc->user_data);
 
 	return true;
 }

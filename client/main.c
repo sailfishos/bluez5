@@ -30,6 +30,7 @@
 #include "advertising.h"
 #include "adv_monitor.h"
 #include "admin.h"
+#include "player.h"
 
 /* String display constants */
 #define COLORED_NEW	COLOR_GREEN "NEW" COLOR_OFF
@@ -74,6 +75,14 @@ static const char *ad_arguments[] = {
 	"off",
 	"peripheral",
 	"broadcast",
+	NULL
+};
+
+static const char * const device_arguments[] = {
+	"Paired",
+	"Bonded",
+	"Trusted",
+	"Connected",
 	NULL
 };
 
@@ -911,6 +920,28 @@ static gboolean check_default_ctrl(void)
 	return TRUE;
 }
 
+static gboolean parse_argument_devices(int argc, char *argv[],
+				       const char * const *arg_table,
+				       const char **option)
+{
+	const char * const *opt;
+
+	if (argc < 2) {
+		*option = NULL;
+		return TRUE;
+	}
+
+	for (opt = arg_table; opt && *opt; opt++) {
+		if (strcmp(argv[1], *opt) == 0) {
+			*option = *opt;
+			return TRUE;
+		}
+	}
+
+	bt_shell_printf("Invalid argument %s\n", argv[1]);
+	return FALSE;
+}
+
 static gboolean parse_argument(int argc, char *argv[], const char **arg_table,
 					const char *msg, dbus_bool_t *value,
 					const char **option)
@@ -1050,22 +1081,11 @@ static void cmd_select(int argc, char *argv[])
 static void cmd_devices(int argc, char *argv[])
 {
 	GList *ll;
+	const char *property;
 
-	if (check_default_ctrl() == FALSE)
-		return bt_shell_noninteractive_quit(EXIT_SUCCESS);
-
-	for (ll = g_list_first(default_ctrl->devices);
-			ll; ll = g_list_next(ll)) {
-		GDBusProxy *proxy = ll->data;
-		print_device(proxy, NULL);
-	}
-
-	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
-}
-
-static void cmd_paired_devices(int argc, char *argv[])
-{
-	GList *ll;
+	if (!parse_argument_devices(argc, argv, device_arguments,
+					&property))
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 
 	if (check_default_ctrl() == FALSE)
 		return bt_shell_noninteractive_quit(EXIT_SUCCESS);
@@ -1074,15 +1094,17 @@ static void cmd_paired_devices(int argc, char *argv[])
 			ll; ll = g_list_next(ll)) {
 		GDBusProxy *proxy = ll->data;
 		DBusMessageIter iter;
-		dbus_bool_t paired;
+		dbus_bool_t status;
 
-		if (g_dbus_proxy_get_property(proxy, "Paired", &iter) == FALSE)
-			continue;
+		if (property) {
+			if (g_dbus_proxy_get_property(proxy,
+					property, &iter) == FALSE)
+				continue;
 
-		dbus_message_iter_get_basic(&iter, &paired);
-		if (!paired)
-			continue;
-
+			dbus_message_iter_get_basic(&iter, &status);
+			if (!status)
+				continue;
+		}
 		print_device(proxy, NULL);
 	}
 
@@ -1294,6 +1316,7 @@ static struct set_discovery_filter_args {
 	dbus_bool_t discoverable;
 	bool set;
 	bool active;
+	unsigned int timeout;
 } filter = {
 	.rssi = DISTANCE_VAL_INVALID,
 	.pathloss = DISTANCE_VAL_INVALID,
@@ -1415,18 +1438,33 @@ static void set_discovery_filter(bool cleared)
 	filter.set = true;
 }
 
+static const char *scan_arguments[] = {
+	"on",
+	"off",
+	"bredr",
+	"le",
+	NULL
+};
+
 static void cmd_scan(int argc, char *argv[])
 {
 	dbus_bool_t enable;
 	const char *method;
+	const char *mode;
 
-	if (!parse_argument(argc, argv, NULL, NULL, &enable, NULL))
+	if (!parse_argument(argc, argv, scan_arguments, "Mode", &enable,
+								&mode))
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 
 	if (check_default_ctrl() == FALSE)
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 
 	if (enable == TRUE) {
+		if (strcmp(mode, "")) {
+			g_free(filter.transport);
+			filter.transport = g_strdup(mode);
+		}
+
 		set_discovery_filter(false);
 		method = "StartDiscovery";
 	} else
@@ -1764,6 +1802,7 @@ static void cmd_info(int argc, char *argv[])
 	print_property(proxy, "Appearance");
 	print_property(proxy, "Icon");
 	print_property(proxy, "Paired");
+	print_property(proxy, "Bonded");
 	print_property(proxy, "Trusted");
 	print_property(proxy, "Blocked");
 	print_property(proxy, "Connected");
@@ -2514,6 +2553,11 @@ static char *capability_generator(const char *text, int state)
 	return argument_generator(text, state, agent_arguments);
 }
 
+static char *scan_generator(const char *text, int state)
+{
+	return argument_generator(text, state, scan_arguments);
+}
+
 static void cmd_advertise(int argc, char *argv[])
 {
 	dbus_bool_t enable;
@@ -2724,7 +2768,7 @@ static void cmd_advertise_interval(int argc, char *argv[])
 	max = min;
 
 	if (argc > 2) {
-		max = strtol(argv[1], &endptr, 0);
+		max = strtol(argv[2], &endptr, 0);
 		if (!endptr || *endptr != '\0' || max < 20 || max > 10485) {
 			bt_shell_printf("Invalid argument\n");
 			return bt_shell_noninteractive_quit(EXIT_FAILURE);
@@ -3091,9 +3135,9 @@ static const struct bt_shell_menu main_menu = {
 							ctrl_generator },
 	{ "select",       "<ctrl>",   cmd_select, "Select default controller",
 							ctrl_generator },
-	{ "devices",      NULL,       cmd_devices, "List available devices" },
-	{ "paired-devices", NULL,     cmd_paired_devices,
-					"List paired devices"},
+	{ "devices",      "[Paired/Bonded/Trusted/Connected]", cmd_devices,
+					"List available devices, with an "
+					"optional property as the filter" },
 	{ "system-alias", "<name>",   cmd_system_alias,
 					"Set controller alias" },
 	{ "reset-alias",  NULL,       cmd_reset_alias,
@@ -3117,7 +3161,8 @@ static const struct bt_shell_menu main_menu = {
 				"Enable/disable advertising with given type",
 							ad_generator},
 	{ "set-alias",    "<alias>",  cmd_set_alias, "Set device alias" },
-	{ "scan",         "<on/off>", cmd_scan, "Scan for devices", NULL },
+	{ "scan",         "<on/off/bredr/le>", cmd_scan,
+				"Scan for devices", scan_generator },
 	{ "info",         "[dev]",    cmd_info, "Device information",
 							dev_generator },
 	{ "pair",         "[dev]",    cmd_pair, "Pair with device",
@@ -3193,6 +3238,8 @@ int main(int argc, char *argv[])
 
 	bt_shell_set_env("DBUS_CONNECTION", dbus_conn);
 
+	player_add_submenu();
+
 	client = g_dbus_client_new(dbus_conn, "org.bluez", "/org/bluez");
 
 	g_dbus_client_set_connect_watch(client, connect_handler, NULL);
@@ -3205,6 +3252,8 @@ int main(int argc, char *argv[])
 	g_dbus_client_set_ready_watch(client, client_ready, NULL);
 
 	status = bt_shell_run();
+
+	player_remove_submenu();
 
 	g_dbus_client_unref(client);
 

@@ -64,7 +64,7 @@
 
 struct btd_opts btd_opts;
 static GKeyFile *main_conf;
-static char *main_conf_file_path;
+static char main_conf_file_path[PATH_MAX];
 
 static const char *supported_options[] = {
 	"Name",
@@ -77,12 +77,14 @@ static const char *supported_options[] = {
 	"NameResolving",
 	"DebugKeys",
 	"ControllerMode",
+	"MaxControllers"
 	"MultiProfile",
 	"FastConnectable",
 	"Privacy",
 	"JustWorksRepairing",
 	"TemporaryTimeout",
 	"Experimental",
+	"KernelExperimental",
 	"RemoteNameRequestRetryDelay",
 	NULL
 };
@@ -174,18 +176,41 @@ GKeyFile *btd_get_main_conf(void)
 	return main_conf;
 }
 
-static GKeyFile *load_config(const char *file)
+static GKeyFile *load_config(const char *name)
 {
 	GError *err = NULL;
 	GKeyFile *keyfile;
+	int len;
+
+	if (name)
+		snprintf(main_conf_file_path, PATH_MAX, "%s", name);
+	else {
+		const char *configdir = getenv("CONFIGURATION_DIRECTORY");
+
+		/* Check if running as service */
+		if (configdir) {
+			/* Check if there multiple paths given */
+			if (strstr(configdir, ":"))
+				len = strstr(configdir, ":") - configdir;
+			else
+				len = strlen(configdir);
+		} else {
+			configdir = CONFIGDIR;
+			len = strlen(configdir);
+		}
+
+		snprintf(main_conf_file_path, PATH_MAX, "%*s/main.conf", len,
+						 configdir);
+	}
 
 	keyfile = g_key_file_new();
 
 	g_key_file_set_list_separator(keyfile, ',');
 
-	if (!g_key_file_load_from_file(keyfile, file, 0, &err)) {
+	if (!g_key_file_load_from_file(keyfile, main_conf_file_path, 0, &err)) {
 		if (!g_error_matches(err, G_FILE_ERROR, G_FILE_ERROR_NOENT))
-			error("Parsing %s failed: %s", file, err->message);
+			error("Parsing %s failed: %s", main_conf_file_path,
+				err->message);
 		g_error_free(err);
 		g_key_file_free(keyfile);
 		return NULL;
@@ -353,13 +378,22 @@ static void parse_mode_config(GKeyFile *config, const char *group,
 
 	for (i = 0; i < params_len; ++i) {
 		GError *err = NULL;
-		int val = g_key_file_get_integer(config, group,
-						params[i].val_name, &err);
+		char *str;
+
+		str = g_key_file_get_string(config, group, params[i].val_name,
+									&err);
 		if (err) {
 			DBG("%s", err->message);
 			g_clear_error(&err);
 		} else {
-			info("%s=%d", params[i].val_name, val);
+			char *endptr = NULL;
+			int val;
+
+			val = strtol(str, &endptr, 0);
+			if (!endptr || *endptr != '\0')
+				continue;
+
+			info("%s=%s(%d)", params[i].val_name, str, val);
 
 			val = MAX(val, params[i].min);
 			val = MIN(val, params[i].max);
@@ -559,12 +593,12 @@ static bool match_experimental(const void *data, const void *match_data)
 	return !strcasecmp(value, uuid);
 }
 
-bool btd_experimental_enabled(const char *uuid)
+bool btd_kernel_experimental_enabled(const char *uuid)
 {
-	if (!btd_opts.experimental)
+	if (!btd_opts.kernel)
 		false;
 
-	return queue_find(btd_opts.experimental, match_experimental, uuid);
+	return queue_find(btd_opts.kernel, match_experimental, uuid);
 }
 
 static const char *valid_uuids[] = {
@@ -573,27 +607,28 @@ static const char *valid_uuids[] = {
 	"15c0a148-c273-11ea-b3de-0242ac130004",
 	"330859bc-7506-492d-9370-9a6f0614037f",
 	"a6695ace-ee7f-4fb9-881a-5fac66c629af",
+	"6fbaf188-05e0-496a-9885-d6ddfdb4e03e",
 	"*"
 };
 
-static void btd_parse_experimental(char **list)
+static void btd_parse_kernel_experimental(char **list)
 {
 	int i;
 
-	if (btd_opts.experimental) {
-		warn("Unable to parse Experimental: list already set");
+	if (btd_opts.kernel) {
+		warn("Unable to parse KernelExperimental: list already set");
 		return;
 	}
 
-	btd_opts.experimental = queue_new();
+	btd_opts.kernel = queue_new();
 
 	for (i = 0; list[i]; i++) {
 		size_t j;
 		const char *uuid = list[i];
 
 		if (!strcasecmp("false", uuid) || !strcasecmp("off", uuid)) {
-			queue_destroy(btd_opts.experimental, free);
-			btd_opts.experimental = NULL;
+			queue_destroy(btd_opts.kernel, free);
+			btd_opts.kernel = NULL;
 		}
 
 		if (!strcasecmp("true", uuid) || !strcasecmp("on", uuid))
@@ -606,13 +641,13 @@ static void btd_parse_experimental(char **list)
 
 		/* Ignored if UUID is considered invalid */
 		if (j == ARRAY_SIZE(valid_uuids)) {
-			warn("Invalid Experimental UUID: %s", uuid);
+			warn("Invalid KernelExperimental UUID: %s", uuid);
 			continue;
 		}
 
 		DBG("%s", uuid);
 
-		queue_push_tail(btd_opts.experimental, strdup(uuid));
+		queue_push_tail(btd_opts.kernel, strdup(uuid));
 	}
 }
 
@@ -665,6 +700,7 @@ static void parse_config(GKeyFile *config)
 		DBG("%s", err->message);
 		g_clear_error(&err);
 		btd_opts.privacy = 0x00;
+		btd_opts.device_privacy = true;
 	} else {
 		DBG("privacy=%s", str);
 
@@ -688,6 +724,7 @@ static void parse_config(GKeyFile *config)
 			btd_opts.device_privacy = true;
 		} else if (!strcmp(str, "off")) {
 			btd_opts.privacy = 0x00;
+			btd_opts.device_privacy = true;
 		} else {
 			DBG("Invalid privacy option: %s", str);
 			btd_opts.privacy = 0x00;
@@ -779,6 +816,14 @@ static void parse_config(GKeyFile *config)
 		g_free(str);
 	}
 
+	val = g_key_file_get_integer(config, "General", "MaxControllers", &err);
+	if (err) {
+		g_clear_error(&err);
+	} else {
+		DBG("MaxControllers=%d", val);
+		btd_opts.max_adapters = val;
+	}
+
 	str = g_key_file_get_string(config, "General", "MultiProfile", &err);
 	if (err) {
 		g_clear_error(&err);
@@ -809,12 +854,20 @@ static void parse_config(GKeyFile *config)
 	else
 		btd_opts.refresh_discovery = boolean;
 
-	strlist = g_key_file_get_string_list(config, "General", "Experimental",
+	boolean = g_key_file_get_boolean(config, "General", "Experimental",
+						&err);
+	if (err)
+		g_clear_error(&err);
+	else
+		btd_opts.experimental = boolean;
+
+	strlist = g_key_file_get_string_list(config, "General",
+						"KernelExperimental",
 						NULL, &err);
 	if (err)
 		g_clear_error(&err);
 	else {
-		btd_parse_experimental(strlist);
+		btd_parse_kernel_experimental(strlist);
 		g_strfreev(strlist);
 	}
 
@@ -1092,19 +1145,19 @@ static gboolean parse_debug(const char *key, const char *value,
 	return TRUE;
 }
 
-static gboolean parse_experimental(const char *key, const char *value,
+static gboolean parse_kernel_experimental(const char *key, const char *value,
 					gpointer user_data, GError **error)
 {
 	char **strlist;
 
 	if (value) {
 		strlist = g_strsplit(value, ",", -1);
-		btd_parse_experimental(strlist);
+		btd_parse_kernel_experimental(strlist);
 		g_strfreev(strlist);
 	} else {
-		if (!btd_opts.experimental)
-			btd_opts.experimental = queue_new();
-		queue_push_head(btd_opts.experimental, strdup("*"));
+		if (!btd_opts.kernel)
+			btd_opts.kernel = queue_new();
+		queue_push_head(btd_opts.kernel, strdup("*"));
 	}
 
 	return TRUE;
@@ -1122,9 +1175,11 @@ static GOptionEntry options[] = {
 			"Specify an explicit path to the config file", "FILE"},
 	{ "compat", 'C', 0, G_OPTION_ARG_NONE, &option_compat,
 				"Provide deprecated command line interfaces" },
-	{ "experimental", 'E', G_OPTION_FLAG_OPTIONAL_ARG,
-				G_OPTION_ARG_CALLBACK, parse_experimental,
-				"Enable experimental features/interfaces" },
+	{ "experimental", 'E', 0, G_OPTION_ARG_NONE, &btd_opts.experimental,
+				"Enable experimental D-Bus interfaces" },
+	{ "kernel", 'K', G_OPTION_FLAG_OPTIONAL_ARG, G_OPTION_ARG_CALLBACK,
+				parse_kernel_experimental,
+				"Enable kernel experimental features" },
 	{ "nodetach", 'n', G_OPTION_FLAG_REVERSE,
 				G_OPTION_ARG_NONE, &option_detach,
 				"Run with logging in foreground" },
@@ -1176,12 +1231,7 @@ int main(int argc, char *argv[])
 
 	mainloop_sd_notify("STATUS=Starting up");
 
-	if (option_configfile)
-		main_conf_file_path = option_configfile;
-	else
-		main_conf_file_path = CONFIGDIR "/main.conf";
-
-	main_conf = load_config(main_conf_file_path);
+	main_conf = load_config(option_configfile);
 
 	parse_config(main_conf);
 
@@ -1253,8 +1303,8 @@ int main(int argc, char *argv[])
 	if (btd_opts.mode != BT_MODE_LE)
 		stop_sdp_server();
 
-	if (btd_opts.experimental)
-		queue_destroy(btd_opts.experimental, free);
+	if (btd_opts.kernel)
+		queue_destroy(btd_opts.kernel, free);
 
 	if (main_conf)
 		g_key_file_free(main_conf);

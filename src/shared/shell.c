@@ -139,13 +139,21 @@ static void cmd_help(int argc, char *argv[])
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static const struct bt_shell_menu *find_menu(const char *name, size_t len)
+static const struct bt_shell_menu *find_menu(const char *name, size_t len,
+							int *index)
 {
 	const struct queue_entry *entry;
+	int i;
 
-	for (entry = queue_get_entries(data.submenus); entry;
-						entry = entry->next) {
+	for (i = 0, entry = queue_get_entries(data.submenus); entry;
+						entry = entry->next, i++) {
 		struct bt_shell_menu *menu = entry->data;
+
+		if (index) {
+			if (i < *index)
+				continue;
+			(*index)++;
+		}
 
 		if (!strncmp(menu->name, name, len))
 			return menu;
@@ -188,7 +196,7 @@ static void cmd_menu(int argc, char *argv[])
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 	}
 
-	menu = find_menu(argv[1], strlen(argv[1]));
+	menu = find_menu(argv[1], strlen(argv[1]), NULL);
 	if (!menu) {
 		bt_shell_printf("Unable find menu with name: %s\n", argv[1]);
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
@@ -485,7 +493,7 @@ static int submenu_exec(int argc, char *argv[])
 	len = name - argv[0];
 	name[0] = '\0';
 
-	submenu = find_menu(argv[0], strlen(argv[0]));
+	submenu = find_menu(argv[0], strlen(argv[0]), NULL);
 	if (!submenu)
 		return -ENOENT;
 
@@ -678,7 +686,6 @@ int bt_shell_release_prompt(const char *input)
 
 static void rl_handler(char *input)
 {
-	wordexp_t w;
 	HIST_ENTRY *last;
 
 	if (!input) {
@@ -703,16 +710,8 @@ static void rl_handler(char *input)
 	if (data.monitor)
 		bt_log_printf(0xffff, data.name, LOG_INFO, "%s", input);
 
-	if (wordexp(input, &w, WRDE_NOCMD))
-		goto done;
+	bt_shell_exec(input);
 
-	if (w.we_wordc == 0) {
-		wordfree(&w);
-		goto done;
-	}
-
-	shell_exec(w.we_wordc, w.we_wordv);
-	wordfree(&w);
 done:
 	free(input);
 }
@@ -744,7 +743,7 @@ static char *find_cmd(const char *text,
 static char *cmd_generator(const char *text, int state)
 {
 	static int index;
-	static bool default_menu_enabled, submenu_enabled;
+	static bool default_menu_enabled, menu_enabled, submenu_enabled;
 	static const struct bt_shell_menu *menu;
 	char *cmd;
 
@@ -763,7 +762,20 @@ static char *cmd_generator(const char *text, int state)
 			index = 0;
 			menu = data.menu;
 			default_menu_enabled = false;
+
+			if (data.main == data.menu)
+				menu_enabled = true;
 		}
+	}
+
+	if (menu_enabled) {
+		menu = find_menu(text, strlen(text), &index);
+		if (menu)
+			return strdup(menu->name);
+
+		index = 0;
+		menu = data.menu;
+		menu_enabled = false;
 	}
 
 	if (!submenu_enabled) {
@@ -775,7 +787,7 @@ static char *cmd_generator(const char *text, int state)
 		if (!cmd)
 			return NULL;
 
-		menu = find_menu(text, cmd - text);
+		menu = find_menu(text, cmd - text, NULL);
 		if (!menu)
 			return NULL;
 
@@ -899,6 +911,26 @@ static char **menu_completion(const struct bt_shell_menu_entry *entry,
 	return matches;
 }
 
+static char **submenu_completion(const char *text, int argc, char *input_cmd)
+{
+	const struct bt_shell_menu *menu;
+	char *cmd;
+
+	if (data.main != data.menu)
+		return NULL;
+
+	cmd = strrchr(input_cmd, '.');
+	if (!cmd)
+		return NULL;
+
+	menu = find_menu(input_cmd, cmd - input_cmd, NULL);
+	if (!menu)
+		return NULL;
+
+	return menu_completion(menu->entries, text, argc,
+				input_cmd + strlen(menu->name) + 1);
+}
+
 static char **shell_completion(const char *text, int start, int end)
 {
 	char **matches = NULL;
@@ -916,10 +948,14 @@ static char **shell_completion(const char *text, int start, int end)
 
 		matches = menu_completion(default_menu, text, w.we_wordc,
 							w.we_wordv[0]);
-		if (!matches)
+		if (!matches) {
 			matches = menu_completion(data.menu->entries, text,
 							w.we_wordc,
 							w.we_wordv[0]);
+			if (!matches)
+				matches = submenu_completion(text, w.we_wordc,
+								w.we_wordv[0]);
+		}
 
 		wordfree(&w);
 	} else {
@@ -1178,6 +1214,29 @@ int bt_shell_run(void)
 	return status;
 }
 
+int bt_shell_exec(const char *input)
+{
+	wordexp_t w;
+	int err;
+
+	if (!input)
+		return 0;
+
+	if (wordexp(input, &w, WRDE_NOCMD))
+		return -ENOEXEC;
+
+	if (w.we_wordc == 0) {
+		wordfree(&w);
+		return -ENOEXEC;
+	}
+
+	err = shell_exec(w.we_wordc, w.we_wordv);
+
+	wordfree(&w);
+
+	return err;
+}
+
 void bt_shell_cleanup(void)
 {
 	bt_shell_release_prompt("");
@@ -1233,6 +1292,9 @@ bool bt_shell_add_submenu(const struct bt_shell_menu *menu)
 {
 	if (!menu)
 		return false;
+
+	if (!data.main)
+		return bt_shell_set_menu(menu);
 
 	if (!data.submenus)
 		data.submenus = queue_new();
