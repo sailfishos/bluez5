@@ -4,6 +4,7 @@
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2012-2014  Intel Corporation. All rights reserved.
+ *  Copyright 2023 NXP
  *
  *
  */
@@ -26,6 +27,13 @@
 
 #ifdef HAVE_SYS_RANDOM_H
 #include <sys/random.h>
+#endif
+
+#include <lib/bluetooth.h>
+
+/* define MAX_INPUT for musl */
+#ifndef MAX_INPUT
+#define MAX_INPUT _POSIX_MAX_INPUT
 #endif
 
 #include "src/shared/util.h"
@@ -65,7 +73,7 @@ void *util_memdup(const void *src, size_t size)
 void util_debug_va(util_debug_func_t function, void *user_data,
 				const char *format, va_list va)
 {
-	char str[78];
+	char str[MAX_INPUT];
 
 	if (!function || !format)
 		return;
@@ -187,6 +195,335 @@ void util_clear_uid(uint64_t *bitmap, uint8_t id)
 		return;
 
 	*bitmap &= ~(((uint64_t)1) << (id - 1));
+}
+
+struct iovec *util_iov_dup(const struct iovec *iov, size_t cnt)
+{
+	struct iovec *dup;
+	size_t i;
+
+	if (!iov)
+		return NULL;
+
+	dup = new0(struct iovec, cnt);
+
+	for (i = 0; i < cnt; i++)
+		util_iov_memcpy(&dup[i], iov[i].iov_base, iov[i].iov_len);
+
+	return dup;
+}
+
+int util_iov_memcmp(const struct iovec *iov1, const struct iovec *iov2)
+{
+	if (!iov1)
+		return 1;
+
+	if (!iov2)
+		return -1;
+
+	if (iov1->iov_len != iov2->iov_len)
+		return iov1->iov_len - iov2->iov_len;
+
+	return memcmp(iov1->iov_base, iov2->iov_base, iov1->iov_len);
+}
+
+void util_iov_memcpy(struct iovec *iov, void *src, size_t len)
+{
+	if (!iov || !src || !len)
+		return;
+
+	iov->iov_base = realloc(iov->iov_base, len);
+	iov->iov_len = len;
+	memcpy(iov->iov_base, src, len);
+}
+
+void util_iov_free(struct iovec *iov, size_t cnt)
+{
+	size_t i;
+
+	if (!iov)
+		return;
+
+	for (i = 0; i < cnt; i++)
+		free(iov[i].iov_base);
+
+	free(iov);
+}
+
+void *util_iov_push(struct iovec *iov, size_t len)
+{
+	void *data;
+
+	if (!iov)
+		return NULL;
+
+	data = iov->iov_base + iov->iov_len;
+	iov->iov_len += len;
+
+	return data;
+}
+
+void *util_iov_push_mem(struct iovec *iov, size_t len, const void *data)
+{
+	void *p;
+
+	p = util_iov_push(iov, len);
+	if (!p)
+		return NULL;
+
+	if (data)
+		memcpy(p, data, len);
+
+	return p;
+}
+
+void *util_iov_push_le64(struct iovec *iov, uint64_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(val));
+	if (!p)
+		return NULL;
+
+	put_le64(val, p);
+
+	return p;
+}
+
+void *util_iov_push_be64(struct iovec *iov, uint64_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(val));
+	if (!p)
+		return NULL;
+
+	put_be64(val, p);
+
+	return p;
+}
+
+void *util_iov_push_le32(struct iovec *iov, uint32_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(val));
+	if (!p)
+		return NULL;
+
+	put_le32(val, p);
+
+	return p;
+}
+
+void *util_iov_push_be32(struct iovec *iov, uint32_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(val));
+	if (!p)
+		return NULL;
+
+	put_be32(val, p);
+
+	return p;
+}
+
+void *util_iov_push_le24(struct iovec *iov, uint32_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(uint24_t));
+	if (!p)
+		return NULL;
+
+	put_le24(val, p);
+
+	return p;
+}
+
+void *util_iov_push_be24(struct iovec *iov, uint32_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(uint24_t));
+	if (!p)
+		return NULL;
+
+	put_le24(val, p);
+
+	return p;
+}
+
+void *util_iov_push_le16(struct iovec *iov, uint16_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(val));
+	if (!p)
+		return NULL;
+
+	put_le16(val, p);
+
+	return p;
+}
+
+void *util_iov_push_be16(struct iovec *iov, uint16_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(val));
+	if (!p)
+		return NULL;
+
+	put_be16(val, p);
+
+	return p;
+}
+
+void *util_iov_push_u8(struct iovec *iov, uint8_t val)
+{
+	void *p;
+
+	p = util_iov_push(iov, sizeof(val));
+	if (!p)
+		return NULL;
+
+	put_u8(val, p);
+
+	return p;
+}
+
+void *util_iov_pull(struct iovec *iov, size_t len)
+{
+	if (!iov)
+		return NULL;
+
+	if (iov->iov_len < len)
+		return NULL;
+
+	iov->iov_base += len;
+	iov->iov_len -= len;
+
+	return iov->iov_base;
+}
+
+void *util_iov_pull_mem(struct iovec *iov, size_t len)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, len))
+		return data;
+
+	return NULL;
+}
+
+void *util_iov_pull_le64(struct iovec *iov, uint64_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(*val))) {
+		*val = get_le64(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_be64(struct iovec *iov, uint64_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(*val))) {
+		*val = get_be64(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_le32(struct iovec *iov, uint32_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(*val))) {
+		*val = get_le32(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_be32(struct iovec *iov, uint32_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(*val))) {
+		*val = get_be32(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_le24(struct iovec *iov, uint32_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(uint24_t))) {
+		*val = get_le24(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_be24(struct iovec *iov, uint32_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(uint24_t))) {
+		*val = get_be24(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_le16(struct iovec *iov, uint16_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(*val))) {
+		*val = get_le16(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_be16(struct iovec *iov, uint16_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(*val))) {
+		*val = get_be16(data);
+		return data;
+	}
+
+	return NULL;
+}
+
+void *util_iov_pull_u8(struct iovec *iov, uint8_t *val)
+{
+	void *data = iov->iov_base;
+
+	if (util_iov_pull(iov, sizeof(*val))) {
+		*val = get_u8(data);
+		return data;
+	}
+
+	return NULL;
 }
 
 static const struct {
@@ -338,13 +675,17 @@ static const struct {
 	{ 0x1849, "Generic Media Control"			},
 	{ 0x184b, "Telephony Bearer"				},
 	{ 0x184c, "Generic Telephony Bearer"			},
-	{ 0x184c, "Microphone Control"				},
+	{ 0x184d, "Microphone Control"				},
 	{ 0x184e, "Audio Stream Control"			},
 	{ 0x184f, "Broadcast Audio Scan"			},
 	{ 0x1850, "Published Audio Capabilities"		},
 	{ 0x1851, "Basic Audio Announcement"			},
 	{ 0x1852, "Broadcast Audio Announcement"		},
-	/* 0x1853 to 0x27ff undefined */
+	{ 0x1853, "Common Audio"				},
+	{ 0x1854, "Hearing Aid"					},
+	{ 0x1855, "Telephony and Media Audio"			},
+	{ 0x1856, "Public Broadcast Announcement"		},
+	/* 0x1857 to 0x27ff undefined */
 	{ 0x2800, "Primary Service"				},
 	{ 0x2801, "Secondary Service"				},
 	{ 0x2802, "Include"					},
@@ -578,6 +919,7 @@ static const struct {
 	{ 0x2b29, "Client Supported Features"			},
 	{ 0x2b2A, "Database Hash"				},
 	{ 0x2b3a, "Server Supported Features"			},
+	{ 0x2b51, "Telephony and Media Audio Profile Role"	},
 	{ 0x2b77, "Audio Input State"				},
 	{ 0x2b78, "Gain Settings Attribute"			},
 	{ 0x2b79, "Audio Input Type"				},
@@ -592,6 +934,9 @@ static const struct {
 	{ 0x2b82, "Volume Offset Control Point"			},
 	{ 0x2b83, "Audio Output Description"			},
 	{ 0x2b84, "Set Identity Resolving Key"			},
+	{ 0x2b85, "Coordinated Set Size"			},
+	{ 0x2b86, "Set Member Lock"				},
+	{ 0x2b87, "Set Member Rank"				},
 	{ 0x2b93, "Media Player Name"				},
 	{ 0x2b94, "Media Player Icon Object ID"			},
 	{ 0x2b95, "Media Player Icon URL"			},
@@ -645,6 +990,9 @@ static const struct {
 	{ 0x2bcc, "Source Audio Locations"			},
 	{ 0x2bcd, "Available Audio Contexts"			},
 	{ 0x2bce, "Supported Audio Contexts"			},
+	{ 0x2bda, "Hearing Aid Features"			},
+	{ 0x2bdb, "Hearing Aid Preset Control Point"		},
+	{ 0x2bdc, "Active Preset Index"				},
 	/* vendor defined */
 	{ 0xfeff, "GN Netcom"					},
 	{ 0xfefe, "GN ReSound A/S"				},

@@ -22,6 +22,7 @@
 #include "mesh/net.h"
 #include "mesh/prov.h"
 #include "mesh/provision.h"
+#include "mesh/remprv.h"
 #include "mesh/pb-adv.h"
 #include "mesh/mesh.h"
 #include "mesh/agent.h"
@@ -70,6 +71,7 @@ struct mesh_prov_acceptor {
 	uint8_t material;
 	uint8_t expected;
 	int8_t previous;
+	bool failed;
 	struct conf_input conf_inputs;
 	uint8_t calc_key[16];
 	uint8_t salt[16];
@@ -166,9 +168,6 @@ static void acp_prov_open(void *user_data, prov_trans_tx_t trans_tx,
 	/* Only one provisioning session may be open at a time */
 	if (prov->trans_tx && prov->trans_tx != trans_tx &&
 					prov->transport != transport)
-		return;
-
-	if (transport != PB_ADV)
 		return;
 
 	prov->trans_tx = trans_tx;
@@ -383,9 +382,51 @@ static void send_rand(struct mesh_prov_acceptor *prov)
 	prov_send(prov, &msg, sizeof(msg));
 }
 
-static void acp_prov_rx(void *user_data, const uint8_t *data, uint16_t len)
+static bool prov_start_check(struct prov_start *start,
+						struct mesh_net_prov_caps *caps)
+{
+	if (start->algorithm || start->pub_key > 1 || start->auth_method > 3)
+		return false;
+
+	if (start->pub_key && !caps->pub_type)
+		return false;
+
+	switch (start->auth_method) {
+	case 0: /* No OOB */
+		if (start->auth_action != 0 || start->auth_size != 0)
+			return false;
+
+		break;
+
+	case 1: /* Static OOB */
+		if (!caps->static_type || start->auth_action != 0 ||
+							start->auth_size != 0)
+			return false;
+
+		break;
+
+	case 2: /* Output OOB */
+		if (!(caps->output_action & (1 << start->auth_action)) ||
+							start->auth_size == 0)
+			return false;
+
+		break;
+
+	case 3: /* Input OOB */
+		if (!(caps->input_action & (1 << start->auth_action)) ||
+							start->auth_size == 0)
+			return false;
+
+		break;
+	}
+
+	return true;
+}
+
+static void acp_prov_rx(void *user_data, const void *dptr, uint16_t len)
 {
 	struct mesh_prov_acceptor *rx_prov = user_data;
+	const uint8_t *data = dptr;
 	struct mesh_prov_node_info *info;
 	struct prov_fail_msg fail;
 	uint8_t type = *data++;
@@ -399,17 +440,23 @@ static void acp_prov_rx(void *user_data, const uint8_t *data, uint16_t len)
 	l_debug("Provisioning packet received type: %2.2x (%u octets)",
 								type, len);
 
+	if (type >= L_ARRAY_SIZE(expected_pdu_size)) {
+		l_error("Unknown PDU type: %2.2x", type);
+		fail.reason = PROV_ERR_INVALID_PDU;
+		goto failure;
+	}
+
 	if (type == prov->previous) {
 		l_error("Ignore repeated %2.2x packet", type);
 		return;
-	} else if (type > prov->expected || type < prov->previous) {
+	} else if (prov->failed || type > prov->expected ||
+							type < prov->previous) {
 		l_error("Expected %2.2x, Got:%2.2x", prov->expected, type);
 		fail.reason = PROV_ERR_UNEXPECTED_PDU;
 		goto failure;
 	}
 
-	if (type >= L_ARRAY_SIZE(expected_pdu_size) ||
-					len != expected_pdu_size[type]) {
+	if (len != expected_pdu_size[type]) {
 		l_error("Expected PDU size %d, Got %d (type: %2.2x)",
 			len, expected_pdu_size[type], type);
 		fail.reason = PROV_ERR_INVALID_FORMAT;
@@ -426,22 +473,16 @@ static void acp_prov_rx(void *user_data, const uint8_t *data, uint16_t len)
 		memcpy(&prov->conf_inputs.start, data,
 				sizeof(prov->conf_inputs.start));
 
-		if (prov->conf_inputs.start.algorithm ||
-				prov->conf_inputs.start.pub_key > 1 ||
-				prov->conf_inputs.start.auth_method > 3) {
+		if (!prov_start_check(&prov->conf_inputs.start,
+						&prov->conf_inputs.caps)) {
 			fail.reason = PROV_ERR_INVALID_FORMAT;
 			goto failure;
 		}
 
 		if (prov->conf_inputs.start.pub_key) {
-			if (prov->conf_inputs.caps.pub_type) {
-				/* Prompt Agent for Private Key of OOB */
-				mesh_agent_request_private_key(prov->agent,
-							priv_key_cb, prov);
-			} else {
-				fail.reason = PROV_ERR_INVALID_PDU;
-				goto failure;
-			}
+			/* Prompt Agent for Private Key of OOB */
+			mesh_agent_request_private_key(prov->agent,
+						priv_key_cb, prov);
 		} else {
 			/* Ephemeral Public Key requested */
 			ecc_make_key(prov->conf_inputs.dev_pub_key,
@@ -612,14 +653,19 @@ static void acp_prov_rx(void *user_data, const uint8_t *data, uint16_t len)
 		info->flags = prov->rand_auth_workspace[18];
 		info->iv_index = l_get_be32(prov->rand_auth_workspace + 19);
 		info->unicast = l_get_be16(prov->rand_auth_workspace + 23);
+		info->num_ele = prov->conf_inputs.caps.num_ele;
+
+		/* Send prov complete */
+		prov->rand_auth_workspace[0] = PROV_COMPLETE;
+		prov->trans_tx(prov->trans_data,
+				prov->rand_auth_workspace, 1);
 
 		result = prov->cmplt(prov->caller_data, PROV_ERR_SUCCESS, info);
 		prov->cmplt = NULL;
 		l_free(info);
 
 		if (result) {
-			prov->rand_auth_workspace[0] = PROV_COMPLETE;
-			prov_send(prov, prov->rand_auth_workspace, 1);
+			l_debug("PROV_COMPLETE");
 			goto cleanup;
 		} else {
 			fail.reason = PROV_ERR_UNEXPECTED_ERR;
@@ -643,6 +689,8 @@ static void acp_prov_rx(void *user_data, const uint8_t *data, uint16_t len)
 failure:
 	fail.opcode = PROV_FAILED;
 	prov_send(prov, &fail, sizeof(fail));
+	prov->failed = true;
+	prov->previous = -1;
 	if (prov->cmplt)
 		prov->cmplt(prov->caller_data, fail.reason, NULL);
 	prov->cmplt = NULL;
@@ -677,7 +725,7 @@ static void acp_prov_ack(void *user_data, uint8_t msg_num)
 
 
 /* This starts unprovisioned device beacon */
-bool acceptor_start(uint8_t num_ele, uint8_t uuid[16],
+bool acceptor_start(uint8_t num_ele, uint8_t *uuid,
 		uint16_t algorithms, uint32_t timeout,
 		struct mesh_agent *agent,
 		mesh_prov_acceptor_complete_func_t complete_cb,
@@ -689,8 +737,10 @@ bool acceptor_start(uint8_t num_ele, uint8_t uuid[16],
 	uint8_t len = sizeof(beacon) - sizeof(uint32_t);
 	bool result;
 
-	/* Invoked from Join() method in mesh-api.txt, to join a
-	 * remote mesh network.
+	/*
+	 * Invoked from Join() method in mesh-api.txt, to join a
+	 * remote mesh network. May also be invoked with a NULL
+	 * uuid to perform a Device Key Refresh procedure.
 	 */
 
 	if (prov)
@@ -702,42 +752,56 @@ bool acceptor_start(uint8_t num_ele, uint8_t uuid[16],
 	prov->cmplt = complete_cb;
 	prov->ob = l_queue_new();
 	prov->previous = -1;
+	prov->failed = false;
 	prov->out_opcode = PROV_NONE;
 	prov->caller_data = caller_data;
 
 	caps = mesh_agent_get_caps(agent);
 
-	/* TODO: Should we sanity check values here or elsewhere? */
 	prov->conf_inputs.caps.num_ele = num_ele;
-	prov->conf_inputs.caps.pub_type = caps->pub_type;
-	prov->conf_inputs.caps.static_type = caps->static_type;
-	prov->conf_inputs.caps.output_size = caps->output_size;
-	prov->conf_inputs.caps.input_size = caps->input_size;
-
-	/* Store UINT16 values in Over-the-Air order, in packed structure
-	 * for crypto inputs
-	 */
 	l_put_be16(algorithms, &prov->conf_inputs.caps.algorithms);
-	l_put_be16(caps->output_action, &prov->conf_inputs.caps.output_action);
-	l_put_be16(caps->input_action, &prov->conf_inputs.caps.input_action);
 
-	/* Compose Unprovisioned Beacon */
-	memcpy(beacon + 2, uuid, 16);
-	l_put_be16(caps->oob_info, beacon + 18);
-	if (caps->oob_info & OOB_INFO_URI_HASH){
-		l_put_be32(caps->uri_hash, beacon + 20);
-		len += sizeof(uint32_t);
+	if (caps) {
+		/* TODO: Should we sanity check values here or elsewhere? */
+		prov->conf_inputs.caps.pub_type = caps->pub_type;
+		prov->conf_inputs.caps.static_type = caps->static_type;
+		prov->conf_inputs.caps.output_size = caps->output_size;
+		prov->conf_inputs.caps.input_size = caps->input_size;
+
+		/* Store UINT16 values in Over-the-Air order, in packed
+		 * structure for crypto inputs
+		 */
+		l_put_be16(caps->output_action,
+					&prov->conf_inputs.caps.output_action);
+		l_put_be16(caps->input_action,
+					&prov->conf_inputs.caps.input_action);
+
+		/* Populate Caps fields of beacon */
+		l_put_be16(caps->oob_info, beacon + 18);
+		if (caps->oob_info & OOB_INFO_URI_HASH) {
+			l_put_be32(caps->uri_hash, beacon + 20);
+			len += sizeof(uint32_t);
+		}
 	}
 
-	/* Infinitely Beacon until Canceled, or Provisioning Starts */
-	result = mesh_send_pkt(0, 500, beacon, len);
+	if (uuid) {
+		/* Compose Unprovisioned Beacon */
+		memcpy(beacon + 2, uuid, 16);
 
-	if (!result)
-		goto error_fail;
+		/* Infinitely Beacon until Canceled, or Provisioning Starts */
+		result = mesh_send_pkt(0, 500, beacon, len);
 
-	/* Always register for PB-ADV */
-	result = pb_adv_reg(false, acp_prov_open, acp_prov_close, acp_prov_rx,
-						acp_prov_ack, uuid, prov);
+		if (!result)
+			goto error_fail;
+
+		/* Always register for PB-ADV */
+		result = pb_adv_reg(false, acp_prov_open, acp_prov_close,
+					acp_prov_rx, acp_prov_ack, uuid, prov);
+	} else {
+		/* Run Device Key Refresh Procedure */
+		result = register_nppi_acceptor(acp_prov_open, acp_prov_close,
+					acp_prov_rx, acp_prov_ack, prov);
+	}
 
 	if (result)
 		return true;

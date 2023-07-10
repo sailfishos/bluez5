@@ -25,13 +25,13 @@
 #include "mesh/dbus.h"
 #include "mesh/mesh-io.h"
 #include "mesh/mesh-io-api.h"
-#include "mesh/mesh-io-generic.h"
+#include "mesh/mesh-io-unit.h"
 
 struct mesh_io_private {
+	struct mesh_io *io;
 	struct l_io *sio;
 	void *user_data;
 	char *unique_name;
-	mesh_io_ready_func_t ready_callback;
 	struct l_timeout *tx_timeout;
 	struct l_queue *rx_regs;
 	struct l_queue *tx_pkts;
@@ -203,14 +203,13 @@ static void unit_up(void *user_data)
 
 	l_debug("Started io-unit");
 
-	if (pvt->ready_callback)
-		pvt->ready_callback(pvt->user_data, true);
+	if (pvt->io && pvt->io->ready)
+		pvt->io->ready(pvt->user_data, true);
 
 	l_timeout_create_ms(1, get_name, pvt, NULL);
 }
 
-static bool unit_init(struct mesh_io *io, void *opt,
-				mesh_io_ready_func_t cb, void *user_data)
+static bool unit_init(struct mesh_io *io, void *opt, void *user_data)
 {
 	struct mesh_io_private *pvt;
 	char *sk_path;
@@ -247,7 +246,7 @@ static bool unit_init(struct mesh_io *io, void *opt,
 	pvt->rx_regs = l_queue_new();
 	pvt->tx_pkts = l_queue_new();
 
-	pvt->ready_callback = cb;
+	pvt->io = io;
 	pvt->user_data = user_data;
 
 	io->pvt = pvt;
@@ -486,39 +485,9 @@ static bool tx_cancel(struct mesh_io *io, const uint8_t *data, uint8_t len)
 	return true;
 }
 
-static bool find_by_filter(const void *a, const void *b)
-{
-	const struct pvt_rx_reg *rx_reg_old = a;
-	const struct pvt_rx_reg *rx_reg = b;
-
-	if (rx_reg_old->len != rx_reg->len)
-		return false;
-
-	return !memcmp(rx_reg_old->filter, rx_reg->filter, rx_reg->len);
-}
-
 static bool recv_register(struct mesh_io *io, const uint8_t *filter,
 			uint8_t len, mesh_io_recv_func_t cb, void *user_data)
 {
-	struct mesh_io_private *pvt = io->pvt;
-	struct pvt_rx_reg *rx_reg, *rx_reg_old;
-
-	if (!cb || !filter || !len)
-		return false;
-
-	rx_reg = l_malloc(sizeof(*rx_reg) + len);
-
-	memcpy(rx_reg->filter, filter, len);
-	rx_reg->len = len;
-	rx_reg->cb = cb;
-	rx_reg->user_data = user_data;
-
-	rx_reg_old = l_queue_remove_if(pvt->rx_regs, find_by_filter, rx_reg);
-
-	l_free(rx_reg_old);
-
-	l_queue_push_head(pvt->rx_regs, rx_reg);
-
 	return true;
 }
 

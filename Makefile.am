@@ -82,7 +82,7 @@ pkginclude_HEADERS += $(lib_headers)
 lib_LTLIBRARIES += lib/libbluetooth.la
 
 lib_libbluetooth_la_SOURCES = $(lib_headers) $(lib_sources)
-lib_libbluetooth_la_LDFLAGS = $(AM_LDFLAGS) -version-info 22:7:19
+lib_libbluetooth_la_LDFLAGS = $(AM_LDFLAGS) -version-info 22:9:19
 lib_libbluetooth_la_DEPENDENCIES = $(local_headers)
 endif
 
@@ -230,7 +230,12 @@ shared_sources = src/shared/io.h src/shared/timeout.h \
 			src/shared/gatt-db.h src/shared/gatt-db.c \
 			src/shared/gap.h src/shared/gap.c \
 			src/shared/log.h src/shared/log.c \
-			src/shared/tty.h
+			src/shared/bap.h src/shared/bap.c src/shared/ascs.h \
+			src/shared/mcs.h src/shared/mcp.h src/shared/mcp.c \
+			src/shared/vcp.c src/shared/vcp.h \
+			src/shared/csip.c src/shared/csip.h \
+			src/shared/bass.h src/shared/bass.c \
+			src/shared/lc3.h src/shared/tty.h
 
 if READLINE
 shared_sources += src/shared/shell.c src/shared/shell.h
@@ -338,7 +343,8 @@ src_bluetoothd_SOURCES = $(builtin_sources) \
 			src/eir.h src/eir.c \
 			src/adv_monitor.h src/adv_monitor.c \
 			src/battery.h src/battery.c \
-			src/settings.h src/settings.c
+			src/settings.h src/settings.c \
+			src/set.h src/set.c
 src_bluetoothd_LDADD = lib/libbluetooth-internal.la \
 			gdbus/libgdbus-internal.la \
 			src/libshared-glib.la \
@@ -422,6 +428,11 @@ EXTRA_DIST += tools/magic.btsnoop
 
 AM_CPPFLAGS += $(DBUS_CFLAGS) $(GLIB_CFLAGS) -I$(builddir)/lib
 
+unit_tests += unit/test-tester
+
+unit_test_tester_SOURCES = unit/test-tester.c
+unit_test_tester_LDADD = src/libshared-glib.la lib/libbluetooth-internal.la \
+								$(GLIB_LIBS)
 
 unit_tests += unit/test-eir
 
@@ -572,9 +583,21 @@ unit_tests += unit/test-gattrib
 
 unit_test_gattrib_SOURCES = unit/test-gattrib.c attrib/gattrib.c \
 					$(btio_sources) src/log.h src/log.c
-unit_test_gattrib_LDADD = lib/libbluetooth-internal.la \
-			src/libshared-glib.la \
-			$(GLIB_LIBS) $(DBUS_LIBS) -ldl -lrt
+unit_test_gattrib_LDADD = src/libshared-glib.la \
+				lib/libbluetooth-internal.la \
+				$(GLIB_LIBS) $(DBUS_LIBS) -ldl -lrt
+
+unit_tests += unit/test-bap
+
+unit_test_bap_SOURCES = unit/test-bap.c
+unit_test_bap_LDADD = src/libshared-glib.la \
+				lib/libbluetooth-internal.la $(GLIB_LIBS)
+
+unit_tests += unit/test-bass
+
+unit_test_bass_SOURCES = unit/test-bass.c
+unit_test_bass_LDADD = src/libshared-glib.la \
+				lib/libbluetooth-internal.la $(GLIB_LIBS)
 
 unit_tests += unit/test-jolla-blacklist
 

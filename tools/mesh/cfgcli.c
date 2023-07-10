@@ -21,6 +21,7 @@
 #include "src/shared/util.h"
 
 #include "mesh/mesh-defs.h"
+#include "mesh/prv-beacon.h"
 #include "mesh/util.h"
 #include "mesh/crypto.h"
 
@@ -73,9 +74,12 @@ static struct cfg_cmd cmds[] = {
 	{ OP_APPKEY_UPDATE, OP_APPKEY_STATUS, "AppKeyUpdate" },
 	{ OP_DEV_COMP_GET, OP_DEV_COMP_STATUS, "DeviceCompositionGet" },
 	{ OP_DEV_COMP_STATUS, NO_RESPONSE, "DeviceCompositionStatus" },
-	{ OP_CONFIG_BEACON_GET, OP_CONFIG_BEACON_STATUS, "BeaconGet" },
-	{ OP_CONFIG_BEACON_SET, OP_CONFIG_BEACON_STATUS, "BeaconSet" },
-	{ OP_CONFIG_BEACON_STATUS, NO_RESPONSE, "BeaconStatus" },
+	{ OP_CONFIG_BEACON_GET, OP_CONFIG_BEACON_STATUS, "SNBGet" },
+	{ OP_CONFIG_BEACON_SET, OP_CONFIG_BEACON_STATUS, "SNBSet" },
+	{ OP_CONFIG_BEACON_STATUS, NO_RESPONSE, "SNBStatus" },
+	{ OP_PRIVATE_BEACON_GET, OP_PRIVATE_BEACON_STATUS, "MPBGet" },
+	{ OP_PRIVATE_BEACON_SET, OP_PRIVATE_BEACON_STATUS, "MPBSet" },
+	{ OP_PRIVATE_BEACON_STATUS, NO_RESPONSE, "MPBStatus" },
 	{ OP_CONFIG_DEFAULT_TTL_GET, OP_CONFIG_DEFAULT_TTL_STATUS,
 							"DefaultTTLGet" },
 	{ OP_CONFIG_DEFAULT_TTL_SET, OP_CONFIG_DEFAULT_TTL_STATUS,
@@ -266,14 +270,21 @@ static uint32_t print_mod_id(uint8_t *data, bool vendor, const char *offset)
 	return mod_id;
 }
 
-static void print_composition(uint8_t *data, uint16_t len)
+static uint8_t print_composition(uint8_t *data, uint16_t len)
 {
 	uint16_t features;
 	int i = 0;
+	bool nppi = false;
 
-	bt_shell_printf("Received composion:\n");
+	bt_shell_printf("Received composition:\n");
 
-	/* skip page -- We only support Page Zero */
+	/* We only support Pages 0 && 128 */
+	if (*data == 128) {
+		bt_shell_printf("Dev Key Refresh (NPPI) required\n");
+		nppi = true;
+	} else if (*data != 0)
+		return 0;
+
 	data++;
 	len--;
 
@@ -328,6 +339,11 @@ static void print_composition(uint8_t *data, uint16_t len)
 
 		i++;
 	}
+
+	if (nppi)
+		return (uint8_t) i;
+	else
+		return 0;
 }
 
 static void print_pub(uint16_t ele_addr, uint32_t mod_id,
@@ -402,6 +418,7 @@ static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 	const struct cfg_cmd *cmd;
 	uint16_t app_idx, net_idx, addr, ele_addr, features;
 	struct mesh_group *grp;
+	uint8_t page128_cnt;
 	struct model_pub pub;
 	int n;
 	struct pending_req *req;
@@ -431,7 +448,19 @@ static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 		if (len < MIN_COMPOSITION_LEN)
 			return true;
 
-		print_composition(data, len);
+		page128_cnt = print_composition(data, len);
+		if (page128_cnt) {
+			if (page128_cnt != remote_ele_cnt(src)) {
+				bt_shell_printf("Ele count was %d, now %d\n",
+					remote_ele_cnt(src), page128_cnt);
+				bt_shell_printf("Reprovision with NPPI-1\n");
+			} else {
+				bt_shell_printf("Models or Features changed\n");
+				bt_shell_printf("Reprovision with NPPI-2\n");
+			}
+
+			break;
+		}
 
 		saved = mesh_db_node_set_composition(src, data, len);
 		if (saved)
@@ -592,10 +621,18 @@ static bool msg_recvd(uint16_t src, uint16_t idx, uint8_t *data,
 		if (len != 1)
 			return true;
 
-		bt_shell_printf("Node %4.4x: Config Beacon Status 0x%02x\n",
+		bt_shell_printf("Node %4.4x: SecBeacon Status 0x%02x\n",
 				src, data[0]);
 
 		saved = mesh_db_node_set_beacon(src, data[0] != 0);
+		break;
+
+	case OP_PRIVATE_BEACON_STATUS:
+		if (len != 2)
+			return true;
+
+		bt_shell_printf("Node %4.4x: PrivBeacon Status 0x%02x 0x%02x\n",
+				src, data[0], data[1]);
 		break;
 
 	case OP_CONFIG_RELAY_STATUS:
@@ -1044,6 +1081,21 @@ static void cmd_default(uint32_t opcode)
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
+
+bool cfgcli_get_comp(uint16_t unicast, uint8_t page)
+{
+	uint16_t n;
+	uint8_t msg[32];
+
+	n = mesh_opcode_set(OP_DEV_COMP_GET, msg);
+
+	msg[n++] = page;
+
+	target = unicast;
+
+	return config_send(msg, n, OP_DEV_COMP_GET);
+}
+
 static void cmd_composition_get(int argc, char *argv[])
 {
 	uint16_t n;
@@ -1051,8 +1103,8 @@ static void cmd_composition_get(int argc, char *argv[])
 
 	n = mesh_opcode_set(OP_DEV_COMP_GET, msg);
 
-	/* By default, use page 0 */
-	msg[n++] = (read_input_parameters(argc, argv) == 1) ? parms[0] : 0;
+	/* By default, use page 128 */
+	msg[n++] = (read_input_parameters(argc, argv) == 1) ? parms[0] : 128;
 
 	if (!config_send(msg, n, OP_DEV_COMP_GET))
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
@@ -1320,7 +1372,7 @@ static void cmd_del_binding(int argc, char *argv[])
 	cmd_bind(OP_MODEL_APP_UNBIND, argc, argv);
 }
 
-static void cmd_beacon_set(int argc, char *argv[])
+static void cmd_snb_set(int argc, char *argv[])
 {
 	uint16_t n;
 	uint8_t msg[2 + 1];
@@ -1342,9 +1394,39 @@ static void cmd_beacon_set(int argc, char *argv[])
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-static void cmd_beacon_get(int argc, char *argv[])
+static void cmd_mpb_set(int argc, char *argv[])
+{
+	uint16_t n;
+	uint8_t msg[2 + 2];
+	uint32_t parm_cnt;
+
+	n = mesh_opcode_set(OP_PRIVATE_BEACON_SET, msg);
+
+	parm_cnt = read_input_parameters(argc, argv);
+	if (parm_cnt != 1  && parm_cnt != 2) {
+		bt_shell_printf("bad arguments\n");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	msg[n++] = parms[0];
+
+	if (parm_cnt == 2)
+		msg[n++] = parms[1];
+
+	if (!config_send(msg, n, OP_PRIVATE_BEACON_SET))
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+
+	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static void cmd_snb_get(int argc, char *argv[])
 {
 	cmd_default(OP_CONFIG_BEACON_GET);
+}
+
+static void cmd_mpb_get(int argc, char *argv[])
+{
+	cmd_default(OP_PRIVATE_BEACON_GET);
 }
 
 static void cmd_ident_set(int argc, char *argv[])
@@ -2052,10 +2134,10 @@ static const struct bt_shell_menu cfg_menu = {
 				"Set node identity state"},
 	{"ident-get", "<net_idx>", cmd_ident_get,
 				"Get node identity state"},
-	{"beacon-set", "<state>", cmd_beacon_set,
-				"Set node identity state"},
-	{"beacon-get", NULL, cmd_beacon_get,
-				"Get node beacon state"},
+	{"snb-set", "<state>", cmd_snb_set, "Set node SNB state"},
+	{"snb-get", NULL, cmd_snb_get, "Get node SNB state"},
+	{"mpb-set", "<state> <period>", cmd_mpb_set, "Set node MPB state"},
+	{"mpb-get", NULL, cmd_mpb_get, "Get node MPB state"},
 	{"relay-set", "<relay> <rexmt count> <rexmt steps>", cmd_relay_set,
 				"Set relay"},
 	{"relay-get", NULL, cmd_relay_get,

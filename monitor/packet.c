@@ -5,6 +5,7 @@
  *
  *  Copyright (C) 2011-2014  Intel Corporation
  *  Copyright (C) 2002-2010  Marcel Holtmann <marcel@holtmann.org>
+ *  Copyright 2023 NXP
  *
  *
  */
@@ -33,18 +34,19 @@
 
 #include "src/shared/util.h"
 #include "src/shared/btsnoop.h"
+#include "src/shared/queue.h"
 #include "display.h"
 #include "bt.h"
 #include "ll.h"
 #include "hwdb.h"
 #include "keys.h"
+#include "packet.h"
 #include "l2cap.h"
 #include "control.h"
 #include "vendor.h"
 #include "msft.h"
 #include "intel.h"
 #include "broadcom.h"
-#include "packet.h"
 
 #define COLOR_CHANNEL_LABEL		COLOR_WHITE
 #define COLOR_FRAME_LABEL		COLOR_WHITE
@@ -65,6 +67,7 @@
 #define COLOR_HCI_EVENT_UNKNOWN		COLOR_WHITE_BG
 #define COLOR_HCI_ACLDATA		COLOR_CYAN
 #define COLOR_HCI_SCODATA		COLOR_YELLOW
+#define COLOR_HCI_ISODATA		COLOR_YELLOW
 
 #define COLOR_UNKNOWN_ERROR		COLOR_WHITE_BG
 #define COLOR_UNKNOWN_FEATURE_BIT	COLOR_WHITE_BG
@@ -200,11 +203,15 @@ static void release_handle(uint16_t handle)
 	int i;
 
 	for (i = 0; i < MAX_CONN; i++) {
-		if (conn_list[i].handle == handle) {
-			if (conn_list[i].destroy)
-				conn_list[i].destroy(conn_list[i].data);
+		struct packet_conn_data *conn = &conn_list[i];
 
-			memset(&conn_list[i], 0, sizeof(conn_list[i]));
+		if (conn->handle == handle) {
+			if (conn->destroy)
+				conn->destroy(conn->data);
+
+			queue_destroy(conn->tx_q, free);
+			queue_destroy(conn->chan_q, free);
+			memset(conn, 0, sizeof(*conn));
 			break;
 		}
 	}
@@ -308,13 +315,33 @@ void packet_set_msft_evt_prefix(const uint8_t *prefix, uint8_t len)
 		memcpy(index_list[index_current].msft_evt_prefix, prefix, len);
 }
 
+static void cred_pid(struct ucred *cred, char *str, size_t len)
+{
+	char *path = alloca(24);
+	char line[128];
+	FILE *fp;
+
+	snprintf(path, 23, "/proc/%u/comm", cred->pid);
+
+	fp = fopen(path, "re");
+	if (fp) {
+		if (fgets(line, sizeof(line), fp)) {
+			line[strcspn(line, "\r\n")] = '\0';
+			snprintf(str, len, "%s[%u]", line, cred->pid);
+		} else
+			snprintf(str, len, "[%u]", cred->pid);
+		fclose(fp);
+	} else
+		snprintf(str, len, "[%u]", cred->pid);
+}
+
 static void print_packet(struct timeval *tv, struct ucred *cred, char ident,
 					uint16_t index, const char *channel,
 					const char *color, const char *label,
 					const char *text, const char *extra)
 {
 	int col = num_columns();
-	char line[256], ts_str[96];
+	char line[256], ts_str[96], pid_str[140];
 	int n, ts_len = 0, ts_pos = 0, len = 0, pos = 0;
 	static size_t last_frame;
 
@@ -384,8 +411,9 @@ static void print_packet(struct timeval *tv, struct ucred *cred, char ident,
 		}
 
 		if (filter_mask & PACKET_FILTER_SHOW_TIME) {
-			n = sprintf(ts_str + ts_pos, " %02d:%02d:%02d.%06lu",
-				tm.tm_hour, tm.tm_min, tm.tm_sec, tv->tv_usec);
+			n = sprintf(ts_str + ts_pos, " %02d:%02d:%02d.%06llu",
+				tm.tm_hour, tm.tm_min, tm.tm_sec,
+				(long long)tv->tv_usec);
 			if (n > 0) {
 				ts_pos += n;
 				ts_len += n;
@@ -393,8 +421,9 @@ static void print_packet(struct timeval *tv, struct ucred *cred, char ident,
 		}
 
 		if (filter_mask & PACKET_FILTER_SHOW_TIME_OFFSET) {
-			n = sprintf(ts_str + ts_pos, " %lu.%06lu",
-					tv->tv_sec - time_offset, tv->tv_usec);
+			n = sprintf(ts_str + ts_pos, " %llu.%06llu",
+				(long long)(tv->tv_sec - time_offset),
+				(long long)tv->tv_usec);
 			if (n > 0) {
 				ts_pos += n;
 				ts_len += n;
@@ -403,18 +432,19 @@ static void print_packet(struct timeval *tv, struct ucred *cred, char ident,
 	}
 
 	if (use_color()) {
-		n = sprintf(ts_str + ts_pos, "%s", COLOR_OFF);
-		if (n > 0)
-			ts_pos += n;
-	}
-
-	if (use_color()) {
+		sprintf(ts_str + ts_pos, "%s", COLOR_OFF);
 		n = sprintf(line + pos, "%s", color);
 		if (n > 0)
 			pos += n;
 	}
 
-	n = sprintf(line + pos, "%c %s", ident, label ? label : "");
+	if (cred && cred->pid) {
+		cred_pid(cred, pid_str, sizeof(pid_str));
+		n = sprintf(line + pos, "%s: %c %s", pid_str, ident,
+						label ? label : "");
+	} else
+		n = sprintf(line + pos, "%c %s", ident, label ? label : "");
+
 	if (n > 0) {
 		pos += n;
 		len += n;
@@ -449,10 +479,8 @@ static void print_packet(struct timeval *tv, struct ucred *cred, char ident,
 
 	if (extra) {
 		n = sprintf(line + pos, " %s", extra);
-		if (n > 0) {
-			pos += n;
+		if (n > 0)
 			len += n;
-		}
 	}
 
 	if (ts_len > 0) {
@@ -2390,6 +2418,12 @@ void packet_print_version(const char *label, uint8_t version,
 	case 0x0a:
 		str = "Bluetooth 5.1";
 		break;
+	case 0x0b:
+		str = "Bluetooth 5.2";
+		break;
+	case 0x0c:
+		str = "Bluetooth 5.3";
+		break;
 	default:
 		str = "Reserved";
 		break;
@@ -2663,6 +2697,13 @@ static const struct bitfield_data features_le[] = {
 	{ 30, "Isochronous Broadcaster"				},
 	{ 31, "Synchronized Receiver"				},
 	{ 32, "Isochronous Channels (Host Support)"		},
+	{ 33, "LE Power Control Request"			},
+	{ 34, "LE Power Control Request"			},
+	{ 35, "LE Path Loss Monitoring"				},
+	{ 36, "Periodic Advertising ADI support"		},
+	{ 37, "Connection Subrating"				},
+	{ 38, "Connection Subrating (Host Support)"		},
+	{ 39, "Channel Classification"				},
 	{ }
 };
 
@@ -3115,6 +3156,7 @@ static void print_fec(uint8_t fec)
 #define BT_EIR_MESH_PROV		0x29
 #define BT_EIR_MESH_DATA		0x2a
 #define BT_EIR_MESH_BEACON		0x2b
+#define BT_EIR_CSIP_RSI			0x2e
 #define BT_EIR_3D_INFO_DATA		0x3d
 #define BT_EIR_MANUFACTURER_DATA	0xff
 
@@ -4007,6 +4049,14 @@ static void print_eir(const uint8_t *eir, uint8_t eir_len, bool le)
 
 		case BT_EIR_MESH_BEACON:
 			print_mesh_beacon(data, data_len);
+			break;
+
+		case BT_EIR_CSIP_RSI:
+			if (data_len < 6)
+				break;
+			print_addr("Resolvable Set Identifier", data, 0xff);
+			print_field("  Hash: 0x%6x", get_le24(data));
+			print_field("  Random: 0x%6x", get_le24(data + 3));
 			break;
 
 		case BT_EIR_MANUFACTURER_DATA:
@@ -6376,6 +6426,20 @@ static void print_list(const void *data, uint8_t size, int num_items,
 		print_hex_field("", data, size);
 }
 
+static void print_vnd_codecs_v2(const void *data, int i)
+{
+	const struct bt_hci_vnd_codec_v2 *codec = data;
+	uint8_t mask;
+
+	packet_print_company("  Company ID", le16_to_cpu(codec->cid));
+	print_field("  Vendor Codec ID: 0x%4.4x", le16_to_cpu(codec->vid));
+	print_field("  Logical Transport Type: 0x%02x", codec->transport);
+	mask = print_bitfield(4, codec->transport, codec_transport_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_SERVICE_CLASS,
+				"  Unknown transport (0x%2.2x)", mask);
+}
+
 static void read_local_codecs_rsp_v2(uint16_t index, const void *data,
 							uint8_t size)
 {
@@ -6409,7 +6473,18 @@ static void read_local_codecs_rsp_v2(uint16_t index, const void *data,
 
 	num_vnd_codecs = rsp->codec[rsp->num_codecs].id;
 
+	size -= 1;
+
 	print_field("Number of vendor codecs: %d", num_vnd_codecs);
+
+	if (size < num_vnd_codecs * sizeof(*rsp->codec)) {
+		print_field("Invalid number of vendor codecs.");
+		return;
+	}
+
+	print_list(&rsp->codec[rsp->num_codecs] + 1, size, num_vnd_codecs,
+			sizeof(struct bt_hci_vnd_codec_v2),
+			print_vnd_codecs_v2);
 }
 
 static void print_path_direction(const char *prefix, uint8_t dir)
@@ -6512,11 +6587,9 @@ static void config_data_path_cmd(uint16_t index, const void *data, uint8_t size)
 
 static void print_usec_interval(const char *prefix, const uint8_t interval[3])
 {
-	uint32_t u24 = 0;
+	uint32_t value = get_le24(interval);
 
-	memcpy(&u24, interval, 3);
-	print_field("%s: %u us (0x%6.6x)", prefix, le32_to_cpu(u24),
-						le32_to_cpu(u24));
+	print_field("%s: %u us (0x%6.6x)", prefix, value, value);
 }
 
 static void read_local_ctrl_delay_rsp(uint16_t index, const void *data,
@@ -7472,7 +7545,6 @@ static void print_le_phys_preference(uint8_t all_phys, uint8_t tx_phys,
 							" (0x%2.2x)", mask);
 
 	print_field("TX PHYs preference: 0x%2.2x", tx_phys);
-	mask = tx_phys;
 
 	mask = print_bitfield(2, tx_phys, le_phys);
 	if (mask)
@@ -7480,7 +7552,6 @@ static void print_le_phys_preference(uint8_t all_phys, uint8_t tx_phys,
 							" (0x%2.2x)", mask);
 
 	print_field("RX PHYs preference: 0x%2.2x", rx_phys);
-	mask = rx_phys;
 
 	mask = print_bitfield(2, rx_phys, le_phys);
 	if (mask)
@@ -8768,7 +8839,7 @@ static void le_big_create_sync_cmd(uint16_t index, const void *data,
 	print_field("BIG Handle: 0x%2.2x", cmd->handle);
 	print_field("BIG Sync Handle: 0x%4.4x", le16_to_cpu(cmd->sync_handle));
 	print_field("Encryption: %s (0x%2.2x)",
-			cmd->encryption ? "Unencrypted" : "Encrypted",
+			cmd->encryption ? "Encrypted" : "Unencrypted",
 			cmd->encryption);
 	print_hex_field("Broadcast Code", cmd->bcode, 16);
 	print_field("Maximum Number Subevents: 0x%2.2x", cmd->mse);
@@ -9828,7 +9899,7 @@ static const char *get_supported_command(int bit)
 	return NULL;
 }
 
-static const char *current_vendor_str(void)
+static const char *current_vendor_str(uint16_t ocf)
 {
 	uint16_t manufacturer, msft_opcode;
 
@@ -9840,7 +9911,8 @@ static const char *current_vendor_str(void)
 		msft_opcode = BT_HCI_CMD_NOP;
 	}
 
-	if (msft_opcode != BT_HCI_CMD_NOP)
+	if (msft_opcode != BT_HCI_CMD_NOP &&
+				cmd_opcode_ocf(msft_opcode) == ocf)
 		return "Microsoft";
 
 	switch (manufacturer) {
@@ -9884,22 +9956,16 @@ static const struct vendor_ocf *current_vendor_ocf(uint16_t ocf)
 static const struct vendor_evt *current_vendor_evt(const void *data,
 							int *consumed_size)
 {
-	uint16_t manufacturer, msft_opcode;
+	uint16_t manufacturer;
 	uint8_t evt = *((const uint8_t *) data);
 
 	/* A regular vendor event consumes 1 byte. */
 	*consumed_size = 1;
 
-	if (index_current < MAX_INDEX) {
+	if (index_current < MAX_INDEX)
 		manufacturer = index_list[index_current].manufacturer;
-		msft_opcode = index_list[index_current].msft_opcode;
-	} else {
+	else
 		manufacturer = fallback_manufacturer;
-		msft_opcode = BT_HCI_CMD_NOP;
-	}
-
-	if (msft_opcode != BT_HCI_CMD_NOP)
-		return NULL;
 
 	switch (manufacturer) {
 	case 2:
@@ -9911,14 +9977,37 @@ static const struct vendor_evt *current_vendor_evt(const void *data,
 	return NULL;
 }
 
-static void inquiry_complete_evt(uint16_t index, const void *data, uint8_t size)
+static const char *current_vendor_evt_str(void)
+{
+	uint16_t manufacturer;
+
+	if (index_current < MAX_INDEX)
+		manufacturer = index_list[index_current].manufacturer;
+	else
+		manufacturer = fallback_manufacturer;
+
+	switch (manufacturer) {
+	case 2:
+		return "Intel";
+	case 15:
+		return "Broadcom";
+	case 93:
+		return "Realtek";
+	}
+
+	return NULL;
+}
+
+static void inquiry_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_inquiry_complete *evt = data;
 
 	print_status(evt->status);
 }
 
-static void inquiry_result_evt(uint16_t index, const void *data, uint8_t size)
+static void inquiry_result_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_inquiry_result *evt = data;
 
@@ -9934,7 +10023,8 @@ static void inquiry_result_evt(uint16_t index, const void *data, uint8_t size)
 		packet_hexdump(data + sizeof(*evt), size - sizeof(*evt));
 }
 
-static void conn_complete_evt(uint16_t index, const void *data, uint8_t size)
+static void conn_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_conn_complete *evt = data;
 
@@ -9949,7 +10039,8 @@ static void conn_complete_evt(uint16_t index, const void *data, uint8_t size)
 					(void *)evt->bdaddr, BDADDR_BREDR);
 }
 
-static void conn_request_evt(uint16_t index, const void *data, uint8_t size)
+static void conn_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_conn_request *evt = data;
 
@@ -9958,8 +10049,8 @@ static void conn_request_evt(uint16_t index, const void *data, uint8_t size)
 	print_link_type(evt->link_type);
 }
 
-static void disconnect_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void disconnect_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_disconnect_complete *evt = data;
 
@@ -9971,7 +10062,8 @@ static void disconnect_complete_evt(uint16_t index, const void *data,
 		release_handle(le16_to_cpu(evt->handle));
 }
 
-static void auth_complete_evt(uint16_t index, const void *data, uint8_t size)
+static void auth_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_auth_complete *evt = data;
 
@@ -9979,8 +10071,8 @@ static void auth_complete_evt(uint16_t index, const void *data, uint8_t size)
 	print_handle(evt->handle);
 }
 
-static void remote_name_request_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void remote_name_request_complete_evt(struct timeval *tv, uint16_t index,
+						const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_remote_name_request_complete *evt = data;
 
@@ -9989,7 +10081,8 @@ static void remote_name_request_complete_evt(uint16_t index, const void *data,
 	print_name(evt->name);
 }
 
-static void encrypt_change_evt(uint16_t index, const void *data, uint8_t size)
+static void encrypt_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_encrypt_change *evt = data;
 
@@ -9998,8 +10091,9 @@ static void encrypt_change_evt(uint16_t index, const void *data, uint8_t size)
 	print_encr_mode_change(evt->encr_mode, evt->handle);
 }
 
-static void change_conn_link_key_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void change_conn_link_key_complete_evt(struct timeval *tv,
+						uint16_t index,
+						const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_change_conn_link_key_complete *evt = data;
 
@@ -10007,8 +10101,8 @@ static void change_conn_link_key_complete_evt(uint16_t index, const void *data,
 	print_handle(evt->handle);
 }
 
-static void link_key_type_changed_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void link_key_type_changed_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_link_key_type_changed *evt = data;
 
@@ -10017,8 +10111,8 @@ static void link_key_type_changed_evt(uint16_t index, const void *data,
 	print_key_flag(evt->key_flag);
 }
 
-static void remote_features_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void remote_features_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_remote_features_complete *evt = data;
 
@@ -10027,8 +10121,8 @@ static void remote_features_complete_evt(uint16_t index, const void *data,
 	print_features(0, evt->features, 0x00);
 }
 
-static void remote_version_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void remote_version_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_remote_version_complete *evt = data;
 
@@ -10044,8 +10138,8 @@ static void remote_version_complete_evt(uint16_t index, const void *data,
 	}
 }
 
-static void qos_setup_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void qos_setup_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_qos_setup_complete *evt = data;
 
@@ -10061,7 +10155,8 @@ static void qos_setup_complete_evt(uint16_t index, const void *data,
 	print_field("Delay variation: %d", le32_to_cpu(evt->delay_variation));
 }
 
-static void cmd_complete_evt(uint16_t index, const void *data, uint8_t size)
+static void cmd_complete_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_cmd_complete *evt = data;
 	uint16_t opcode = le16_to_cpu(evt->opcode);
@@ -10091,7 +10186,7 @@ static void cmd_complete_evt(uint16_t index, const void *data, uint8_t size)
 			const struct vendor_ocf *vnd = current_vendor_ocf(ocf);
 
 			if (vnd) {
-				const char *str = current_vendor_str();
+				const char *str = current_vendor_str(ocf);
 
 				if (str) {
 					snprintf(vendor_str, sizeof(vendor_str),
@@ -10157,7 +10252,8 @@ static void cmd_complete_evt(uint16_t index, const void *data, uint8_t size)
 	opcode_data->rsp_func(index, data + 3, size - 3);
 }
 
-static void cmd_status_evt(uint16_t index, const void *data, uint8_t size)
+static void cmd_status_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_cmd_status *evt = data;
 	uint16_t opcode = le16_to_cpu(evt->opcode);
@@ -10183,7 +10279,7 @@ static void cmd_status_evt(uint16_t index, const void *data, uint8_t size)
 			const struct vendor_ocf *vnd = current_vendor_ocf(ocf);
 
 			if (vnd) {
-				const char *str = current_vendor_str();
+				const char *str = current_vendor_str(ocf);
 
 				if (str) {
 					snprintf(vendor_str, sizeof(vendor_str),
@@ -10209,21 +10305,24 @@ static void cmd_status_evt(uint16_t index, const void *data, uint8_t size)
 	print_status(evt->status);
 }
 
-static void hardware_error_evt(uint16_t index, const void *data, uint8_t size)
+static void hardware_error_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_hardware_error *evt = data;
 
 	print_field("Code: 0x%2.2x", evt->code);
 }
 
-static void flush_occurred_evt(uint16_t index, const void *data, uint8_t size)
+static void flush_occurred_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_flush_occurred *evt = data;
 
 	print_handle(evt->handle);
 }
 
-static void role_change_evt(uint16_t index, const void *data, uint8_t size)
+static void role_change_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_role_change *evt = data;
 
@@ -10232,20 +10331,93 @@ static void role_change_evt(uint16_t index, const void *data, uint8_t size)
 	print_role(evt->role);
 }
 
-static void num_completed_packets_evt(uint16_t index, const void *data,
-							uint8_t size)
+#define TV_MSEC(_tv) (long long)(_tv.tv_sec * 1000 + _tv.tv_usec / 1000)
+
+static void packet_dequeue_tx(struct timeval *tv, uint16_t handle)
 {
-	const struct bt_hci_evt_num_completed_packets *evt = data;
+	struct packet_conn_data *conn;
+	struct timeval *tx;
+	struct timeval delta;
 
-	print_field("Num handles: %d", evt->num_handles);
-	print_handle(evt->handle);
-	print_field("Count: %d", le16_to_cpu(evt->count));
+	conn = packet_get_conn_data(handle);
+	if (!conn)
+		return;
 
-	if (size > sizeof(*evt))
-		packet_hexdump(data + sizeof(*evt), size - sizeof(*evt));
+	tx = queue_pop_head(conn->tx_q);
+	if (!tx)
+		return;
+
+	timersub(tv, tx, &delta);
+
+	if ((!timerisset(&conn->tx_min) || timercmp(&delta, &conn->tx_min, <))
+				&& delta.tv_sec >= 0 && delta.tv_usec >= 0)
+		conn->tx_min = delta;
+
+	if (!timerisset(&conn->tx_max) || timercmp(&delta, &conn->tx_max, >))
+		conn->tx_max = delta;
+
+	if (timerisset(&conn->tx_med)) {
+		struct timeval tmp;
+
+		timeradd(&conn->tx_med, &delta, &tmp);
+
+		tmp.tv_sec /= 2;
+		tmp.tv_usec /= 2;
+		if (tmp.tv_sec % 2) {
+			tmp.tv_usec += 500000;
+			if (tmp.tv_usec >= 1000000) {
+				tmp.tv_sec++;
+				tmp.tv_usec -= 1000000;
+			}
+		}
+
+		conn->tx_med = tmp;
+	} else
+		conn->tx_med = delta;
+
+	print_field("Latency: %lld msec (%lld-%lld msec ~%lld msec)",
+			TV_MSEC(delta), TV_MSEC(conn->tx_min),
+			TV_MSEC(conn->tx_max), TV_MSEC(conn->tx_med));
+
+	l2cap_dequeue_frame(&delta, conn);
+
+	free(tx);
 }
 
-static void mode_change_evt(uint16_t index, const void *data, uint8_t size)
+static void num_completed_packets_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
+{
+	struct iovec iov = { (void *)data, size};
+	const struct bt_hci_evt_num_completed_packets *evt = data;
+	int i;
+
+	iov_pull(&iov, 1);
+
+	print_field("Num handles: %d", evt->num_handles);
+
+	for (i = 0; i < evt->num_handles; i++) {
+		uint16_t handle;
+		uint16_t count;
+
+		if (!util_iov_pull_le16(&iov, &handle))
+			break;
+
+		print_handle_native(handle);
+
+		if (!util_iov_pull_le16(&iov, &count))
+			break;
+
+		print_field("Count: %d", le16_to_cpu(evt->count));
+
+		packet_dequeue_tx(tv, handle);
+	}
+
+	if (iov.iov_len)
+		packet_hexdump(iov.iov_base, iov.iov_len);
+}
+
+static void mode_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_mode_change *evt = data;
 
@@ -10255,7 +10427,8 @@ static void mode_change_evt(uint16_t index, const void *data, uint8_t size)
 	print_interval(evt->interval);
 }
 
-static void return_link_keys_evt(uint16_t index, const void *data, uint8_t size)
+static void return_link_keys_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_return_link_keys *evt = data;
 	uint8_t i;
@@ -10268,21 +10441,24 @@ static void return_link_keys_evt(uint16_t index, const void *data, uint8_t size)
 	}
 }
 
-static void pin_code_request_evt(uint16_t index, const void *data, uint8_t size)
+static void pin_code_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_pin_code_request *evt = data;
 
 	print_bdaddr(evt->bdaddr);
 }
 
-static void link_key_request_evt(uint16_t index, const void *data, uint8_t size)
+static void link_key_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_link_key_request *evt = data;
 
 	print_bdaddr(evt->bdaddr);
 }
 
-static void link_key_notify_evt(uint16_t index, const void *data, uint8_t size)
+static void link_key_notify_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_link_key_notify *evt = data;
 
@@ -10291,20 +10467,22 @@ static void link_key_notify_evt(uint16_t index, const void *data, uint8_t size)
 	print_key_type(evt->key_type);
 }
 
-static void loopback_command_evt(uint16_t index, const void *data, uint8_t size)
+static void loopback_command_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	packet_hexdump(data, size);
 }
 
-static void data_buffer_overflow_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void data_buffer_overflow_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_data_buffer_overflow *evt = data;
 
 	print_link_type(evt->link_type);
 }
 
-static void max_slots_change_evt(uint16_t index, const void *data, uint8_t size)
+static void max_slots_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_max_slots_change *evt = data;
 
@@ -10312,8 +10490,8 @@ static void max_slots_change_evt(uint16_t index, const void *data, uint8_t size)
 	print_field("Max slots: %d", evt->max_slots);
 }
 
-static void clock_offset_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void clock_offset_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_clock_offset_complete *evt = data;
 
@@ -10322,8 +10500,8 @@ static void clock_offset_complete_evt(uint16_t index, const void *data,
 	print_clock_offset(evt->clock_offset);
 }
 
-static void conn_pkt_type_changed_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void conn_pkt_type_changed_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_conn_pkt_type_changed *evt = data;
 
@@ -10332,15 +10510,16 @@ static void conn_pkt_type_changed_evt(uint16_t index, const void *data,
 	print_pkt_type(evt->pkt_type);
 }
 
-static void qos_violation_evt(uint16_t index, const void *data, uint8_t size)
+static void qos_violation_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_qos_violation *evt = data;
 
 	print_handle(evt->handle);
 }
 
-static void pscan_mode_change_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void pscan_mode_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_pscan_mode_change *evt = data;
 
@@ -10348,8 +10527,8 @@ static void pscan_mode_change_evt(uint16_t index, const void *data,
 	print_pscan_mode(evt->pscan_mode);
 }
 
-static void pscan_rep_mode_change_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void pscan_rep_mode_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_pscan_rep_mode_change *evt = data;
 
@@ -10357,8 +10536,8 @@ static void pscan_rep_mode_change_evt(uint16_t index, const void *data,
 	print_pscan_rep_mode(evt->pscan_rep_mode);
 }
 
-static void flow_spec_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void flow_spec_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_flow_spec_complete *evt = data;
 
@@ -10376,8 +10555,8 @@ static void flow_spec_complete_evt(uint16_t index, const void *data,
 	print_field("Access latency: %d", le32_to_cpu(evt->access_latency));
 }
 
-static void inquiry_result_with_rssi_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void inquiry_result_with_rssi_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_inquiry_result_with_rssi *evt = data;
 
@@ -10393,8 +10572,8 @@ static void inquiry_result_with_rssi_evt(uint16_t index, const void *data,
 		packet_hexdump(data + sizeof(*evt), size - sizeof(*evt));
 }
 
-static void remote_ext_features_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void remote_ext_features_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_remote_ext_features_complete *evt = data;
 
@@ -10404,8 +10583,8 @@ static void remote_ext_features_complete_evt(uint16_t index, const void *data,
 	print_features(evt->page, evt->features, 0x00);
 }
 
-static void sync_conn_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void sync_conn_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_sync_conn_complete *evt = data;
 
@@ -10420,8 +10599,8 @@ static void sync_conn_complete_evt(uint16_t index, const void *data,
 	print_air_mode(evt->air_mode);
 }
 
-static void sync_conn_changed_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void sync_conn_changed_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_sync_conn_changed *evt = data;
 
@@ -10433,7 +10612,8 @@ static void sync_conn_changed_evt(uint16_t index, const void *data,
 	print_field("TX packet length: %d", le16_to_cpu(evt->tx_pkt_len));
 }
 
-static void sniff_subrating_evt(uint16_t index, const void *data, uint8_t size)
+static void sniff_subrating_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_sniff_subrating *evt = data;
 
@@ -10445,8 +10625,8 @@ static void sniff_subrating_evt(uint16_t index, const void *data, uint8_t size)
 	print_slot_625("Min local timeout", evt->min_local_timeout);
 }
 
-static void ext_inquiry_result_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void ext_inquiry_result_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_ext_inquiry_result *evt = data;
 
@@ -10460,8 +10640,8 @@ static void ext_inquiry_result_evt(uint16_t index, const void *data,
 	print_eir(evt->data, sizeof(evt->data), false);
 }
 
-static void encrypt_key_refresh_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void encrypt_key_refresh_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_encrypt_key_refresh_complete *evt = data;
 
@@ -10469,16 +10649,16 @@ static void encrypt_key_refresh_complete_evt(uint16_t index, const void *data,
 	print_handle(evt->handle);
 }
 
-static void io_capability_request_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void io_capability_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_io_capability_request *evt = data;
 
 	print_bdaddr(evt->bdaddr);
 }
 
-static void io_capability_response_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void io_capability_response_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_io_capability_response *evt = data;
 
@@ -10488,8 +10668,8 @@ static void io_capability_response_evt(uint16_t index, const void *data,
 	print_authentication(evt->authentication);
 }
 
-static void user_confirm_request_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void user_confirm_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_user_confirm_request *evt = data;
 
@@ -10497,24 +10677,24 @@ static void user_confirm_request_evt(uint16_t index, const void *data,
 	print_passkey(evt->passkey);
 }
 
-static void user_passkey_request_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void user_passkey_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_user_passkey_request *evt = data;
 
 	print_bdaddr(evt->bdaddr);
 }
 
-static void remote_oob_data_request_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void remote_oob_data_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_remote_oob_data_request *evt = data;
 
 	print_bdaddr(evt->bdaddr);
 }
 
-static void simple_pairing_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void simple_pairing_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_simple_pairing_complete *evt = data;
 
@@ -10522,8 +10702,8 @@ static void simple_pairing_complete_evt(uint16_t index, const void *data,
 	print_bdaddr(evt->bdaddr);
 }
 
-static void link_supv_timeout_changed_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void link_supv_timeout_changed_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_link_supv_timeout_changed *evt = data;
 
@@ -10531,16 +10711,16 @@ static void link_supv_timeout_changed_evt(uint16_t index, const void *data,
 	print_timeout(evt->timeout);
 }
 
-static void enhanced_flush_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void enhanced_flush_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_enhanced_flush_complete *evt = data;
 
 	print_handle(evt->handle);
 }
 
-static void user_passkey_notify_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void user_passkey_notify_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_user_passkey_notify *evt = data;
 
@@ -10548,7 +10728,8 @@ static void user_passkey_notify_evt(uint16_t index, const void *data,
 	print_passkey(evt->passkey);
 }
 
-static void keypress_notify_evt(uint16_t index, const void *data, uint8_t size)
+static void keypress_notify_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_keypress_notify *evt = data;
 	const char *str;
@@ -10579,8 +10760,8 @@ static void keypress_notify_evt(uint16_t index, const void *data, uint8_t size)
 	print_field("Notification type: %s (0x%2.2x)", str, evt->type);
 }
 
-static void remote_host_features_notify_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void remote_host_features_notify_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_remote_host_features_notify *evt = data;
 
@@ -10588,8 +10769,8 @@ static void remote_host_features_notify_evt(uint16_t index, const void *data,
 	print_features(1, evt->features, 0x00);
 }
 
-static void phy_link_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void phy_link_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_phy_link_complete *evt = data;
 
@@ -10597,15 +10778,16 @@ static void phy_link_complete_evt(uint16_t index, const void *data,
 	print_phy_handle(evt->phy_handle);
 }
 
-static void channel_selected_evt(uint16_t index, const void *data, uint8_t size)
+static void channel_selected_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_channel_selected *evt = data;
 
 	print_phy_handle(evt->phy_handle);
 }
 
-static void disconn_phy_link_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void disconn_phy_link_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_disconn_phy_link_complete *evt = data;
 
@@ -10614,8 +10796,8 @@ static void disconn_phy_link_complete_evt(uint16_t index, const void *data,
 	print_reason(evt->reason);
 }
 
-static void phy_link_loss_early_warning_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void phy_link_loss_early_warning_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_phy_link_loss_early_warning *evt = data;
 	const char *str;
@@ -10646,16 +10828,16 @@ static void phy_link_loss_early_warning_evt(uint16_t index, const void *data,
 	print_field("Reason: %s (0x%2.2x)", str, evt->reason);
 }
 
-static void phy_link_recovery_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void phy_link_recovery_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_phy_link_recovery *evt = data;
 
 	print_phy_handle(evt->phy_handle);
 }
 
-static void logic_link_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void logic_link_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_logic_link_complete *evt = data;
 
@@ -10665,8 +10847,8 @@ static void logic_link_complete_evt(uint16_t index, const void *data,
 	print_field("TX flow spec: 0x%2.2x", evt->flow_spec);
 }
 
-static void disconn_logic_link_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void disconn_logic_link_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_disconn_logic_link_complete *evt = data;
 
@@ -10675,8 +10857,8 @@ static void disconn_logic_link_complete_evt(uint16_t index, const void *data,
 	print_reason(evt->reason);
 }
 
-static void flow_spec_modify_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void flow_spec_modify_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_flow_spec_modify_complete *evt = data;
 
@@ -10684,8 +10866,8 @@ static void flow_spec_modify_complete_evt(uint16_t index, const void *data,
 	print_handle(evt->handle);
 }
 
-static void num_completed_data_blocks_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void num_completed_data_blocks_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_num_completed_data_blocks *evt = data;
 
@@ -10700,8 +10882,8 @@ static void num_completed_data_blocks_evt(uint16_t index, const void *data,
 		packet_hexdump(data + sizeof(*evt), size - sizeof(*evt));
 }
 
-static void short_range_mode_change_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void short_range_mode_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_short_range_mode_change *evt = data;
 
@@ -10710,8 +10892,8 @@ static void short_range_mode_change_evt(uint16_t index, const void *data,
 	print_enable("Short range mode", evt->mode);
 }
 
-static void amp_status_change_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void amp_status_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_amp_status_change *evt = data;
 
@@ -10719,8 +10901,8 @@ static void amp_status_change_evt(uint16_t index, const void *data,
 	print_amp_status(evt->amp_status);
 }
 
-static void triggered_clock_capture_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void triggered_clock_capture_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_triggered_clock_capture *evt = data;
 
@@ -10730,16 +10912,16 @@ static void triggered_clock_capture_evt(uint16_t index, const void *data,
 	print_clock_offset(evt->clock_offset);
 }
 
-static void sync_train_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void sync_train_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_sync_train_complete *evt = data;
 
 	print_status(evt->status);
 }
 
-static void sync_train_received_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void sync_train_received_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_sync_train_received *evt = data;
 
@@ -10754,8 +10936,8 @@ static void sync_train_received_evt(uint16_t index, const void *data,
 	print_field("Service Data: 0x%2.2x", evt->service_data);
 }
 
-static void peripheral_broadcast_receive_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void peripheral_broadcast_receive_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_peripheral_broadcast_receive *evt = data;
 
@@ -10777,8 +10959,8 @@ static void peripheral_broadcast_receive_evt(uint16_t index, const void *data,
 		packet_hexdump(data + 18, size - 18);
 }
 
-static void peripheral_broadcast_timeout_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void peripheral_broadcast_timeout_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_peripheral_broadcast_timeout *evt = data;
 
@@ -10786,8 +10968,8 @@ static void peripheral_broadcast_timeout_evt(uint16_t index, const void *data,
 	print_lt_addr(evt->lt_addr);
 }
 
-static void truncated_page_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void truncated_page_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_truncated_page_complete *evt = data;
 
@@ -10795,21 +10977,22 @@ static void truncated_page_complete_evt(uint16_t index, const void *data,
 	print_bdaddr(evt->bdaddr);
 }
 
-static void peripheral_page_response_timeout_evt(uint16_t index,
-						const void *data, uint8_t size)
+static void peripheral_page_response_timeout_evt(struct timeval *tv,
+					uint16_t index, const void *data,
+					uint8_t size)
 {
 }
 
-static void channel_map_change_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void channel_map_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_channel_map_change *evt = data;
 
 	print_channel_map(evt->map);
 }
 
-static void inquiry_response_notify_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void inquiry_response_notify_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_inquiry_response_notify *evt = data;
 
@@ -10817,15 +11000,16 @@ static void inquiry_response_notify_evt(uint16_t index, const void *data,
 	print_rssi(evt->rssi);
 }
 
-static void auth_payload_timeout_expired_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void auth_payload_timeout_expired_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_auth_payload_timeout_expired *evt = data;
 
 	print_handle(evt->handle);
 }
 
-static void le_conn_complete_evt(uint16_t index, const void *data, uint8_t size)
+static void le_conn_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_conn_complete *evt = data;
 
@@ -10846,7 +11030,8 @@ static void le_conn_complete_evt(uint16_t index, const void *data, uint8_t size)
 				(void *)evt->peer_addr, evt->peer_addr_type);
 }
 
-static void le_adv_report_evt(uint16_t index, const void *data, uint8_t size)
+static void le_adv_report_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_adv_report *evt = data;
 	uint8_t evt_len;
@@ -10874,8 +11059,8 @@ report:
 	}
 }
 
-static void le_conn_update_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_conn_update_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_conn_update_complete *evt = data;
 
@@ -10888,8 +11073,8 @@ static void le_conn_update_complete_evt(uint16_t index, const void *data,
 					le16_to_cpu(evt->supv_timeout));
 }
 
-static void le_remote_features_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_remote_features_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_remote_features_complete *evt = data;
 
@@ -10898,8 +11083,8 @@ static void le_remote_features_complete_evt(uint16_t index, const void *data,
 	print_features(0, evt->features, 0x01);
 }
 
-static void le_long_term_key_request_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_long_term_key_request_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_long_term_key_request *evt = data;
 
@@ -10908,8 +11093,8 @@ static void le_long_term_key_request_evt(uint16_t index, const void *data,
 	print_encrypted_diversifier(evt->ediv);
 }
 
-static void le_conn_param_request_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_conn_param_request_evt(struct timeval *tv, uint16_t index,
+				      const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_conn_param_request *evt = data;
 
@@ -10922,8 +11107,8 @@ static void le_conn_param_request_evt(uint16_t index, const void *data,
 					le16_to_cpu(evt->supv_timeout));
 }
 
-static void le_data_length_change_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_data_length_change_evt(struct timeval *tv, uint16_t index,
+				      const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_data_length_change *evt = data;
 
@@ -10934,8 +11119,8 @@ static void le_data_length_change_evt(uint16_t index, const void *data,
 	print_field("Max RX time: %d", le16_to_cpu(evt->max_rx_time));
 }
 
-static void le_read_local_pk256_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_read_local_pk256_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_read_local_pk256_complete *evt = data;
 
@@ -10943,8 +11128,8 @@ static void le_read_local_pk256_complete_evt(uint16_t index, const void *data,
 	print_pk256("Local P-256 public key", evt->local_pk256);
 }
 
-static void le_generate_dhkey_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_generate_dhkey_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_generate_dhkey_complete *evt = data;
 
@@ -10952,8 +11137,8 @@ static void le_generate_dhkey_complete_evt(uint16_t index, const void *data,
 	print_dhkey(evt->dhkey);
 }
 
-static void le_enhanced_conn_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_enhanced_conn_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_enhanced_conn_complete *evt = data;
 
@@ -10976,8 +11161,8 @@ static void le_enhanced_conn_complete_evt(uint16_t index, const void *data,
 				(void *)evt->peer_addr, evt->peer_addr_type);
 }
 
-static void le_direct_adv_report_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_direct_adv_report_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_direct_adv_report *evt = data;
 
@@ -10994,8 +11179,8 @@ static void le_direct_adv_report_evt(uint16_t index, const void *data,
 		packet_hexdump(data + sizeof(*evt), size - sizeof(*evt));
 }
 
-static void le_phy_update_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_phy_update_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_phy_update_complete *evt = data;
 
@@ -11098,8 +11283,8 @@ static void print_legacy_adv_report_pdu(uint16_t flags)
 	print_field("  Legacy PDU Type: %s (0x%4.4x)", str, flags);
 }
 
-static void le_ext_adv_report_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_ext_adv_report_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_ext_adv_report *evt = data;
 	const struct bt_hci_le_ext_adv_report *report;
@@ -11186,7 +11371,8 @@ static void le_ext_adv_report_evt(uint16_t index, const void *data,
 	}
 }
 
-static void le_pa_sync(uint16_t index, const void *data, uint8_t size)
+static void le_pa_sync_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_per_sync_established *evt = data;
 
@@ -11204,7 +11390,8 @@ static void le_pa_sync(uint16_t index, const void *data, uint8_t size)
 	print_field("Advertiser clock accuracy: 0x%2.2x", evt->clock_accuracy);
 }
 
-static void le_pa_report_evt(uint16_t index, const void *data, uint8_t size)
+static void le_pa_report_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	const struct bt_hci_le_pa_report *evt = data;
 	const char *color_on;
@@ -11237,9 +11424,10 @@ static void le_pa_report_evt(uint16_t index, const void *data, uint8_t size)
 		break;
 	default:
 		str = "Reserved";
-		color_on = COLOR_RED;
 		break;
 	}
+
+	print_field("CTE Type: %s (0x%2x)", str, evt->cte_type);
 
 	switch (evt->data_status) {
 	case 0x00:
@@ -11265,14 +11453,16 @@ static void le_pa_report_evt(uint16_t index, const void *data, uint8_t size)
 	packet_hexdump(evt->data, evt->data_len);
 }
 
-static void le_pa_sync_lost(uint16_t index, const void *data, uint8_t size)
+static void le_pa_sync_lost_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_per_sync_lost *evt = data;
 
 	print_field("Sync handle: %d", evt->handle);
 }
 
-static void le_adv_set_term_evt(uint16_t index, const void *data, uint8_t size)
+static void le_adv_set_term_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_adv_set_term *evt = data;
 
@@ -11283,8 +11473,8 @@ static void le_adv_set_term_evt(uint16_t index, const void *data, uint8_t size)
 			evt->num_evts);
 }
 
-static void le_scan_req_received_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_scan_req_received_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_scan_req_received *evt = data;
 
@@ -11294,8 +11484,8 @@ static void le_scan_req_received_evt(uint16_t index, const void *data,
 							evt->scanner_addr_type);
 }
 
-static void le_chan_select_alg_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_chan_select_alg_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_chan_select_alg *evt = data;
 	const char *str;
@@ -11317,8 +11507,8 @@ static void le_chan_select_alg_evt(uint16_t index, const void *data,
 	print_field("Algorithm: %s (0x%2.2x)", str, evt->algorithm);
 }
 
-static void le_cte_request_failed_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_cte_request_failed_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_cte_request_failed *evt = data;
 
@@ -11326,8 +11516,8 @@ static void le_cte_request_failed_evt(uint16_t index, const void *data,
 	print_field("Connection handle: %d", evt->handle);
 }
 
-static void le_pa_sync_trans_rec_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_pa_sync_trans_rec_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_pa_sync_trans_rec *evt = data;
 
@@ -11345,8 +11535,8 @@ static void le_pa_sync_trans_rec_evt(uint16_t index, const void *data,
 	print_clock_accuracy(evt->clock_accuracy);
 }
 
-static void le_cis_established_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_cis_established_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_cis_established *evt = data;
 
@@ -11365,10 +11555,11 @@ static void le_cis_established_evt(uint16_t index, const void *data,
 	print_field("Peripheral to Central Flush Timeout: %u", evt->p_ft);
 	print_field("Central to Peripheral MTU: %u", le16_to_cpu(evt->c_mtu));
 	print_field("Peripheral to Central MTU: %u", le16_to_cpu(evt->p_mtu));
-	print_field("ISO Interval: %u", le16_to_cpu(evt->interval));
+	print_slot_125("ISO Interval", evt->interval);
 }
 
-static void le_req_cis_evt(uint16_t index, const void *data, uint8_t size)
+static void le_req_cis_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_cis_req *evt = data;
 
@@ -11385,7 +11576,8 @@ static void print_bis_handle(const void *data, int i)
 	print_field("Connection Handle #%d: %d", i, handle);
 }
 
-static void le_big_complete_evt(uint16_t index, const void *data, uint8_t size)
+static void le_big_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_big_complete *evt = data;
 
@@ -11404,7 +11596,8 @@ static void le_big_complete_evt(uint16_t index, const void *data, uint8_t size)
 				sizeof(*evt->bis_handle), print_bis_handle);
 }
 
-static void le_big_terminate_evt(uint16_t index, const void *data, uint8_t size)
+static void le_big_terminate_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_big_terminate *evt = data;
 
@@ -11412,8 +11605,8 @@ static void le_big_terminate_evt(uint16_t index, const void *data, uint8_t size)
 	print_reason(evt->reason);
 }
 
-static void le_big_sync_estabilished_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_big_sync_estabilished_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_big_sync_estabilished *evt = data;
 
@@ -11430,7 +11623,8 @@ static void le_big_sync_estabilished_evt(uint16_t index, const void *data,
 						print_bis_handle);
 }
 
-static void le_big_sync_lost_evt(uint16_t index, const void *data, uint8_t size)
+static void le_big_sync_lost_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_big_sync_lost *evt = data;
 
@@ -11438,8 +11632,8 @@ static void le_big_sync_lost_evt(uint16_t index, const void *data, uint8_t size)
 	print_reason(evt->reason);
 }
 
-static void le_req_sca_complete_evt(uint16_t index, const void *data,
-							uint8_t size)
+static void le_req_sca_complete_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_req_peer_sca_complete *evt = data;
 
@@ -11448,7 +11642,8 @@ static void le_req_sca_complete_evt(uint16_t index, const void *data,
 	print_sca(evt->sca);
 }
 
-static void le_big_info_evt(uint16_t index, const void *data, uint8_t size)
+static void le_big_info_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
 {
 	const struct bt_hci_evt_le_big_info_adv_report *evt = data;
 
@@ -11470,12 +11665,13 @@ static void le_big_info_evt(uint16_t index, const void *data, uint8_t size)
 struct subevent_data {
 	uint8_t subevent;
 	const char *str;
-	void (*func) (uint16_t index, const void *data, uint8_t size);
+	void (*func) (struct timeval *tv, uint16_t index, const void *data,
+							uint8_t size);
 	uint8_t size;
 	bool fixed;
 };
 
-static void print_subevent(uint16_t index,
+static void print_subevent(struct timeval *tv, uint16_t index,
 				const struct subevent_data *subevent_data,
 				const void *data, uint8_t size)
 {
@@ -11508,7 +11704,7 @@ static void print_subevent(uint16_t index,
 		}
 	}
 
-	subevent_data->func(index, data, size);
+	subevent_data->func(tv, index, data, size);
 }
 
 static const struct subevent_data le_meta_event_table[] = {
@@ -11539,11 +11735,11 @@ static const struct subevent_data le_meta_event_table[] = {
 	{ 0x0d, "LE Extended Advertising Report",
 				le_ext_adv_report_evt, 1, false},
 	{ 0x0e, "LE Periodic Advertising Sync Established",
-				le_pa_sync, 15, true },
+				le_pa_sync_evt, 15, true },
 	{ 0x0f, "LE Periodic Advertising Report",
 				le_pa_report_evt, 7, false},
 	{ 0x10, "LE Periodic Advertising Sync Lost",
-				le_pa_sync_lost, 2, true},
+				le_pa_sync_lost_evt, 2, true},
 	{ 0x11, "LE Scan Timeout" },
 	{ 0x12, "LE Advertising Set Terminated",
 				le_adv_set_term_evt, 5, true},
@@ -11593,7 +11789,8 @@ static const struct subevent_data le_meta_event_table[] = {
 	{ }
 };
 
-static void le_meta_event_evt(uint16_t index, const void *data, uint8_t size)
+static void le_meta_event_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	uint8_t subevent = *((const uint8_t *) data);
 	struct subevent_data unknown;
@@ -11613,10 +11810,11 @@ static void le_meta_event_evt(uint16_t index, const void *data, uint8_t size)
 		}
 	}
 
-	print_subevent(index, subevent_data, data + 1, size - 1);
+	print_subevent(tv, index, subevent_data, data + 1, size - 1);
 }
 
-static void vendor_evt(uint16_t index, const void *data, uint8_t size)
+static void vendor_evt(struct timeval *tv, uint16_t index,
+				const void *data, uint8_t size)
 {
 	struct subevent_data vendor_data;
 	char vendor_str[150];
@@ -11624,7 +11822,7 @@ static void vendor_evt(uint16_t index, const void *data, uint8_t size)
 	const struct vendor_evt *vnd = current_vendor_evt(data, &consumed_size);
 
 	if (vnd) {
-		const char *str = current_vendor_str();
+		const char *str = current_vendor_evt_str();
 
 		if (str) {
 			snprintf(vendor_str, sizeof(vendor_str),
@@ -11637,7 +11835,7 @@ static void vendor_evt(uint16_t index, const void *data, uint8_t size)
 		vendor_data.size = vnd->evt_size;
 		vendor_data.fixed = vnd->evt_fixed;
 
-		print_subevent(index, &vendor_data, data + consumed_size,
+		print_subevent(tv, index, &vendor_data, data + consumed_size,
 							size - consumed_size);
 	} else {
 		uint16_t manufacturer;
@@ -11654,7 +11852,8 @@ static void vendor_evt(uint16_t index, const void *data, uint8_t size)
 struct event_data {
 	uint8_t event;
 	const char *str;
-	void (*func) (uint16_t index, const void *data, uint8_t size);
+	void (*func) (struct timeval *tv, uint16_t index, const void *data,
+							uint8_t size);
 	uint8_t size;
 	bool fixed;
 };
@@ -11887,7 +12086,7 @@ void packet_system_note(struct timeval *tv, struct ucred *cred,
 struct monitor_l2cap_hdr {
 	uint16_t cid;
 	uint16_t psm;
-};
+} __attribute__((packed));
 
 static void packet_decode(struct timeval *tv, struct ucred *cred, char dir,
 				uint16_t index, const char *color,
@@ -11906,7 +12105,8 @@ static void packet_decode(struct timeval *tv, struct ucred *cred, char dir,
 				NULL);
 
 	/* Discard last byte since it just a filler */
-	l2cap_frame(index, dir == '>', 0, hdr->cid, hdr->psm,
+	l2cap_frame(index, dir == '>', 0,
+			le16_to_cpu(hdr->cid), le16_to_cpu(hdr->psm),
 			data + sizeof(*hdr), size - (sizeof(*hdr) + 1));
 }
 
@@ -11915,7 +12115,6 @@ void packet_user_logging(struct timeval *tv, struct ucred *cred,
 					const char *ident, const void *data,
 					uint16_t size)
 {
-	char pid_str[140];
 	const char *label;
 	const char *color;
 
@@ -11941,26 +12140,7 @@ void packet_user_logging(struct timeval *tv, struct ucred *cred,
 	}
 
 	if (cred) {
-		char *path = alloca(24);
-		char line[128];
-		FILE *fp;
-
-		snprintf(path, 23, "/proc/%u/comm", cred->pid);
-
-		fp = fopen(path, "re");
-		if (fp) {
-			if (fgets(line, sizeof(line), fp)) {
-				line[strcspn(line, "\r\n")] = '\0';
-				snprintf(pid_str, sizeof(pid_str), "%s[%u]",
-							line, cred->pid);
-			} else
-				snprintf(pid_str, sizeof(pid_str), "%u",
-								cred->pid);
-			fclose(fp);
-		} else
-			snprintf(pid_str, sizeof(pid_str), "%u", cred->pid);
-
-		label = pid_str;
+		label = NULL;
         } else {
 		if (ident)
 			label = ident;
@@ -11970,8 +12150,8 @@ void packet_user_logging(struct timeval *tv, struct ucred *cred,
 
 	if (ident && (ident[0] == '<' || ident[0] == '>')) {
 		packet_decode(tv, cred, ident[0], index, color,
-				label == ident ? &ident[2] : label,
-				data, size);
+			      label == ident ? &ident[2] : label,
+			      data, size);
 		return;
 	}
 
@@ -12026,7 +12206,7 @@ void packet_hci_command(struct timeval *tv, struct ucred *cred, uint16_t index,
 			const struct vendor_ocf *vnd = current_vendor_ocf(ocf);
 
 			if (vnd) {
-				const char *str = current_vendor_str();
+				const char *str = current_vendor_str(ocf);
 
 				if (str) {
 					snprintf(vendor_str, sizeof(vendor_str),
@@ -12166,7 +12346,24 @@ void packet_hci_event(struct timeval *tv, struct ucred *cred, uint16_t index,
 		}
 	}
 
-	event_data->func(index, data, hdr->plen);
+	event_data->func(tv, index, data, hdr->plen);
+}
+
+static void packet_queue_tx(struct timeval *tv, uint16_t handle)
+{
+	struct packet_conn_data *conn;
+	struct timeval *tx;
+
+	conn = packet_get_conn_data(handle);
+	if (!conn)
+		return;
+
+	if (!conn->tx_q)
+		conn->tx_q = queue_new();
+
+	tx = new0(struct timeval, 1);
+	memcpy(tx, tv, sizeof(*tv));
+	queue_push_tail(conn->tx_q, tx);
 }
 
 void packet_hci_acldata(struct timeval *tv, struct ucred *cred, uint16_t index,
@@ -12205,6 +12402,9 @@ void packet_hci_acldata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	print_packet(tv, cred, in ? '>' : '<', index, NULL, COLOR_HCI_ACLDATA,
 				in ? "ACL Data RX" : "ACL Data TX",
 						handle_str, extra_str);
+
+	if (!in)
+		packet_queue_tx(tv, acl_handle(handle));
 
 	if (size != dlen) {
 		print_text(COLOR_ERROR, "invalid packet size (%d != %d)",
@@ -12255,6 +12455,9 @@ void packet_hci_scodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 				in ? "SCO Data RX" : "SCO Data TX",
 						handle_str, extra_str);
 
+	if (!in)
+		packet_queue_tx(tv, acl_handle(handle));
+
 	if (size != hdr->dlen) {
 		print_text(COLOR_ERROR, "invalid packet size (%d != %d)",
 							size, hdr->dlen);
@@ -12298,9 +12501,12 @@ void packet_hci_isodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	sprintf(handle_str, "Handle %d", acl_handle(handle));
 	sprintf(extra_str, "flags 0x%2.2x dlen %d", flags, hdr->dlen);
 
-	print_packet(tv, cred, in ? '>' : '<', index, NULL, COLOR_HCI_SCODATA,
+	print_packet(tv, cred, in ? '>' : '<', index, NULL, COLOR_HCI_ISODATA,
 				in ? "ISO Data RX" : "ISO Data TX",
 						handle_str, extra_str);
+
+	if (!in)
+		packet_queue_tx(tv, acl_handle(handle));
 
 	if (size != hdr->dlen) {
 		print_text(COLOR_ERROR, "invalid packet size (%d != %d)",
@@ -12309,7 +12515,7 @@ void packet_hci_isodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 		return;
 	}
 
-	if (filter_mask & PACKET_FILTER_SHOW_SCO_DATA)
+	if (filter_mask & PACKET_FILTER_SHOW_ISO_DATA)
 		packet_hexdump(data, size);
 }
 
@@ -12592,7 +12798,11 @@ static const struct bitfield_data mgmt_settings_table[] = {
 	{ 15, "Static Address"		},
 	{ 16, "PHY Configuration"	},
 	{ 17, "Wideband Speech"		},
-	{ }
+	{ 18, "CIS Central"		},
+	{ 19, "CIS Peripheral"		},
+	{ 20, "ISO Broadcaster"		},
+	{ 21, "Sync Receiver"		},
+	{}
 };
 
 static void mgmt_print_settings(const char *label, uint32_t settings)
@@ -12646,6 +12856,8 @@ static const struct bitfield_data mgmt_device_flags_table[] = {
 	{  1, "Legacy Pairing"			},
 	{  2, "Not Connectable"			},
 	{  3, "Connection Locally Initiated"	},
+	{  4, "Name Request Failed"		},
+	{  5, "Scan Response"			},
 	{ }
 };
 
@@ -12811,6 +13023,7 @@ static void mgmt_print_identity_resolving_key(const void *data)
 
 	mgmt_print_address(data, address_type);
 	print_hex_field("Key", data + 7, 16);
+	keys_add_identity(data, address_type, data + 7);
 }
 
 static void mgmt_print_signature_resolving_key(const void *data)
@@ -14191,6 +14404,74 @@ static void mgmt_remove_adv_monitor_patterns_rsp(const void *data,
 	print_field("Handle: %d", handle);
 }
 
+static void mgmt_set_mesh_receiver_cmd(const void *data, uint16_t size)
+{
+	uint8_t enable = get_u8(data);
+	uint16_t window = get_le16(data + 1);
+	uint16_t period = get_le16(data + 3);
+	uint8_t num_ad_types = get_u8(data + 5);
+	const uint8_t *ad_types = data + 6;
+
+	print_field("Enable: %d", enable);
+	print_field("Window: %d", window);
+	print_field("Period: %d", period);
+	print_field("Num AD Types: %d", num_ad_types);
+	size -= 6;
+
+	while (size--)
+		print_field("  AD Type: %d", *ad_types++);
+}
+
+static void mgmt_read_mesh_features_rsp(const void *data, uint16_t size)
+{
+	uint16_t index = get_le16(data);
+	uint8_t max_handles = get_u8(data + 2);
+	uint8_t used_handles = get_u8(data + 3);
+	const uint8_t *handles = data + 4;
+
+	print_field("Index: %d", index);
+	print_field("Max Handles: %d", max_handles);
+	print_field("Used Handles: %d", used_handles);
+	size -= 4;
+
+	while (size--)
+		print_field("  Used Handle: %d", *handles++);
+}
+
+static void mgmt_mesh_send_cmd(const void *data, uint16_t size)
+{
+	const uint8_t *addr = data;
+	uint8_t addr_type = get_u8(data + 6);
+	uint64_t instant = get_le64(data + 7);
+	uint16_t delay = get_le16(data + 15);
+	uint8_t cnt = get_u8(data + 17);
+	uint8_t adv_data_len = get_u8(data + 18);
+
+	data += 19;
+	size -= 19;
+	print_bdaddr(addr);
+	print_field("Addr Type: %d", addr_type);
+	print_field("Instant: 0x%16.16" PRIx64, instant);
+	print_field("Delay: %d", delay);
+	print_field("Count: %d", cnt);
+	print_field("Data Length: %d", adv_data_len);
+	print_hex_field("Data", data, size);
+}
+
+static void mgmt_mesh_send_rsp(const void *data, uint16_t size)
+{
+	uint8_t handle = get_u8(data);
+
+	print_field("Handle: %d", handle);
+}
+
+static void mgmt_mesh_send_cancel_cmd(const void *data, uint16_t size)
+{
+	uint8_t handle = get_u8(data);
+
+	print_field("Handle: %d", handle);
+}
+
 struct mgmt_data {
 	uint16_t opcode;
 	const char *str;
@@ -14448,6 +14729,18 @@ static const struct mgmt_data mgmt_command_table[] = {
 				mgmt_add_adv_monitor_patterns_rssi_cmd, 8,
 									false,
 				mgmt_add_adv_monitor_patterns_rsp, 2, true},
+	{ 0x0057, "Set Mesh Receiver",
+				mgmt_set_mesh_receiver_cmd, 6, false,
+				mgmt_null_rsp, 0, true},
+	{ 0x0058, "Read Mesh Features",
+				mgmt_null_cmd, 0, true,
+				mgmt_read_mesh_features_rsp, 4, false},
+	{ 0x0059, "Mesh Send",
+				mgmt_mesh_send_cmd, 19, false,
+				mgmt_mesh_send_rsp, 1, true},
+	{ 0x0056, "Mesh Send Cancel",
+				mgmt_mesh_send_cancel_cmd, 1, true,
+				mgmt_null_rsp, 0, true},
 	{ }
 };
 
@@ -14914,6 +15207,64 @@ static void mgmt_controller_resume_evt(const void *data, uint16_t size)
 	mgmt_print_address(data, addr_type);
 }
 
+static void mgmt_adv_monitor_device_found_evt(const void *data, uint16_t size)
+{
+	uint16_t handle = get_le16(data);
+	const uint8_t *addr = data + 2;
+	uint8_t addr_type = get_u8(data + 8);
+	int8_t rssi = get_s8(data + 9);
+	uint32_t flags = get_le32(data + 10);
+	uint16_t ad_data_len = get_le16(data + 14);
+	const uint8_t *ad_data = data + 16;
+
+	print_field("Handle: %d", handle);
+	print_bdaddr(addr);
+	print_field("Addr Type: %d", addr_type);
+	print_field("RSSI: %d", rssi);
+	mgmt_print_device_flags(flags);
+	print_field("AD Data Len: %d", ad_data_len);
+	size -= 16;
+	print_hex_field("AD Data", ad_data, size);
+}
+
+static void mgmt_adv_monitor_device_lost_evt(const void *data, uint16_t size)
+{
+	uint16_t handle = get_le16(data);
+	const uint8_t *addr = data + 2;
+	uint8_t addr_type = get_u8(data + 8);
+
+	print_field("Handle: %d", handle);
+	print_bdaddr(addr);
+	print_field("Addr Type: %d", addr_type);
+}
+
+static void mgmt_mesh_device_found_evt(const void *data, uint16_t size)
+{
+	const uint8_t *addr = data;
+	uint8_t addr_type = get_u8(data + 6);
+	int8_t rssi = get_s8(data + 7);
+	uint64_t instant = get_le64(data + 8);
+	uint32_t flags = get_le32(data + 16);
+	uint16_t eir_len = get_le16(data + 20);
+	const uint8_t *eir_data = data + 22;
+
+	print_bdaddr(addr);
+	print_field("Addr Type: %d", addr_type);
+	print_field("RSSI: %d", rssi);
+	print_field("Instant: 0x%16.16" PRIx64, instant);
+	mgmt_print_device_flags(flags);
+	print_field("EIR Length: %d", eir_len);
+	size -= 22;
+	print_hex_field("EIR Data", eir_data, size);
+}
+
+static void mgmt_mesh_packet_cmplt_evt(const void *data, uint16_t size)
+{
+	uint8_t handle = get_u8(data);
+
+	print_field("Handle: %d", handle);
+}
+
 static const struct mgmt_data mgmt_event_table[] = {
 	{ 0x0001, "Command Complete",
 			mgmt_command_complete_evt, 3, false },
@@ -15003,6 +15354,14 @@ static const struct mgmt_data mgmt_event_table[] = {
 			mgmt_controller_suspend_evt, 1, true },
 	{ 0x002e, "Controller Resumed",
 			mgmt_controller_resume_evt, 8, true },
+	{ 0x002f, "ADV Monitor Device Found",
+			mgmt_adv_monitor_device_found_evt, 16, false },
+	{ 0x0030, "ADV Monitor Device Lost",
+			mgmt_adv_monitor_device_lost_evt, 9, true },
+	{ 0x0031, "Mesh Device Found",
+			mgmt_mesh_device_found_evt, 22, false },
+	{ 0x0032, "Mesh Packet Complete",
+			mgmt_mesh_packet_cmplt_evt, 1, true },
 	{ }
 };
 

@@ -4,6 +4,7 @@
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2022  Intel Corporation.
+ *  Copyright 2023 NXP
  *
  */
 
@@ -30,6 +31,9 @@
 #include <sys/uio.h>
 #include <linux/sockios.h>
 #include <time.h>
+#include <inttypes.h>
+#include <sys/wait.h>
+#include <poll.h>
 
 #include "lib/bluetooth.h"
 #include "lib/hci.h"
@@ -42,6 +46,9 @@
 #define NSEC_USEC(_t) (_t / 1000L)
 #define SEC_USEC(_t)  (_t  * 1000000L)
 #define TS_USEC(_ts)  (SEC_USEC((_ts)->tv_sec) + NSEC_USEC((_ts)->tv_nsec))
+
+#define DEFAULT_BIG_ID 0x01
+#define DEFAULT_BIS_ID 0x01
 
 /* Test modes */
 enum {
@@ -69,6 +76,8 @@ static bool quiet;
 
 struct bt_iso_qos *iso_qos;
 static bool inout;
+
+static uint8_t num_bis = 1;
 
 struct lookup_table {
 	const char *name;
@@ -238,7 +247,7 @@ fail:
 	return err < 0 ? err : 0;
 }
 
-static void print_qos(int sk, struct sockaddr_iso *addr)
+static void print_ucast_qos(int sk)
 {
 	struct bt_iso_qos qos;
 	socklen_t len;
@@ -253,29 +262,66 @@ static void print_qos(int sk, struct sockaddr_iso *addr)
 		return;
 	}
 
-	if (!bacmp(&addr->iso_bdaddr, BDADDR_ANY)) {
-		syslog(LOG_INFO, "QoS BIG 0x%02x BIS 0x%02x Packing 0x%02x "
-			"Framing 0x%02x]", qos.big, qos.bis, qos.packing,
-			qos.framing);
-	} else {
-		syslog(LOG_INFO, "QoS CIG 0x%02x CIS 0x%02x Packing 0x%02x "
-			"Framing 0x%02x]", qos.cig, qos.cis, qos.packing,
-			qos.framing);
-		syslog(LOG_INFO, "Input QoS [Interval %u us Latency %u "
-			"ms SDU %u PHY 0x%02x RTN %u]", qos.in.interval,
-			qos.in.latency, qos.in.sdu, qos.in.phy, qos.in.rtn);
-	}
+	syslog(LOG_INFO, "QoS CIG 0x%02x CIS 0x%02x Packing 0x%02x "
+		"Framing 0x%02x]", qos.ucast.cig, qos.ucast.cis,
+		qos.ucast.packing, qos.ucast.framing);
+
+	syslog(LOG_INFO, "Input QoS [Interval %u us Latency %u "
+		"ms SDU %u PHY 0x%02x RTN %u]", qos.ucast.in.interval,
+		qos.ucast.in.latency, qos.ucast.in.sdu, qos.ucast.in.phy,
+		qos.ucast.in.rtn);
+
 	syslog(LOG_INFO, "Output QoS [Interval %u us Latency %u "
-		"ms SDU %u PHY 0x%02x RTN %u]", qos.out.interval,
-		qos.out.latency, qos.out.sdu, qos.out.phy, qos.out.rtn);
+		"ms SDU %u PHY 0x%02x RTN %u]", qos.ucast.out.interval,
+		qos.ucast.out.latency, qos.ucast.out.sdu, qos.ucast.out.phy,
+		qos.ucast.out.rtn);
+}
+
+static void print_bcast_qos(int sk)
+{
+	struct bt_iso_qos qos;
+	socklen_t len;
+
+	/* Read Out QOS */
+	memset(&qos, 0, sizeof(qos));
+	len = sizeof(qos);
+
+	if (getsockopt(sk, SOL_BLUETOOTH, BT_ISO_QOS, &qos, &len) < 0) {
+		syslog(LOG_ERR, "Can't get QoS socket option: %s (%d)",
+				strerror(errno), errno);
+		return;
+	}
+
+	syslog(LOG_INFO, "QoS [BIG 0x%02x BIS 0x%02x Packing 0x%02x "
+		"Framing 0x%02x Encryption 0x%02x]", qos.bcast.big,
+		qos.bcast.bis, qos.bcast.packing, qos.bcast.framing,
+		qos.bcast.encryption);
+
+	if (qos.bcast.encryption == 0x01)
+		syslog(LOG_INFO, "Broadcast Code 0x%02x 0x%02x 0x%02x 0x%02x "
+		"0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x "
+		"0x%02x 0x%02x 0x%02x 0x%02x", qos.bcast.bcode[0],
+		qos.bcast.bcode[1], qos.bcast.bcode[2], qos.bcast.bcode[3],
+		qos.bcast.bcode[4], qos.bcast.bcode[5], qos.bcast.bcode[6],
+		qos.bcast.bcode[7], qos.bcast.bcode[8], qos.bcast.bcode[9],
+		qos.bcast.bcode[10], qos.bcast.bcode[11], qos.bcast.bcode[12],
+		qos.bcast.bcode[13], qos.bcast.bcode[14], qos.bcast.bcode[15]);
+
+	syslog(LOG_INFO, "Input QoS [Interval %u us Latency %u "
+		"ms SDU %u PHY 0x%02x RTN %u]", qos.bcast.in.interval,
+		qos.bcast.in.latency, qos.bcast.in.sdu,
+		qos.bcast.in.phy, qos.bcast.in.rtn);
+
+	syslog(LOG_INFO, "Output QoS [Interval %u us Latency %u "
+		"ms SDU %u PHY 0x%02x RTN %u]", qos.bcast.out.interval,
+		qos.bcast.out.latency, qos.bcast.out.sdu,
+		qos.bcast.out.phy, qos.bcast.out.rtn);
 }
 
 static int do_connect(char *peer)
 {
 	struct sockaddr_iso addr;
 	int sk;
-
-	mgmt_set_experimental();
 
 	/* Create socket */
 	sk = socket(PF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_ISO);
@@ -301,8 +347,8 @@ static int do_connect(char *peer)
 	/* Set QoS if available */
 	if (iso_qos) {
 		if (!inout || !strcmp(peer, "00:00:00:00:00:00")) {
-			iso_qos->in.phy = 0x00;
-			iso_qos->in.sdu = 0;
+			iso_qos->ucast.in.phy = 0x00;
+			iso_qos->ucast.in.sdu = 0;
 		}
 
 		if (setsockopt(sk, SOL_BLUETOOTH, BT_ISO_QOS, iso_qos,
@@ -337,13 +383,55 @@ static int do_connect(char *peer)
 
 	syslog(LOG_INFO, "Connected [%s]", peer);
 
-	print_qos(sk, &addr);
+	if (!strcmp(peer, "00:00:00:00:00:00"))
+		print_bcast_qos(sk);
+	else
+		print_ucast_qos(sk);
 
 	return sk;
 
 error:
 	close(sk);
 	return -1;
+}
+
+static int *bcast_do_connect_mbis(uint8_t count, char *peer)
+{
+	int *sk;
+	uint8_t sk_cnt = 0;
+
+	sk = malloc(count * sizeof(*sk));
+	if (!sk) {
+		syslog(LOG_ERR, "Can't allocate socket array");
+		return NULL;
+	}
+
+	defer_setup = 1;
+
+	for (int i = 0; i < count; i++) {
+		if (i == count - 1)
+			defer_setup = 0;
+
+		sk[i] = do_connect(peer);
+		if (sk[i] < 0) {
+			syslog(LOG_ERR, "Can't create socket: %s (%d)",
+					strerror(errno), errno);
+
+			goto error;
+		}
+
+		sk_cnt++;
+	}
+
+	return sk;
+
+error:
+	for (int i = 0; i < sk_cnt; i++)
+		close(sk[i]);
+
+	free(sk);
+	return NULL;
+
 }
 
 static void do_listen(char *filename, void (*handler)(int fd, int sk),
@@ -353,6 +441,9 @@ static void do_listen(char *filename, void (*handler)(int fd, int sk),
 	socklen_t optlen;
 	int sk, nsk, fd = -1;
 	char ba[18];
+	struct pollfd fds;
+	int err, sk_err;
+	socklen_t len;
 
 	if (filename) {
 		fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -387,8 +478,11 @@ static void do_listen(char *filename, void (*handler)(int fd, int sk),
 	if (peer) {
 		str2ba(peer, &addr->iso_bc->bc_bdaddr);
 		addr->iso_bc->bc_bdaddr_type = bdaddr_type;
-		addr->iso_bc->bc_num_bis = 1;
-		addr->iso_bc->bc_bis[0] = 1;
+		addr->iso_bc->bc_num_bis = num_bis;
+
+		for (int i = 0; i < num_bis; i++)
+			addr->iso_bc->bc_bis[i] = i + 1;
+
 		optlen += sizeof(*addr->iso_bc);
 	}
 
@@ -404,6 +498,16 @@ static void do_listen(char *filename, void (*handler)(int fd, int sk),
 		syslog(LOG_ERR, "Can't enable deferred setup : %s (%d)",
 							strerror(errno), errno);
 		goto error;
+	}
+
+	/* Set QoS if available */
+	if (iso_qos) {
+		if (setsockopt(sk, SOL_BLUETOOTH, BT_ISO_QOS, iso_qos,
+					sizeof(*iso_qos)) < 0) {
+			syslog(LOG_ERR, "Can't set QoS socket option: "
+					"%s (%d)", strerror(errno), errno);
+			goto error;
+		}
 	}
 
 	/* Listen for connections */
@@ -429,6 +533,28 @@ static void do_listen(char *filename, void (*handler)(int fd, int sk),
 			goto error;
 		}
 
+		/* Check if connection was successful */
+		memset(&fds, 0, sizeof(fds));
+		fds.fd = nsk;
+		fds.events = POLLERR;
+
+		if (poll(&fds, 1, 0) > 0 && (fds.revents & POLLERR)) {
+			len = sizeof(sk_err);
+
+			if (getsockopt(nsk, SOL_SOCKET, SO_ERROR,
+						&sk_err, &len) < 0)
+				err = -errno;
+			else
+				err = -sk_err;
+
+			if (err < 0)
+				syslog(LOG_ERR, "Connection failed: %s (%d)",
+						strerror(-err), -err);
+
+			close(nsk);
+			continue;
+		}
+
 		if (fork()) {
 			/* Parent */
 			close(nsk);
@@ -440,7 +566,10 @@ static void do_listen(char *filename, void (*handler)(int fd, int sk),
 		ba2str(&addr->iso_bdaddr, ba);
 		syslog(LOG_INFO, "Connected [%s]", ba);
 
-		print_qos(nsk, addr);
+		if (peer)
+			print_bcast_qos(nsk);
+		else
+			print_ucast_qos(nsk);
 
 		/* Handle deferred setup */
 		if (defer_setup) {
@@ -527,6 +656,7 @@ static void recv_mode(int fd, int sk)
 							strerror(errno), errno);
 				if (errno != ENOTCONN)
 					return;
+
 				r = 0;
 			}
 
@@ -584,17 +714,21 @@ static void send_wait(struct timespec *t_start, uint32_t us)
 	}
 
 	t_diff.tv_sec = t_now.tv_sec - t_start->tv_sec;
+	if (t_start->tv_nsec > t_now.tv_nsec) {
+		t_diff.tv_sec--;
+		t_now.tv_nsec += 1000000000L;
+	}
 	t_diff.tv_nsec = t_now.tv_nsec - t_start->tv_nsec;
 
 	delta_us = us - TS_USEC(&t_diff);
 
 	if (delta_us < 0) {
-		syslog(LOG_INFO, "Send is behind: %zd us", delta_us);
+		syslog(LOG_INFO, "Send is behind: %" PRId64 " us", delta_us);
 		delta_us = 1000;
 	}
 
 	if (!quiet)
-		syslog(LOG_INFO, "Waiting (%zd us)...", delta_us);
+		syslog(LOG_INFO, "Waiting (%" PRId64 " us)...", delta_us);
 
 	usleep(delta_us);
 
@@ -643,96 +777,34 @@ static int read_file(int fd, ssize_t count, bool rewind)
 	return len;
 }
 
-static void do_send(int sk, int fd, struct bt_iso_qos *qos, uint32_t num,
-		    bool repeat)
+static void do_send(int sk, int fd, char *peer, bool repeat)
 {
 	uint32_t seq;
 	struct timespec t_start;
-	int len, used;
-
-	if (clock_gettime(CLOCK_MONOTONIC, &t_start) < 0) {
-		perror("clock_gettime");
-		exit(EXIT_FAILURE);
-	}
-
-	for (seq = 0; ; seq++) {
-		if (fd >= 0) {
-			len = read_file(fd, qos->out.sdu, repeat);
-			if (len < 0) {
-				syslog(LOG_ERR, "read failed: %s (%d)",
-						strerror(-len), -len);
-				exit(1);
-			}
-		} else
-			len = qos->out.sdu;
-
-		len = send(sk, buf, len, 0);
-		if (len <= 0) {
-			syslog(LOG_ERR, "send failed: %s (%d)",
-						strerror(errno), errno);
-			exit(1);
-		}
-
-		ioctl(sk, TIOCOUTQ, &used);
-
-		if (!quiet)
-			syslog(LOG_INFO,
-				"[seq %d] %d bytes buffered %d (%d bytes)",
-				seq, len, used / len, used);
-
-		if (seq && !((seq + 1) % num))
-			send_wait(&t_start, num * qos->out.interval);
-	}
-}
-
-static void send_mode(char *filename, char *peer, int i, bool repeat)
-{
-	struct bt_iso_qos qos;
+	int send_len, used;
 	socklen_t len;
-	int sk, fd = -1;
+	struct bt_iso_qos qos;
 	uint32_t num;
-
-	if (filename) {
-		char altername[PATH_MAX];
-		struct stat st;
-		int err;
-
-		snprintf(altername, PATH_MAX, "%s.%u", filename, i);
-
-		err = stat(altername, &st);
-		if (!err)
-			fd = open_file(altername);
-
-		if (fd <= 0)
-			fd = open_file(filename);
-	}
-
-	sk = do_connect(peer);
-	if (sk < 0) {
-		syslog(LOG_ERR, "Can't connect to the server: %s (%d)",
-							strerror(errno), errno);
-		exit(1);
-	}
-
-	if (defer_setup) {
-		syslog(LOG_INFO, "Waiting for %d seconds",
-			abs(defer_setup) - 1);
-		sleep(abs(defer_setup) - 1);
-	}
+	struct bt_iso_io_qos *out;
 
 	syslog(LOG_INFO, "Sending ...");
 
 	/* Read QoS */
+	if (!strcmp(peer, "00:00:00:00:00:00"))
+		out = &qos.bcast.out;
+	else
+		out = &qos.ucast.out;
+
 	memset(&qos, 0, sizeof(qos));
 	len = sizeof(qos);
 	if (getsockopt(sk, SOL_BLUETOOTH, BT_ISO_QOS, &qos, &len) < 0) {
 		syslog(LOG_ERR, "Can't get Output QoS socket option: %s (%d)",
 				strerror(errno), errno);
-		qos.out.sdu = ISO_DEFAULT_MTU;
+		out->sdu = ISO_DEFAULT_MTU;
 	}
 
 	/* num of packets = latency (ms) / interval (us) */
-	num = (qos.out.latency * 1000 / qos.out.interval);
+	num = (out->latency * 1000 / out->interval);
 
 	syslog(LOG_INFO, "Number of packets: %d", num);
 
@@ -741,8 +813,8 @@ static void send_mode(char *filename, char *peer, int i, bool repeat)
 		 * latency:
 		 * jitter buffer = 2 * (SDU * subevents)
 		 */
-		sndbuf = 2 * ((qos.out.latency * 1000 / qos.out.interval) *
-							qos.out.sdu);
+		sndbuf = 2 * ((out->latency * 1000 / out->interval) *
+							out->sdu);
 
 	len = sizeof(sndbuf);
 	if (setsockopt(sk, SOL_SOCKET, SO_SNDBUF, &sndbuf, len) < 0) {
@@ -763,14 +835,114 @@ static void send_mode(char *filename, char *peer, int i, bool repeat)
 		}
 	}
 
-	for (i = 6; i < qos.out.sdu; i++)
+	for (int i = 6; i < out->sdu; i++)
 		buf[i] = 0x7f;
 
-	do_send(sk, fd, &qos, num, repeat);
+	if (clock_gettime(CLOCK_MONOTONIC, &t_start) < 0) {
+		perror("clock_gettime");
+		exit(EXIT_FAILURE);
+	}
+
+	for (seq = 0; ; seq++) {
+		if (fd >= 0) {
+			send_len = read_file(fd, out->sdu, repeat);
+			if (send_len < 0) {
+				syslog(LOG_ERR, "read failed: %s (%d)",
+						strerror(-send_len), -send_len);
+				exit(1);
+			}
+		} else
+			send_len = out->sdu;
+
+		send_len = send(sk, buf, send_len, 0);
+		if (send_len <= 0) {
+			syslog(LOG_ERR, "send failed: %s (%d)",
+						strerror(errno), errno);
+			exit(1);
+		}
+
+		ioctl(sk, TIOCOUTQ, &used);
+
+		if (!quiet)
+			syslog(LOG_INFO,
+				"[seq %d] %d bytes buffered %d (%d bytes)",
+				seq, send_len, used / send_len, used);
+
+		if (seq && !((seq + 1) % num))
+			send_wait(&t_start, num * out->interval);
+	}
+}
+
+static void send_mode(char *filename, char *peer, int i, bool repeat)
+{
+	int sk, fd = -1;
+	int *sk_arr;
+	uint8_t nconn = strcmp(peer, "00:00:00:00:00:00") ? 1 : num_bis;
+
+	mgmt_set_experimental();
+
+	if (filename) {
+		char altername[PATH_MAX];
+		struct stat st;
+		int err;
+
+		snprintf(altername, PATH_MAX, "%s.%u", filename, i);
+
+		err = stat(altername, &st);
+		if (!err)
+			fd = open_file(altername);
+
+		if (fd <= 0)
+			fd = open_file(filename);
+	}
+
+	if (nconn > 1) {
+		sk_arr = bcast_do_connect_mbis(nconn, peer);
+		if (!sk_arr)
+			exit(1);
+
+		for (int i = 0; i < nconn; i++) {
+			if (fork()) {
+				/* Parent */
+				continue;
+			}
+
+			/* Child */
+			do_send(sk_arr[i], fd, peer, repeat);
+			exit(0);
+		}
+
+		/* Wait for children to exit */
+		while (wait(NULL) > 0)
+			;
+
+		for (int i = 0; i < nconn; i++)
+			close(sk_arr[i]);
+
+		free(sk_arr);
+		return;
+	}
+
+	sk = do_connect(peer);
+	if (sk < 0) {
+		syslog(LOG_ERR, "Can't connect to the server: %s (%d)",
+							strerror(errno), errno);
+		exit(1);
+	}
+
+	if (defer_setup) {
+		syslog(LOG_INFO, "Waiting for %d seconds",
+			abs(defer_setup) - 1);
+		sleep(abs(defer_setup) - 1);
+	}
+
+	do_send(sk, fd, peer, repeat);
 }
 
 static void reconnect_mode(char *peer)
 {
+	mgmt_set_experimental();
+
 	while (1) {
 		int sk;
 
@@ -789,6 +961,8 @@ static void reconnect_mode(char *peer)
 
 static void multy_connect_mode(char *peer)
 {
+	mgmt_set_experimental();
+
 	while (1) {
 		int i, sk;
 
@@ -821,12 +995,22 @@ static void multy_connect_mode(char *peer)
 
 #define QOS(_interval, _latency, _sdu, _phy, _rtn) \
 { \
-	.cig = BT_ISO_QOS_CIG_UNSET, \
-	.cis = BT_ISO_QOS_CIS_UNSET, \
-	.sca = 0x07, \
-	.packing = 0x00, \
-	.framing = 0x00, \
-	.out = QOS_IO(_interval, _latency, _sdu, _phy, _rtn), \
+	.bcast = { \
+		.big = BT_ISO_QOS_BIG_UNSET, \
+		.bis = BT_ISO_QOS_BIS_UNSET, \
+		.sync_interval = 0x07, \
+		.packing = 0x00, \
+		.framing = 0x00, \
+		.out = QOS_IO(_interval, _latency, _sdu, _phy, _rtn), \
+		.encryption = 0x00, \
+		.bcode = {0}, \
+		.options = 0x00, \
+		.skip = 0x0000, \
+		.sync_timeout = 0x4000, \
+		.sync_cte_type = 0x00, \
+		.mse = 0x00, \
+		.timeout = 0x4000, \
+	}, \
 }
 
 #define QOS_PRESET(_name, _inout, _interval, _latency, _sdu, _phy, _rtn) \
@@ -912,7 +1096,8 @@ static void usage(void)
 		"\t[-B, --preset <value>]\n"
 		"\t[-G, --CIG/BIG <value>]\n"
 		"\t[-T, --CIS/BIS <value>]\n"
-		"\t[-V, --type <value>] address type (help for list)\n");
+		"\t[-V, --type <value>] address type (help for list)\n"
+		"\t[-N, --nbis <value>] Number of BISes to create/synchronize to\n");
 }
 
 static const struct option main_options[] = {
@@ -942,8 +1127,28 @@ static const struct option main_options[] = {
 	{ "CIG/BIG",   required_argument, NULL, 'G'},
 	{ "CIS/BIS",   required_argument, NULL, 'T'},
 	{ "type",      required_argument, NULL, 'V'},
+	{ "nbis",      required_argument, NULL, 'N'},
 	{}
 };
+
+static bool str2hex(const char *str, uint16_t in_len, uint8_t *out,
+		uint16_t out_len)
+{
+	uint16_t i;
+
+	if (in_len < out_len * 2)
+		return false;
+
+	if (!strncasecmp(str, "0x", 2))
+		str += 2;
+
+	for (i = 0; i < out_len; i++) {
+		if (sscanf(&str[i * 2], "%02hhx", &out[i]) != 1)
+			return false;
+	}
+
+	return true;
+}
 
 int main(int argc, char *argv[])
 {
@@ -952,6 +1157,8 @@ int main(int argc, char *argv[])
 	char *filename = NULL;
 	bool repeat = false;
 	unsigned int i;
+	uint8_t nconn = 1;
+	char *peer;
 
 	iso_qos = malloc(sizeof(*iso_qos));
 	/* Default to 16_2_1 */
@@ -962,7 +1169,7 @@ int main(int argc, char *argv[])
 		int opt;
 
 		opt = getopt_long(argc, argv,
-			"d::cmr::s::nb:i:j:hqt:CV:W:M:S:P:F:I:L:Y:R:B:G:T:",
+			"d::cmr::s::nb:i:j:hqt:CV:W:M:S:P:F:I:L:Y:R:B:G:T:e:k:N:",
 			main_options, NULL);
 		if (opt < 0)
 			break;
@@ -1052,43 +1259,43 @@ int main(int argc, char *argv[])
 
 		case 'M':
 			if (optarg)
-				iso_qos->out.sdu = atoi(optarg);
+				iso_qos->ucast.out.sdu = atoi(optarg);
 			break;
 
 		case 'S':
 			if (optarg)
-				iso_qos->sca = atoi(optarg);
+				iso_qos->ucast.sca = atoi(optarg);
 			break;
 
 
 		case 'P':
 			if (optarg)
-				iso_qos->packing = atoi(optarg);
+				iso_qos->ucast.packing = atoi(optarg);
 			break;
 
 		case 'F':
 			if (optarg)
-				iso_qos->framing = atoi(optarg);
+				iso_qos->ucast.framing = atoi(optarg);
 			break;
 
 		case 'I':
 			if (optarg)
-				iso_qos->out.interval = atoi(optarg);
+				iso_qos->ucast.out.interval = atoi(optarg);
 			break;
 
 		case 'L':
 			if (optarg)
-				iso_qos->out.latency = atoi(optarg);
+				iso_qos->ucast.out.latency = atoi(optarg);
 			break;
 
 		case 'Y':
 			if (optarg)
-				iso_qos->out.phy = atoi(optarg);
+				iso_qos->ucast.out.phy = atoi(optarg);
 			break;
 
 		case 'R':
 			if (optarg)
-				iso_qos->out.rtn = atoi(optarg);
+				iso_qos->ucast.out.rtn = atoi(optarg);
 			break;
 
 		case 'B':
@@ -1107,12 +1314,42 @@ int main(int argc, char *argv[])
 
 		case 'G':
 			if (optarg)
-				iso_qos->cig = atoi(optarg);
+				iso_qos->ucast.cig = atoi(optarg);
 			break;
 
 		case 'T':
 			if (optarg)
-				iso_qos->cis = atoi(optarg);
+				iso_qos->ucast.cis = atoi(optarg);
+			break;
+
+		case 'e':
+			if (optarg)
+				iso_qos->bcast.encryption =
+					strtol(optarg, NULL, 16);
+			break;
+
+		case 'k':
+			if (optarg)
+				if (!str2hex(optarg, strlen(optarg),
+						iso_qos->bcast.bcode, 16))
+					exit(1);
+			break;
+
+		case 'N':
+			if (optarg)
+				num_bis = atoi(optarg);
+
+			if (num_bis > 1) {
+				/* If the user requested multiple BISes,
+				 * make sure that all BISes are bound
+				 * for the same BIG and advertising set
+				 */
+				if (iso_qos->bcast.big == BT_ISO_QOS_BIG_UNSET)
+					iso_qos->bcast.big = DEFAULT_BIG_ID;
+
+				if (iso_qos->bcast.bis == BT_ISO_QOS_BIS_UNSET)
+					iso_qos->bcast.bis = DEFAULT_BIS_ID;
+			}
 			break;
 
 		/* fall through */
@@ -1123,11 +1360,11 @@ int main(int argc, char *argv[])
 	}
 
 	if (inout) {
-		iso_qos->in = iso_qos->out;
+		iso_qos->ucast.in = iso_qos->ucast.out;
 	} else {
 		/* Align interval and latency even if is unidirectional */
-		iso_qos->in.interval = iso_qos->out.interval;
-		iso_qos->in.latency = iso_qos->out.latency;
+		iso_qos->ucast.in.interval = iso_qos->ucast.out.interval;
+		iso_qos->ucast.in.latency = iso_qos->ucast.out.latency;
 	}
 
 	buf = malloc(data_size);
@@ -1188,10 +1425,46 @@ int main(int argc, char *argv[])
 			break;
 
 		case CONNECT:
-			sk = do_connect(argv[optind + i]);
-			if (sk < 0)
-				exit(1);
-			dump_mode(-1, sk);
+			peer = argv[optind + i];
+
+			mgmt_set_experimental();
+
+			if (!strcmp(peer, "00:00:00:00:00:00"))
+				nconn = num_bis;
+
+			if (nconn > 1) {
+				int *sk_arr =  bcast_do_connect_mbis(nconn,
+								peer);
+
+				if (!sk_arr)
+					exit(1);
+
+				for (int i = 0; i < nconn; i++) {
+					if (fork()) {
+						/* Parent */
+						continue;
+					}
+
+					/* Child */
+					dump_mode(-1, sk_arr[i]);
+					exit(0);
+				}
+
+				/* Wait for children to exit */
+				while (wait(NULL) > 0)
+					;
+
+				for (int i = 0; i < nconn; i++)
+					close(sk_arr[i]);
+
+				free(sk_arr);
+			} else {
+				sk = do_connect(argv[optind + i]);
+				if (sk < 0)
+					exit(1);
+				dump_mode(-1, sk);
+			}
+
 			break;
 
 		case RECV:

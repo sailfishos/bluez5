@@ -4,6 +4,7 @@
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2020  Intel Corporation. All rights reserved.
+ *  Copyright 2023 NXP
  *
  *
  */
@@ -15,7 +16,7 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdbool.h>
-#include <stdint.h>
+#include <inttypes.h>
 #include <errno.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -24,6 +25,8 @@
 #include <sys/ioctl.h>
 #include <sys/uio.h>
 #include <wordexp.h>
+#include <sys/timerfd.h>
+#include <sys/stat.h>
 
 #include <glib.h>
 
@@ -33,11 +36,13 @@
 #include "lib/uuid.h"
 
 #include "profiles/audio/a2dp-codecs.h"
+#include "src/shared/lc3.h"
 
 #include "src/shared/util.h"
 #include "src/shared/shell.h"
 #include "src/shared/io.h"
 #include "src/shared/queue.h"
+#include "print.h"
 #include "player.h"
 
 /* String display constants */
@@ -62,10 +67,20 @@ struct endpoint {
 	char *path;
 	char *uuid;
 	uint8_t codec;
+	uint16_t cid;
+	uint16_t vid;
 	struct iovec *caps;
+	struct iovec *meta;
 	bool auto_accept;
-	char *transport;
+	uint8_t max_transports;
+	uint8_t iso_group;
+	uint8_t iso_stream;
+	struct queue *acquiring;
+	struct queue *transports;
 	DBusMessage *msg;
+	struct preset *preset;
+	bool broadcast;
+	struct iovec *bcode;
 };
 
 static DBusConnection *dbus_conn;
@@ -85,8 +100,26 @@ struct transport {
 	uint16_t mtu[2];
 	char *filename;
 	int fd;
+	struct stat stat;
 	struct io *io;
 	uint32_t seq;
+	struct io *timer_io;
+};
+
+static const uint8_t base_lc3_16_2_1[] = {
+	0x28, 0x00, 0x00, /* Presentation Delay */
+	0x01, /* Number of Subgroups */
+	0x01, /* Number of BIS */
+	0x06, 0x00, 0x00, 0x00, 0x00, /* Code ID = LC3 (0x06) */
+	0x11, /* Codec Specific Configuration */
+	0x02, 0x01, 0x03, /* 16 KHZ */
+	0x02, 0x02, 0x01, /* 10 ms */
+	0x05, 0x03, 0x01, 0x00, 0x00, 0x00,  /* Front Left */
+	0x03, 0x04, 0x28, 0x00, /* Frame Length 40 bytes */
+	0x04, /* Metadata */
+	0x03, 0x02, 0x02, 0x00, /* Audio Context: Convertional */
+	0x01, /* BIS */
+	0x00, /* Codec Specific Configuration */
 };
 
 static void endpoint_unregister(void *data)
@@ -514,12 +547,15 @@ static void print_media(GDBusProxy *proxy, const char *description)
 	str = proxy_description(proxy, "Media", description);
 
 	bt_shell_printf("%s\n", str);
+	print_property(proxy, "SupportedUUIDs");
 
 	g_free(str);
 }
 
-static void print_player(GDBusProxy *proxy, const char *description)
+static void print_player(void *data, void *user_data)
 {
+	GDBusProxy *proxy = data;
+	const char *description = user_data;
 	char *str;
 
 	str = proxy_description(proxy, "Player", description);
@@ -532,96 +568,9 @@ static void print_player(GDBusProxy *proxy, const char *description)
 
 static void cmd_list(int argc, char *arg[])
 {
-	GList *l;
-
-	for (l = players; l; l = g_list_next(l)) {
-		GDBusProxy *proxy = l->data;
-		print_player(proxy, NULL);
-	}
+	g_list_foreach(players, print_player, NULL);
 
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
-}
-
-static void print_iter(const char *label, const char *name,
-						DBusMessageIter *iter)
-{
-	dbus_bool_t valbool;
-	dbus_uint32_t valu32;
-	dbus_uint16_t valu16;
-	dbus_int16_t vals16;
-	unsigned char byte;
-	const char *valstr;
-	DBusMessageIter subiter;
-
-	if (iter == NULL) {
-		bt_shell_printf("%s%s is nil\n", label, name);
-		return;
-	}
-
-	switch (dbus_message_iter_get_arg_type(iter)) {
-	case DBUS_TYPE_INVALID:
-		bt_shell_printf("%s%s is invalid\n", label, name);
-		break;
-	case DBUS_TYPE_STRING:
-	case DBUS_TYPE_OBJECT_PATH:
-		dbus_message_iter_get_basic(iter, &valstr);
-		bt_shell_printf("%s%s: %s\n", label, name, valstr);
-		break;
-	case DBUS_TYPE_BOOLEAN:
-		dbus_message_iter_get_basic(iter, &valbool);
-		bt_shell_printf("%s%s: %s\n", label, name,
-					valbool == TRUE ? "yes" : "no");
-		break;
-	case DBUS_TYPE_UINT32:
-		dbus_message_iter_get_basic(iter, &valu32);
-		bt_shell_printf("%s%s: 0x%08x (%u)\n", label, name, valu32,
-								valu32);
-		break;
-	case DBUS_TYPE_UINT16:
-		dbus_message_iter_get_basic(iter, &valu16);
-		bt_shell_printf("%s%s: 0x%04x (%u)\n", label, name, valu16,
-								valu16);
-		break;
-	case DBUS_TYPE_INT16:
-		dbus_message_iter_get_basic(iter, &vals16);
-		bt_shell_printf("%s%s: %d\n", label, name, vals16);
-		break;
-	case DBUS_TYPE_BYTE:
-		dbus_message_iter_get_basic(iter, &byte);
-		bt_shell_printf("%s%s: 0x%02x (%d)\n", label, name, byte, byte);
-		break;
-	case DBUS_TYPE_VARIANT:
-		dbus_message_iter_recurse(iter, &subiter);
-		print_iter(label, name, &subiter);
-		break;
-	case DBUS_TYPE_ARRAY:
-		dbus_message_iter_recurse(iter, &subiter);
-		while (dbus_message_iter_get_arg_type(&subiter) !=
-							DBUS_TYPE_INVALID) {
-			print_iter(label, name, &subiter);
-			dbus_message_iter_next(&subiter);
-		}
-		break;
-	case DBUS_TYPE_DICT_ENTRY:
-		dbus_message_iter_recurse(iter, &subiter);
-		dbus_message_iter_get_basic(&subiter, &valstr);
-		dbus_message_iter_next(&subiter);
-		print_iter(label, valstr, &subiter);
-		break;
-	default:
-		bt_shell_printf("%s%s has unsupported type\n", label, name);
-		break;
-	}
-}
-
-static void print_property(GDBusProxy *proxy, const char *name)
-{
-	DBusMessageIter iter;
-
-	if (g_dbus_proxy_get_property(proxy, name, &iter) == FALSE)
-		return;
-
-	print_iter("\t", name, &iter);
 }
 
 static void cmd_show_item(int argc, char *argv[])
@@ -1126,8 +1075,19 @@ static DBusMessage *endpoint_set_configuration(DBusConnection *conn,
 	bt_shell_printf("\tTransport %s\n", path);
 	print_iter("\t", "Properties", &props);
 
-	free(ep->transport);
-	ep->transport = strdup(path);
+	if (!ep->max_transports) {
+		bt_shell_printf("Maximum transports reached: rejecting\n");
+		return g_dbus_create_error(msg,
+					 "org.bluez.Error.Rejected",
+					 "Maximum transports reached");
+	}
+
+	ep->max_transports--;
+
+	if (!ep->transports)
+		ep->transports = queue_new();
+
+	queue_push_tail(ep->transports, strdup(path));
 
 	if (ep->auto_accept) {
 		bt_shell_printf("Auto Accepting...\n");
@@ -1148,7 +1108,7 @@ struct codec_capabilities {
 
 #define data(args...) ((const unsigned char[]) { args })
 
-#define SBC_DATA(args...) \
+#define CODEC_DATA(args...) \
 	{ \
 		.iov_base = (void *)data(args), \
 		.iov_len = sizeof(data(args)), \
@@ -1160,6 +1120,13 @@ struct codec_capabilities {
 		.codec_id = _codec_id, \
 		.data = _data, \
 	}
+
+#define LC3_DATA(_freq, _duration, _chan_count, _len_min, _len_max) \
+	CODEC_DATA(0x03, LC3_FREQ, _freq, _freq >> 8, \
+		   0x02, LC3_DURATION, _duration, \
+		   0x02, LC3_CHAN_COUNT, _chan_count, \
+		   0x05, LC3_FRAME_LEN, _len_min, _len_min >> 8, _len_max, \
+		   _len_max >> 8)
 
 static const struct capabilities {
 	const char *uuid;
@@ -1175,7 +1142,7 @@ static const struct capabilities {
 	 * Bitpool Range: 2-64
 	 */
 	CODEC_CAPABILITIES(A2DP_SOURCE_UUID, A2DP_CODEC_SBC,
-					SBC_DATA(0xff, 0xff, 2, 64)),
+					CODEC_DATA(0xff, 0xff, 2, 64)),
 	/* A2DP SBC Sink:
 	 *
 	 * Channel Modes: Mono DualChannel Stereo JointStereo
@@ -1185,26 +1152,60 @@ static const struct capabilities {
 	 * Bitpool Range: 2-64
 	 */
 	CODEC_CAPABILITIES(A2DP_SINK_UUID, A2DP_CODEC_SBC,
-					SBC_DATA(0xff, 0xff, 2, 64)),
+					CODEC_DATA(0xff, 0xff, 2, 64)),
+	/* PAC LC3 Sink:
+	 *
+	 * Frequencies: 8Khz 11Khz 16Khz 22Khz 24Khz 32Khz 44.1Khz 48Khz
+	 * Duration: 7.5 ms 10 ms
+	 * Channel count: 3
+	 * Frame length: 30-240
+	 */
+	CODEC_CAPABILITIES(PAC_SINK_UUID, LC3_ID,
+					LC3_DATA(LC3_FREQ_ANY, LC3_DURATION_ANY,
+						3u, 30, 240)),
+	/* PAC LC3 Source:
+	 *
+	 * Frequencies: 8Khz 11Khz 16Khz 22Khz 24Khz 32Khz 44.1Khz 48Khz
+	 * Duration: 7.5 ms 10 ms
+	 * Channel count: 3
+	 * Frame length: 30-240
+	 */
+	CODEC_CAPABILITIES(PAC_SOURCE_UUID, LC3_ID,
+					LC3_DATA(LC3_FREQ_ANY, LC3_DURATION_ANY,
+						3u, 30, 240)),
+	/* Broadcast LC3 Source:
+	 *
+	 * Frequencies: 8Khz 11Khz 16Khz 22Khz 24Khz 32Khz 44.1Khz 48Khz
+	 * Duration: 7.5 ms 10 ms
+	 * Channel count: 3
+	 * Frame length: 30-240
+	 */
+	CODEC_CAPABILITIES(BAA_SERVICE_UUID, LC3_ID,
+					LC3_DATA(LC3_FREQ_ANY, LC3_DURATION_ANY,
+						3u, 30, 240)),
+};
+
+struct codec_qos {
+	uint32_t interval;
+	uint8_t  framing;
+	char *phy;
+	uint16_t sdu;
+	uint8_t  rtn;
+	uint16_t latency;
+	uint32_t delay;
 };
 
 struct codec_preset {
-	const char *name;
+	char *name;
 	const struct iovec data;
-	bool is_default;
+	const struct codec_qos qos;
+	uint8_t target_latency;
 };
 
 #define SBC_PRESET(_name, _data) \
 	{ \
 		.name = _name, \
 		.data = _data, \
-	}
-
-#define SBC_DEFAULT_PRESET(_name, _data) \
-	{ \
-		.name = _name, \
-		.data = _data, \
-		.is_default = true, \
 	}
 
 static struct codec_preset sbc_presets[] = {
@@ -1216,75 +1217,376 @@ static struct codec_preset sbc_presets[] = {
 	 * mono, and 512kb/s for two-channel modes.
 	 */
 	SBC_PRESET("MQ_MONO_44_1",
-		SBC_DATA(0x28, 0x15, 2, SBC_BITPOOL_MQ_MONO_44100)),
+		CODEC_DATA(0x28, 0x15, 2, SBC_BITPOOL_MQ_MONO_44100)),
 	SBC_PRESET("MQ_MONO_48",
-		SBC_DATA(0x18, 0x15, 2, SBC_BITPOOL_MQ_MONO_48000)),
+		CODEC_DATA(0x18, 0x15, 2, SBC_BITPOOL_MQ_MONO_48000)),
 	SBC_PRESET("MQ_STEREO_44_1",
-		SBC_DATA(0x21, 0x15, 2, SBC_BITPOOL_MQ_JOINT_STEREO_44100)),
+		CODEC_DATA(0x21, 0x15, 2, SBC_BITPOOL_MQ_JOINT_STEREO_44100)),
 	SBC_PRESET("MQ_STEREO_48",
-		SBC_DATA(0x11, 0x15, 2, SBC_BITPOOL_MQ_JOINT_STEREO_48000)),
+		CODEC_DATA(0x11, 0x15, 2, SBC_BITPOOL_MQ_JOINT_STEREO_48000)),
 	SBC_PRESET("HQ_MONO_44_1",
-		SBC_DATA(0x28, 0x15, 2, SBC_BITPOOL_HQ_MONO_44100)),
+		CODEC_DATA(0x28, 0x15, 2, SBC_BITPOOL_HQ_MONO_44100)),
 	SBC_PRESET("HQ_MONO_48",
-		SBC_DATA(0x18, 0x15, 2, SBC_BITPOOL_HQ_MONO_48000)),
-	SBC_DEFAULT_PRESET("HQ_STEREO_44_1",
-		SBC_DATA(0x21, 0x15, 2, SBC_BITPOOL_HQ_JOINT_STEREO_44100)),
+		CODEC_DATA(0x18, 0x15, 2, SBC_BITPOOL_HQ_MONO_48000)),
+	SBC_PRESET("HQ_STEREO_44_1",
+		CODEC_DATA(0x21, 0x15, 2, SBC_BITPOOL_HQ_JOINT_STEREO_44100)),
 	SBC_PRESET("HQ_STEREO_48",
-		SBC_DATA(0x11, 0x15, 2, SBC_BITPOOL_HQ_JOINT_STEREO_48000)),
+		CODEC_DATA(0x11, 0x15, 2, SBC_BITPOOL_HQ_JOINT_STEREO_48000)),
 	/* Higher bitrates not recommended by A2DP spec, it dual channel to
 	 * avoid going above 53 bitpool:
 	 *
 	 * https://habr.com/en/post/456476/
 	 * https://gitlab.freedesktop.org/pulseaudio/pulseaudio/-/issues/1092
 	 */
-	SBC_PRESET("XQ_DUAL_44_1", SBC_DATA(0x24, 0x15, 2, 43)),
-	SBC_PRESET("XQ_DUAL_48", SBC_DATA(0x14, 0x15, 2, 39)),
+	SBC_PRESET("XQ_DUAL_44_1", CODEC_DATA(0x24, 0x15, 2, 43)),
+	SBC_PRESET("XQ_DUAL_48", CODEC_DATA(0x14, 0x15, 2, 39)),
 	/* Ultra high bitpool that fits in 512 kbps mandatory bitrate */
-	SBC_PRESET("UQ_STEREO_44_1", SBC_DATA(0x21, 0x15, 2, 64)),
-	SBC_PRESET("UQ_STEREO_48", SBC_DATA(0x11, 0x15, 2, 58)),
+	SBC_PRESET("UQ_STEREO_44_1", CODEC_DATA(0x21, 0x15, 2, 64)),
+	SBC_PRESET("UQ_STEREO_48", CODEC_DATA(0x11, 0x15, 2, 58)),
 };
 
-#define PRESET(_uuid, _presets) \
+#define QOS_CONFIG(_interval, _framing, _phy, _sdu, _rtn, _latency, _delay) \
+	{ \
+		.interval = _interval, \
+		.framing = _framing, \
+		.phy = _phy, \
+		.sdu = _sdu, \
+		.rtn = _rtn, \
+		.latency = _latency, \
+		.delay = _delay, \
+	}
+
+#define QOS_UNFRAMED(_interval, _phy, _sdu, _rtn, _latency, _delay) \
+	QOS_CONFIG(_interval, 0x00, _phy, _sdu, _rtn, _latency, _delay)
+
+#define QOS_FRAMED(_interval, _phy, _sdu, _rtn, _latency, _delay) \
+	QOS_CONFIG(_interval, 0x01, _phy, _sdu, _rtn, _latency, _delay)
+
+#define QOS_UNFRAMED_1M(_interval, _sdu, _rtn, _latency, _delay) \
+	QOS_UNFRAMED(_interval, "1M", _sdu, _rtn, _latency, _delay) \
+
+#define QOS_FRAMED_1M(_interval, _sdu, _rtn, _latency, _delay) \
+	QOS_FRAMED(_interval, "1M", _sdu, _rtn, _latency, _delay) \
+
+#define QOS_UNFRAMED_2M(_interval, _sdu, _rtn, _latency, _delay) \
+	QOS_UNFRAMED(_interval, "2M", _sdu, _rtn, _latency, _delay) \
+
+#define QOS_FRAMED_2M(_interval, _sdu, _rtn, _latency, _delay) \
+	QOS_FRAMED(_interval, "2M", _sdu, _rtn, _latency, _delay) \
+
+#define LC3_7_5_UNFRAMED(_sdu, _rtn, _latency, _delay) \
+	QOS_UNFRAMED(7500u, "2M", _sdu, _rtn, _latency, _delay)
+
+#define LC3_7_5_FRAMED(_sdu, _rtn, _latency, _delay) \
+	QOS_FRAMED(7500u, "2M", _sdu, _rtn, _latency, _delay)
+
+#define LC3_10_UNFRAMED(_sdu, _rtn, _latency, _delay) \
+	QOS_UNFRAMED_2M(10000u, _sdu, _rtn, _latency, _delay)
+
+#define LC3_10_FRAMED(_sdu, _rtn, _latency, _delay) \
+	QOS_FRAMED_2M(10000u, _sdu, _rtn, _latency, _delay)
+
+#define LC3_PRESET_DATA(_freq, _duration, _len) \
+	CODEC_DATA(0x02, LC3_CONFIG_FREQ, _freq, \
+		   0x02, LC3_CONFIG_DURATION, _duration, \
+		   0x03, LC3_CONFIG_FRAME_LEN, _len, _len >> 8)
+
+#define LC3_PRESET_8KHZ(_duration, _len) \
+	LC3_PRESET_DATA(LC3_CONFIG_FREQ_8KHZ, _duration, _len)
+
+#define LC3_PRESET_11KHZ(_duration, _len) \
+	LC3_PRESET_DATA(LC3_CONFIG_FREQ_11KHZ, _duration, _len)
+
+#define LC3_PRESET_16KHZ(_duration, _len) \
+	LC3_PRESET_DATA(LC3_CONFIG_FREQ_16KHZ, _duration, _len)
+
+#define LC3_PRESET_22KHZ(_duration, _len) \
+	LC3_PRESET_DATA(LC3_CONFIG_FREQ_22KHZ, _duration, _len)
+
+#define LC3_PRESET_24KHZ(_duration, _len) \
+	LC3_PRESET_DATA(LC3_CONFIG_FREQ_24KHZ, _duration, _len)
+
+#define LC3_PRESET_32KHZ(_duration, _len) \
+	LC3_PRESET_DATA(LC3_CONFIG_FREQ_32KHZ, _duration, _len)
+
+#define LC3_PRESET_44KHZ(_duration, _len) \
+	LC3_PRESET_DATA(LC3_CONFIG_FREQ_44KHZ, _duration, _len)
+
+#define LC3_PRESET_48KHZ(_duration, _len) \
+	LC3_PRESET_DATA(LC3_CONFIG_FREQ_48KHZ, _duration, _len)
+
+#define LC3_PRESET_LL(_name, _data, _qos) \
+	{ \
+		.name = _name, \
+		.data = _data, \
+		.qos = _qos, \
+		.latency = 0x01, \
+	}
+
+#define LC3_PRESET(_name, _data, _qos) \
+	{ \
+		.name = _name, \
+		.data = _data, \
+		.qos = _qos, \
+		.target_latency = 0x02, \
+	}
+
+#define LC3_PRESET_HR(_name, _data, _qos) \
+	{ \
+		.name = _name, \
+		.data = _data, \
+		.qos = _qos, \
+		.target_latency = 0x03, \
+	}
+
+static struct codec_preset lc3_presets[] = {
+	/* Table 4.43: QoS configuration support setting requirements */
+	LC3_PRESET("8_1_1",
+			LC3_PRESET_8KHZ(LC3_CONFIG_DURATION_7_5, 26u),
+			LC3_7_5_UNFRAMED(26u, 2u, 8u, 40000u)),
+	LC3_PRESET("8_2_1",
+			LC3_PRESET_8KHZ(LC3_CONFIG_DURATION_10, 30u),
+			LC3_10_UNFRAMED(30u, 2u, 10u, 40000u)),
+	LC3_PRESET("16_1_1",
+			LC3_PRESET_16KHZ(LC3_CONFIG_DURATION_7_5, 30u),
+			LC3_7_5_UNFRAMED(30u, 2u, 8u, 40000u)),
+	LC3_PRESET("16_2_1",
+			LC3_PRESET_16KHZ(LC3_CONFIG_DURATION_10, 40u),
+			LC3_10_UNFRAMED(40u, 2u, 10u, 40000u)),
+	LC3_PRESET("24_1_1",
+			LC3_PRESET_24KHZ(LC3_CONFIG_DURATION_7_5, 45u),
+			LC3_7_5_UNFRAMED(45u, 2u, 8u, 40000u)),
+	LC3_PRESET("24_2_1",
+			LC3_PRESET_24KHZ(LC3_CONFIG_DURATION_10, 60u),
+			LC3_10_UNFRAMED(60u, 2u, 10u, 40000u)),
+	LC3_PRESET("32_1_1",
+			LC3_PRESET_32KHZ(LC3_CONFIG_DURATION_7_5, 60u),
+			LC3_7_5_UNFRAMED(60u, 2u, 8u, 40000u)),
+	LC3_PRESET("32_2_1",
+			LC3_PRESET_32KHZ(LC3_CONFIG_DURATION_10, 80u),
+			LC3_10_UNFRAMED(80u, 2u, 10u, 40000u)),
+	LC3_PRESET("44_1_1",
+			LC3_PRESET_44KHZ(LC3_CONFIG_DURATION_7_5, 98u),
+			QOS_FRAMED_2M(8163u, 98u, 5u, 24u, 40000u)),
+	LC3_PRESET("44_2_1",
+			LC3_PRESET_44KHZ(LC3_CONFIG_DURATION_10, 130u),
+			QOS_FRAMED_2M(10884u, 130u, 5u, 31u, 40000u)),
+	LC3_PRESET("48_1_1",
+			LC3_PRESET_48KHZ(LC3_CONFIG_DURATION_7_5, 75u),
+			LC3_7_5_UNFRAMED(75u, 5u, 15u, 40000u)),
+	LC3_PRESET("48_2_1",
+			LC3_PRESET_48KHZ(LC3_CONFIG_DURATION_10, 100u),
+			LC3_10_UNFRAMED(100u, 5u, 20u, 40000u)),
+	LC3_PRESET("48_3_1",
+			LC3_PRESET_48KHZ(LC3_CONFIG_DURATION_7_5, 90u),
+			LC3_7_5_UNFRAMED(90u, 5u, 15u, 40000u)),
+	LC3_PRESET("48_4_1",
+			LC3_PRESET_48KHZ(LC3_CONFIG_DURATION_10, 120u),
+			LC3_10_UNFRAMED(120u, 5u, 20u, 40000u)),
+	LC3_PRESET("48_5_1",
+			LC3_PRESET_48KHZ(LC3_CONFIG_DURATION_7_5, 117u),
+			LC3_7_5_UNFRAMED(117u, 5u, 15u, 40000u)),
+	LC3_PRESET("48_6_1",
+			LC3_PRESET_48KHZ(LC3_CONFIG_DURATION_10, 155u),
+			LC3_10_UNFRAMED(155u, 5u, 20u, 40000u)),
+	/* QoS Configuration settings for high reliability audio data */
+	LC3_PRESET_HR("8_1_2",
+			LC3_PRESET_8KHZ(LC3_CONFIG_DURATION_7_5, 26u),
+			LC3_7_5_UNFRAMED(26u, 13u, 75u, 40000u)),
+	LC3_PRESET_HR("8_2_2",
+			LC3_PRESET_8KHZ(LC3_CONFIG_DURATION_10, 30u),
+			LC3_10_UNFRAMED(30u, 13u, 95u, 40000u)),
+	LC3_PRESET_HR("16_1_2",
+			LC3_PRESET_16KHZ(LC3_CONFIG_DURATION_7_5, 30u),
+			LC3_7_5_UNFRAMED(30u, 13u, 75u, 40000u)),
+	LC3_PRESET_HR("16_2_2",
+			LC3_PRESET_16KHZ(LC3_CONFIG_DURATION_10, 40u),
+			LC3_10_UNFRAMED(40u, 13u, 95u, 40000u)),
+	LC3_PRESET_HR("24_1_2",
+			LC3_PRESET_24KHZ(LC3_CONFIG_DURATION_7_5, 45u),
+			LC3_7_5_UNFRAMED(45u, 13u, 75u, 40000u)),
+	LC3_PRESET_HR("24_2_2",
+			LC3_PRESET_24KHZ(LC3_CONFIG_DURATION_10, 60u),
+			LC3_10_UNFRAMED(60u, 13u, 95u, 40000u)),
+	LC3_PRESET_HR("32_1_2",
+			LC3_PRESET_32KHZ(LC3_CONFIG_DURATION_7_5, 60u),
+			LC3_7_5_UNFRAMED(60u, 13u, 75u, 40000u)),
+	LC3_PRESET_HR("32_2_2",
+			LC3_PRESET_32KHZ(LC3_CONFIG_DURATION_10, 80u),
+			LC3_10_UNFRAMED(80u, 13u, 95u, 40000u)),
+	LC3_PRESET_HR("44_1_2",
+			LC3_PRESET_44KHZ(LC3_CONFIG_DURATION_7_5, 98u),
+			QOS_FRAMED_2M(8163u, 98u, 13u, 80u, 40000u)),
+	LC3_PRESET_HR("44_2_2",
+			LC3_PRESET_44KHZ(LC3_CONFIG_DURATION_10, 130u),
+			QOS_FRAMED_2M(10884u, 130u, 13u, 85u, 40000u)),
+	LC3_PRESET_HR("48_1_2",
+			LC3_PRESET_48KHZ(LC3_CONFIG_DURATION_7_5, 75u),
+			LC3_7_5_UNFRAMED(75u, 13u, 75u, 40000u)),
+	LC3_PRESET_HR("48_2_2",
+			LC3_PRESET_48KHZ(LC3_CONFIG_DURATION_10, 100u),
+			LC3_10_UNFRAMED(100u, 13u, 95u, 40000u)),
+	LC3_PRESET_HR("48_3_2",
+			LC3_PRESET_48KHZ(LC3_CONFIG_DURATION_7_5, 90u),
+			LC3_7_5_UNFRAMED(90u, 13u, 75u, 40000u)),
+	LC3_PRESET_HR("48_4_2",
+			LC3_PRESET_48KHZ(LC3_CONFIG_DURATION_10, 120u),
+			LC3_10_UNFRAMED(120u, 13u, 100u, 40000u)),
+	LC3_PRESET_HR("48_5_2",
+			LC3_PRESET_48KHZ(LC3_CONFIG_DURATION_7_5, 117u),
+			LC3_7_5_UNFRAMED(117u, 13u, 75u, 40000u)),
+	LC3_PRESET_HR("48_6_2",
+			LC3_PRESET_48KHZ(LC3_CONFIG_DURATION_10, 155u),
+			LC3_10_UNFRAMED(155u, 13u, 100u, 40000u)),
+};
+
+#define PRESET(_uuid, _codec, _presets, _default_index) \
 	{ \
 		.uuid = _uuid, \
+		.codec = _codec, \
+		.custom = { .name = "custom" }, \
+		.default_preset = &_presets[_default_index], \
 		.presets = _presets, \
 		.num_presets = ARRAY_SIZE(_presets), \
 	}
 
-static const struct preset {
+static struct preset {
 	const char *uuid;
+	uint8_t codec;
+	uint16_t cid;
+	uint16_t vid;
+	struct codec_preset custom;
+	struct codec_preset *default_preset;
 	struct codec_preset *presets;
 	size_t num_presets;
 } presets[] = {
-	PRESET(A2DP_SOURCE_UUID, sbc_presets),
-	PRESET(A2DP_SINK_UUID, sbc_presets),
+	PRESET(A2DP_SOURCE_UUID, A2DP_CODEC_SBC, sbc_presets, 6),
+	PRESET(A2DP_SINK_UUID, A2DP_CODEC_SBC, sbc_presets, 6),
+	PRESET(PAC_SINK_UUID, LC3_ID, lc3_presets, 3),
+	PRESET(PAC_SOURCE_UUID, LC3_ID, lc3_presets, 3),
+	PRESET(BAA_SERVICE_UUID,  LC3_ID, lc3_presets, 3),
 };
 
-static struct codec_preset *find_preset(const char *uuid, const char *name)
+static void parse_vendor_codec(const char *codec, uint16_t *vid, uint16_t *cid)
+{
+	char **list;
+	char *endptr = NULL;
+
+	if (!codec)
+		return;
+
+	list = g_strsplit(codec, ":", 2);
+
+	if (vid)
+		*vid = strtol(list[0], &endptr, 0);
+
+	if (cid)
+		*cid = strtol(list[1], &endptr, 0);
+
+	g_strfreev(list);
+}
+
+static struct preset *find_presets(const char *uuid, uint8_t codec,
+					uint16_t vid, uint16_t cid)
 {
 	size_t i;
 
-	for (i = 0; i < ARRAY_SIZE(presets); i++) {
-		const struct preset *preset = &presets[i];
+	if (codec == 0xff) {
+		GList *l;
 
-		if (!strcasecmp(preset->uuid, uuid)) {
-			size_t j;
+		for (l = local_endpoints; l; l = g_list_next(l)) {
+			struct endpoint *ep = l->data;
 
-			for (j = 0; j < preset->num_presets; j++) {
-				struct codec_preset *p;
+			if (strcasecmp(ep->uuid, uuid) || ep->codec != codec)
+				continue;
 
-				p = &preset->presets[j];
+			if (ep->codec == 0xff && (ep->vid != vid ||
+							ep->cid != cid))
+				continue;
 
-				if (!name) {
-					if (p->is_default)
-						return p;
-				} else if (!strcmp(p->name, name))
-					return p;
-			}
+			return ep->preset;
 		}
+
+		return NULL;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(presets); i++) {
+		struct preset *preset = &presets[i];
+
+		if (preset->codec != codec)
+			continue;
+
+		if (!strcasecmp(preset->uuid, uuid))
+			return preset;
 	}
 
 	return NULL;
+}
+
+static struct preset *find_vendor_presets(const char *uuid, const char *codec)
+{
+	uint16_t cid;
+	uint16_t vid;
+
+	if (!uuid || !codec)
+		return NULL;
+
+	parse_vendor_codec(codec, &vid, &cid);
+
+	return find_presets(uuid, 0xff, vid, cid);
+}
+
+static struct preset *find_presets_name(const char *uuid, const char *codec)
+{
+	uint8_t id;
+	char *endptr = NULL;
+
+	if (!uuid || !codec)
+		return NULL;
+
+	if (strrchr(codec, ':'))
+		return find_vendor_presets(uuid, codec);
+
+	id = strtol(codec, &endptr, 0);
+
+	return find_presets(uuid, id, 0x0000, 0x0000);
+}
+
+static struct codec_preset *preset_find_name(struct preset *preset,
+						const char *name)
+{
+	size_t i;
+
+	if (!preset)
+		return NULL;
+
+	if (!name)
+		return preset->default_preset;
+	else if (!strcmp(name, "custom"))
+		return &preset->custom;
+
+	for (i = 0; i < preset->num_presets; i++) {
+		struct codec_preset *p;
+
+		p = &preset->presets[i];
+
+		if (!strcmp(p->name, name))
+			return p;
+	}
+
+	return NULL;
+}
+
+static struct codec_preset *find_preset(const char *uuid, const char *codec,
+					const char *name)
+{
+	struct preset *preset;
+
+	preset = find_presets_name(uuid, codec);
+	if (!preset)
+		return NULL;
+
+	return preset_find_name(preset, name);
 }
 
 static DBusMessage *endpoint_select_config_reply(DBusMessage *msg,
@@ -1351,7 +1653,7 @@ static void select_config_response(const char *input, void *user_data)
 	uint8_t *data;
 	size_t len;
 
-	p = find_preset(ep->uuid, input);
+	p = preset_find_name(ep->preset, input);
 	if (p) {
 		data = p->data.iov_base;
 		len = p->data.iov_len;
@@ -1392,6 +1694,13 @@ static DBusMessage *endpoint_select_configuration(DBusConnection *conn,
 	bt_shell_printf("Endpoint: SelectConfiguration\n");
 	print_iter("\t", "Capabilities", &args);
 
+	if (!ep->max_transports) {
+		bt_shell_printf("Maximum transports reached: rejecting\n");
+		return g_dbus_create_error(msg,
+					 "org.bluez.Error.Rejected",
+					 "Maximum transports reached");
+	}
+
 	if (!ep->auto_accept) {
 		ep->msg = dbus_message_ref(msg);
 		bt_shell_prompt_input("Endpoint", "Enter preset/configuration:",
@@ -1399,11 +1708,8 @@ static DBusMessage *endpoint_select_configuration(DBusConnection *conn,
 		return NULL;
 	}
 
-	p = find_preset(ep->uuid, NULL);
-	if (!p)
-		NULL;
-
-	if (p->data.iov_base) {
+	p = preset_find_name(ep->preset, NULL);
+	if (!p) {
 		reply = g_dbus_create_error(msg, "org.bluez.Error.Rejected",
 								NULL);
 		return reply;
@@ -1411,6 +1717,312 @@ static DBusMessage *endpoint_select_configuration(DBusConnection *conn,
 
 	reply = endpoint_select_config_reply(msg, p->data.iov_base,
 						p->data.iov_len);
+	if (!reply) {
+		reply = g_dbus_create_error(msg, "org.bluez.Error.Rejected",
+								NULL);
+		return reply;
+	}
+
+	bt_shell_printf("Auto Accepting using %s...\n", p->name);
+
+	return reply;
+}
+
+struct endpoint_config {
+	GDBusProxy *proxy;
+	struct endpoint *ep;
+	struct iovec *caps;
+	struct iovec *meta;
+	uint8_t target_latency;
+	const struct codec_qos *qos;
+};
+
+#define BCODE {0x01, 0x02, 0x68, 0x05, 0x53, 0xf1, 0x41, 0x5a, \
+				0xa2, 0x65, 0xbb, 0xaf, 0xc6, 0xea, 0x03, 0xb8}
+
+static struct bt_iso_qos bcast_qos = {
+	.bcast = {
+		.big = BT_ISO_QOS_BIG_UNSET,
+		.bis = BT_ISO_QOS_BIS_UNSET,
+		.sync_interval = 24,
+		.packing = 0x00,
+		.framing = 0x00,
+		.encryption = 0x00,
+		.bcode = BCODE,
+		.options = 0x00,
+		.skip = 0x0000,
+		.sync_timeout = 0x4000,
+		.sync_cte_type = 0x00,
+		.mse = 0x00,
+		.timeout = 0x4000,
+	}
+};
+
+static void append_properties(DBusMessageIter *iter,
+						struct endpoint_config *cfg)
+{
+	DBusMessageIter dict;
+	struct codec_qos *qos = (void *)cfg->qos;
+	const char *key = "Capabilities";
+	const char *meta = "Metadata";
+	const char *keyBCode = "BroadcastCode";
+
+	dbus_message_iter_open_container(iter, DBUS_TYPE_ARRAY, "{sv}", &dict);
+
+	bt_shell_printf("Capabilities: ");
+	bt_shell_hexdump(cfg->caps->iov_base, cfg->caps->iov_len);
+
+	g_dbus_dict_append_basic_array(&dict, DBUS_TYPE_STRING, &key,
+					DBUS_TYPE_BYTE, &cfg->caps->iov_base,
+					cfg->caps->iov_len);
+
+	if (cfg->meta && cfg->meta->iov_len) {
+		g_dbus_dict_append_basic_array(&dict, DBUS_TYPE_STRING, &meta,
+				DBUS_TYPE_BYTE, &cfg->meta->iov_base,
+				cfg->meta->iov_len);
+
+		bt_shell_printf("Metadata:\n");
+		bt_shell_hexdump(cfg->meta->iov_base, cfg->meta->iov_len);
+	}
+
+	if (!qos)
+		goto done;
+
+	if (cfg->target_latency) {
+		bt_shell_printf("TargetLatency 0x%02x\n", qos->interval);
+		g_dbus_dict_append_entry(&dict, "TargetLatency",
+					DBUS_TYPE_BYTE, &cfg->target_latency);
+	}
+
+	if ((!cfg->ep->broadcast) &&
+			(cfg->ep->iso_group != BT_ISO_QOS_GROUP_UNSET)) {
+		bt_shell_printf("CIG 0x%2.2x\n", cfg->ep->iso_group);
+		g_dbus_dict_append_entry(&dict, "CIG", DBUS_TYPE_BYTE,
+							&cfg->ep->iso_group);
+	} else {
+		bt_shell_printf("BIG 0x%2.2x\n", bcast_qos.bcast.big);
+		g_dbus_dict_append_entry(&dict, "BIG", DBUS_TYPE_BYTE,
+							&bcast_qos.bcast.big);
+	}
+
+	if ((!cfg->ep->broadcast) &&
+			(cfg->ep->iso_stream != BT_ISO_QOS_STREAM_UNSET)) {
+		bt_shell_printf("CIS 0x%2.2x\n", cfg->ep->iso_stream);
+		g_dbus_dict_append_entry(&dict, "CIS", DBUS_TYPE_BYTE,
+							&cfg->ep->iso_stream);
+
+	} else {
+		bt_shell_printf("BIS 0x%2.2x\n", bcast_qos.bcast.bis);
+		g_dbus_dict_append_entry(&dict, "BIS", DBUS_TYPE_BYTE,
+							&bcast_qos.bcast.bis);
+	}
+
+	bt_shell_printf("Interval %u\n", qos->interval);
+
+	g_dbus_dict_append_entry(&dict, "Interval", DBUS_TYPE_UINT32,
+						&qos->interval);
+
+	if (!cfg->ep->broadcast) {
+		bt_shell_printf("Framing %s\n",
+					qos->framing ? "true" : "false");
+
+		g_dbus_dict_append_entry(&dict, "Framing", DBUS_TYPE_BOOLEAN,
+							&qos->framing);
+	} else {
+		bt_shell_printf("Framing %s\n",
+				bcast_qos.bcast.framing ? "true" : "false");
+
+		g_dbus_dict_append_entry(&dict, "Framing", DBUS_TYPE_BOOLEAN,
+						&bcast_qos.bcast.framing);
+	}
+
+	bt_shell_printf("PHY %s\n", qos->phy);
+
+	g_dbus_dict_append_entry(&dict, "PHY", DBUS_TYPE_STRING, &qos->phy);
+
+	bt_shell_printf("SDU %u\n", cfg->qos->sdu);
+
+	g_dbus_dict_append_entry(&dict, "SDU", DBUS_TYPE_UINT16, &qos->sdu);
+
+	bt_shell_printf("Retransmissions %u\n", qos->rtn);
+
+	g_dbus_dict_append_entry(&dict, "Retransmissions", DBUS_TYPE_BYTE,
+						&qos->rtn);
+
+	bt_shell_printf("Latency %u\n", qos->latency);
+
+	g_dbus_dict_append_entry(&dict, "Latency", DBUS_TYPE_UINT16,
+						&qos->latency);
+
+	bt_shell_printf("Delay %u\n", qos->delay);
+
+	g_dbus_dict_append_entry(&dict, "Delay", DBUS_TYPE_UINT32,
+						&qos->delay);
+
+	if (!cfg->ep->broadcast)
+		goto done;
+
+	bt_shell_printf("SyncInterval %u\n", bcast_qos.bcast.sync_interval);
+
+	g_dbus_dict_append_entry(&dict, "SyncInterval", DBUS_TYPE_BYTE,
+						&bcast_qos.bcast.sync_interval);
+
+	bt_shell_printf("Encryption %u\n", bcast_qos.bcast.encryption);
+
+	g_dbus_dict_append_entry(&dict, "Encryption", DBUS_TYPE_BYTE,
+						&bcast_qos.bcast.encryption);
+
+	bt_shell_printf("Options %u\n", bcast_qos.bcast.options);
+
+	g_dbus_dict_append_entry(&dict, "Options", DBUS_TYPE_BYTE,
+						&bcast_qos.bcast.options);
+
+	bt_shell_printf("Skip %u\n", bcast_qos.bcast.skip);
+
+	g_dbus_dict_append_entry(&dict, "Skip", DBUS_TYPE_UINT16,
+						&bcast_qos.bcast.skip);
+
+	bt_shell_printf("SyncTimeout %u\n", bcast_qos.bcast.sync_timeout);
+
+	g_dbus_dict_append_entry(&dict, "SyncTimeout", DBUS_TYPE_UINT16,
+						&bcast_qos.bcast.sync_timeout);
+
+	bt_shell_printf("SyncCteType %u\n", bcast_qos.bcast.sync_cte_type);
+
+	g_dbus_dict_append_entry(&dict, "SyncCteType", DBUS_TYPE_BYTE,
+					&bcast_qos.bcast.sync_cte_type);
+
+	bt_shell_printf("MSE %u\n", bcast_qos.bcast.mse);
+
+	g_dbus_dict_append_entry(&dict, "MSE", DBUS_TYPE_BYTE,
+						&bcast_qos.bcast.mse);
+
+	bt_shell_printf("Timeout %u\n", bcast_qos.bcast.timeout);
+
+	g_dbus_dict_append_entry(&dict, "Timeout", DBUS_TYPE_UINT16,
+						&bcast_qos.bcast.timeout);
+
+	bt_shell_printf("BroadcastCode:\n");
+	bt_shell_hexdump(cfg->ep->bcode->iov_base, cfg->ep->bcode->iov_len);
+
+	g_dbus_dict_append_basic_array(&dict, DBUS_TYPE_STRING, &keyBCode,
+						DBUS_TYPE_BYTE,
+						&cfg->ep->bcode->iov_base,
+						cfg->ep->bcode->iov_len);
+
+done:
+	dbus_message_iter_close_container(iter, &dict);
+}
+
+static struct iovec *iov_append(struct iovec **iov, const void *data,
+							size_t len)
+{
+	if (!*iov)
+		*iov = new0(struct iovec, 1);
+
+	if (!((*iov)->iov_base))
+		(*iov)->iov_base = new0(uint8_t, UINT8_MAX);
+
+	if (data && len) {
+		memcpy((*iov)->iov_base + (*iov)->iov_len, data, len);
+		(*iov)->iov_len += len;
+	}
+
+	return *iov;
+}
+
+static DBusMessage *endpoint_select_properties_reply(struct endpoint *ep,
+						DBusMessage *msg,
+						struct codec_preset *preset)
+{
+	DBusMessage *reply;
+	DBusMessageIter iter;
+	struct endpoint_config *cfg;
+
+	if (!preset)
+		return NULL;
+
+	reply = dbus_message_new_method_return(msg);
+	if (!reply)
+		return NULL;
+
+	cfg = new0(struct endpoint_config, 1);
+	cfg->ep = ep;
+
+	/* Copy capabilities */
+	iov_append(&cfg->caps, preset->data.iov_base, preset->data.iov_len);
+	cfg->target_latency = preset->target_latency;
+
+	/* Copy metadata */
+	if (ep->meta)
+		iov_append(&cfg->meta, ep->meta->iov_base, ep->meta->iov_len);
+
+	if (preset->qos.phy)
+		/* Set QoS parameters */
+		cfg->qos = &preset->qos;
+
+	dbus_message_iter_init_append(reply, &iter);
+
+	append_properties(&iter, cfg);
+
+	free(cfg);
+
+	return reply;
+}
+
+static void select_properties_response(const char *input, void *user_data)
+{
+	struct endpoint *ep = user_data;
+	struct codec_preset *p;
+	DBusMessage *reply;
+
+	p = preset_find_name(ep->preset, input);
+	if (p) {
+		reply = endpoint_select_properties_reply(ep, ep->msg, p);
+		goto done;
+	}
+
+	bt_shell_printf("Preset %s not found\n", input);
+	reply = g_dbus_create_error(ep->msg, "org.bluez.Error.Rejected", NULL);
+
+done:
+	g_dbus_send_message(dbus_conn, reply);
+	dbus_message_unref(ep->msg);
+	ep->msg = NULL;
+}
+
+static DBusMessage *endpoint_select_properties(DBusConnection *conn,
+					DBusMessage *msg, void *user_data)
+{
+	struct endpoint *ep = user_data;
+	struct codec_preset *p;
+	DBusMessageIter args;
+	DBusMessage *reply;
+
+	dbus_message_iter_init(msg, &args);
+
+	bt_shell_printf("Endpoint: SelectProperties\n");
+	print_iter("\t", "Properties", &args);
+
+	if (!ep->max_transports) {
+		bt_shell_printf("Maximum transports reached: rejecting\n");
+		return g_dbus_create_error(msg,
+					 "org.bluez.Error.Rejected",
+					 "Maximum transports reached");
+	}
+
+	if (!ep->auto_accept) {
+		ep->msg = dbus_message_ref(msg);
+		bt_shell_prompt_input("Endpoint", "Enter preset/configuration:",
+					select_properties_response, ep);
+		return NULL;
+	}
+
+	p = preset_find_name(ep->preset, NULL);
+	if (!p)
+		return NULL;
+
+	reply = endpoint_select_properties_reply(ep, msg, p);
 	if (!reply)
 		return NULL;
 
@@ -1419,13 +2031,26 @@ static DBusMessage *endpoint_select_configuration(DBusConnection *conn,
 	return reply;
 }
 
+static bool match_str(const void *data, const void *user_data)
+{
+	return !strcmp(data, user_data);
+}
+
 static DBusMessage *endpoint_clear_configuration(DBusConnection *conn,
 					DBusMessage *msg, void *user_data)
 {
 	struct endpoint *ep = user_data;
+	DBusMessageIter args;
+	const char *path;
 
-	free(ep->transport);
-	ep->transport = NULL;
+	dbus_message_iter_init(msg, &args);
+
+	dbus_message_iter_get_basic(&args, &path);
+
+	if (ep->max_transports != UINT8_MAX)
+		ep->max_transports++;
+
+	queue_remove_if(ep->transports, match_str, (void *)path);
 
 	return g_dbus_create_reply(msg, DBUS_TYPE_INVALID);
 }
@@ -1478,7 +2103,12 @@ static const GDBusMethodTable endpoint_methods[] = {
 					NULL, endpoint_set_configuration) },
 	{ GDBUS_ASYNC_METHOD("SelectConfiguration",
 					GDBUS_ARGS({ "caps", "ay" } ),
-					NULL, endpoint_select_configuration) },
+					GDBUS_ARGS({ "cfg", "ay" } ),
+					endpoint_select_configuration) },
+	{ GDBUS_ASYNC_METHOD("SelectProperties",
+					GDBUS_ARGS({ "properties", "a{sv}" } ),
+					GDBUS_ARGS({ "properties", "a{sv}" } ),
+					endpoint_select_properties) },
 	{ GDBUS_ASYNC_METHOD("ClearConfiguration",
 					GDBUS_ARGS({ "transport", "o" } ),
 					NULL, endpoint_clear_configuration) },
@@ -1490,12 +2120,27 @@ static void endpoint_free(void *data)
 	struct endpoint *ep = data;
 
 	if (ep->caps) {
-		g_free(ep->caps->iov_base);
+		if (ep->caps->iov_base)
+			g_free(ep->caps->iov_base);
 		g_free(ep->caps);
+	}
+
+	if (ep->meta) {
+		if (ep->meta->iov_base)
+			g_free(ep->meta->iov_base);
+		g_free(ep->meta);
 	}
 
 	if (ep->msg)
 		dbus_message_unref(ep->msg);
+
+	if (ep->codec == 0xff) {
+		free(ep->preset->custom.name);
+		free(ep->preset);
+	}
+
+	queue_destroy(ep->acquiring, NULL);
+	queue_destroy(ep->transports, free);
 
 	g_free(ep->path);
 	g_free(ep->uuid);
@@ -1540,10 +2185,63 @@ static gboolean endpoint_get_capabilities(const GDBusPropertyTable *property,
 	return TRUE;
 }
 
+struct vendor {
+	uint16_t cid;
+	uint16_t vid;
+} __packed;
+
+static gboolean endpoint_get_vendor(const GDBusPropertyTable *property,
+					DBusMessageIter *iter, void *data)
+{
+	struct endpoint *ep = data;
+	struct vendor vendor = { ep->cid, ep->vid };
+
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_UINT32, &vendor);
+
+	return TRUE;
+}
+
+static gboolean endpoint_vendor_exists(const GDBusPropertyTable *property,
+							void *data)
+{
+	struct endpoint *ep = data;
+
+	return ep->cid && ep->vid;
+}
+
+static gboolean endpoint_get_metadata(const GDBusPropertyTable *property,
+					DBusMessageIter *iter, void *data)
+{
+	struct endpoint *ep = data;
+	DBusMessageIter array;
+
+	dbus_message_iter_open_container(iter, DBUS_TYPE_ARRAY,
+				DBUS_TYPE_BYTE_AS_STRING, &array);
+
+	dbus_message_iter_append_fixed_array(&array, DBUS_TYPE_BYTE,
+				&ep->meta->iov_base,
+				ep->meta->iov_len);
+
+	dbus_message_iter_close_container(iter, &array);
+
+	return TRUE;
+}
+
+static gboolean endpoint_metadata_exists(const GDBusPropertyTable *property,
+							void *data)
+{
+	struct endpoint *ep = data;
+
+	return ep->meta ? TRUE : FALSE;
+}
+
 static const GDBusPropertyTable endpoint_properties[] = {
 	{ "UUID", "s", endpoint_get_uuid, NULL, NULL },
 	{ "Codec", "y", endpoint_get_codec, NULL, NULL },
 	{ "Capabilities", "ay", endpoint_get_capabilities, NULL, NULL },
+	{ "Metadata", "ay", endpoint_get_metadata, NULL,
+				endpoint_metadata_exists },
+	{ "Vendor", "u", endpoint_get_vendor, NULL, endpoint_vendor_exists },
 	{ }
 };
 
@@ -1552,6 +2250,7 @@ static void register_endpoint_setup(DBusMessageIter *iter, void *user_data)
 	struct endpoint *ep = user_data;
 	DBusMessageIter dict;
 	const char *key = "Capabilities";
+	const char *meta = "Metadata";
 
 	dbus_message_iter_append_basic(iter, DBUS_TYPE_OBJECT_PATH, &ep->path);
 
@@ -1561,12 +2260,30 @@ static void register_endpoint_setup(DBusMessageIter *iter, void *user_data)
 
 	g_dbus_dict_append_entry(&dict, "Codec", DBUS_TYPE_BYTE, &ep->codec);
 
-	g_dbus_dict_append_basic_array(&dict, DBUS_TYPE_STRING, &key,
+	if (ep->cid && ep->vid) {
+		struct vendor vendor = { ep->cid, ep->vid };
+
+		g_dbus_dict_append_entry(&dict, "Vendor", DBUS_TYPE_UINT32,
+						 &vendor);
+	}
+
+	if (ep->caps) {
+		g_dbus_dict_append_basic_array(&dict, DBUS_TYPE_STRING, &key,
 					DBUS_TYPE_BYTE, &ep->caps->iov_base,
 					ep->caps->iov_len);
 
-	bt_shell_printf("Capabilities:\n");
-	bt_shell_hexdump(ep->caps->iov_base, ep->caps->iov_len);
+		bt_shell_printf("Capabilities:\n");
+		bt_shell_hexdump(ep->caps->iov_base, ep->caps->iov_len);
+	}
+
+	if (ep->meta) {
+		g_dbus_dict_append_basic_array(&dict, DBUS_TYPE_STRING, &meta,
+				DBUS_TYPE_BYTE, &ep->meta->iov_base,
+				ep->meta->iov_len);
+
+		bt_shell_printf("Metadata:\n");
+		bt_shell_hexdump(ep->meta->iov_base, ep->meta->iov_len);
+	}
 
 	dbus_message_iter_close_container(iter, &dict);
 }
@@ -1582,9 +2299,11 @@ static void register_endpoint_reply(DBusMessage *message, void *user_data)
 		bt_shell_printf("Failed to register endpoint: %s\n",
 				error.name);
 		dbus_error_free(&error);
-		local_endpoints = g_list_remove(local_endpoints, ep);
-		g_dbus_unregister_interface(dbus_conn, ep->path,
+		if (g_list_find(local_endpoints, ep)) {
+			local_endpoints = g_list_remove(local_endpoints, ep);
+			g_dbus_unregister_interface(dbus_conn, ep->path,
 						BLUEZ_MEDIA_ENDPOINT_INTERFACE);
+		}
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 	}
 
@@ -1593,9 +2312,32 @@ static void register_endpoint_reply(DBusMessage *message, void *user_data)
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
+static bool media_supports_uuid(GDBusProxy *proxy, const char *uuid)
+{
+	DBusMessageIter iter, array;
+
+	if (!g_dbus_proxy_get_property(proxy, "SupportedUUIDs", &iter))
+		return false;
+
+	dbus_message_iter_recurse(&iter, &array);
+	while (dbus_message_iter_get_arg_type(&array) == DBUS_TYPE_STRING) {
+		const char *support_uuid;
+
+		dbus_message_iter_get_basic(&array, &support_uuid);
+
+		if (!strcasecmp(uuid, support_uuid))
+			return true;
+
+		dbus_message_iter_next(&array);
+	}
+
+	return false;
+}
+
 static void endpoint_register(struct endpoint *ep)
 {
 	GList *l;
+	int registered = 0;
 
 	if (!g_dbus_register_interface(dbus_conn, ep->path,
 					BLUEZ_MEDIA_ENDPOINT_INTERFACE,
@@ -1606,6 +2348,9 @@ static void endpoint_register(struct endpoint *ep)
 	}
 
 	for (l = medias; l; l = g_list_next(l)) {
+		if (!media_supports_uuid(l->data, ep->uuid))
+			continue;
+
 		if (!g_dbus_proxy_method_call(l->data, "RegisterEndpoint",
 						register_endpoint_setup,
 						register_endpoint_reply,
@@ -1614,7 +2359,12 @@ static void endpoint_register(struct endpoint *ep)
 						BLUEZ_MEDIA_ENDPOINT_INTERFACE);
 			goto fail;
 		}
+
+		registered++;
 	}
+
+	if (!registered)
+		goto fail;
 
 	return;
 
@@ -1625,33 +2375,157 @@ fail:
 
 }
 
+static void endpoint_iso_stream(const char *input, void *user_data)
+{
+	struct endpoint *ep = user_data;
+	char *endptr = NULL;
+	int value;
+
+	if (!strcasecmp(input, "a") || !strcasecmp(input, "auto")) {
+		ep->iso_stream = BT_ISO_QOS_STREAM_UNSET;
+	} else {
+		value = strtol(input, &endptr, 0);
+
+		if (!endptr || *endptr != '\0' || value > UINT8_MAX) {
+			bt_shell_printf("Invalid argument: %s\n", input);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+
+		ep->iso_stream = value;
+	}
+
+	endpoint_register(ep);
+}
+
+static void endpoint_iso_group(const char *input, void *user_data)
+{
+	struct endpoint *ep = user_data;
+	char *endptr = NULL;
+	int value;
+
+	if (!strcasecmp(input, "a") || !strcasecmp(input, "auto")) {
+		ep->iso_group = BT_ISO_QOS_GROUP_UNSET;
+	} else {
+		value = strtol(input, &endptr, 0);
+
+		if (!endptr || *endptr != '\0' || value > UINT8_MAX) {
+			bt_shell_printf("Invalid argument: %s\n", input);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+
+		ep->iso_group = value;
+	}
+
+	if (!ep->broadcast)
+		bt_shell_prompt_input(ep->path, "CIS (auto/value):",
+			endpoint_iso_stream, ep);
+	else
+		bt_shell_prompt_input(ep->path, "BIS (auto/value):",
+			endpoint_iso_stream, ep);
+}
+
+static void endpoint_max_transports(const char *input, void *user_data)
+{
+	struct endpoint *ep = user_data;
+	char *endptr = NULL;
+	int value;
+
+	if (!strcasecmp(input, "a") || !strcasecmp(input, "auto")) {
+		ep->max_transports = UINT8_MAX;
+	} else {
+		value = strtol(input, &endptr, 0);
+
+		if (!endptr || *endptr != '\0' || value > UINT8_MAX) {
+			bt_shell_printf("Invalid argument: %s\n", input);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+
+		ep->max_transports = value;
+	}
+
+	if (ep->broadcast)
+		bt_shell_prompt_input(ep->path, "BIG (auto/value):",
+			endpoint_iso_group, ep);
+	else
+		bt_shell_prompt_input(ep->path, "CIG (auto/value):",
+			endpoint_iso_group, ep);
+}
+
 static void endpoint_auto_accept(const char *input, void *user_data)
 {
 	struct endpoint *ep = user_data;
 
-	if (!strcasecmp(input, "y") || !strcasecmp(input, "yes"))
-		ep->auto_accept = true;
-	else if (!strcasecmp(input, "n") || !strcasecmp(input, "no"))
-		ep->auto_accept = false;
-	else
-		bt_shell_printf("Invalid input for Auto Accept\n");
+	if (!strcmp(ep->uuid, BAA_SERVICE_UUID)) {
+		ep->broadcast = true;
+	} else {
+		ep->broadcast = false;
+	}
 
-	endpoint_register(ep);
+	if (!strcasecmp(input, "y") || !strcasecmp(input, "yes")) {
+		ep->auto_accept = true;
+		bt_shell_prompt_input(ep->path, "Max Transports (auto/value):",
+						endpoint_max_transports, ep);
+		return;
+	} else if (!strcasecmp(input, "n") || !strcasecmp(input, "no")) {
+		ep->auto_accept = false;
+	} else {
+		bt_shell_printf("Invalid input for Auto Accept\n");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	if (ep->broadcast)
+		bt_shell_prompt_input(ep->path, "BIG (auto/value):",
+					endpoint_iso_group, ep);
+	else
+		bt_shell_prompt_input(ep->path, "CIG (auto/value):",
+					endpoint_iso_group, ep);
+}
+
+static void endpoint_set_metadata(const char *input, void *user_data)
+{
+	struct endpoint *ep = user_data;
+
+	if (!strcasecmp(input, "n") || !strcasecmp(input, "no")) {
+		free(ep->meta->iov_base);
+		ep->meta = NULL;
+		goto done;
+	}
+
+	if (!ep->meta)
+		ep->meta = g_new0(struct iovec, 1);
+
+	ep->meta->iov_base = str2bytearray((char *) input, &ep->meta->iov_len);
+	if (!ep->meta->iov_base) {
+		free(ep->meta);
+		ep->meta = NULL;
+	}
+
+done:
+	bt_shell_prompt_input(ep->path, "Auto Accept (yes/no):",
+					endpoint_auto_accept, ep);
 }
 
 static void endpoint_set_capabilities(const char *input, void *user_data)
 {
 	struct endpoint *ep = user_data;
 
-	if (ep->caps)
+	if (ep->caps && ep->caps->iov_base) {
 		g_free(ep->caps->iov_base);
-	else
+		ep->caps = g_new0(struct iovec, 1);
+	} else
 		ep->caps = g_new0(struct iovec, 1);
 
 	ep->caps->iov_base = str2bytearray((char *) input, &ep->caps->iov_len);
 
-	bt_shell_prompt_input(ep->path, "Auto Accept (yes/no):",
-						endpoint_auto_accept, ep);
+	if (ep->caps->iov_len == 0x01 &&
+			(*(uint8_t *)(ep->caps->iov_base)) == 0x00) {
+		g_free(ep->caps->iov_base);
+		ep->caps->iov_base = NULL;
+		ep->caps->iov_len = 0x00;
+	}
+
+	bt_shell_prompt_input(ep->path, "Enter Metadata (value/no):",
+					endpoint_set_metadata, ep);
 }
 
 static char *uuid_generator(const char *text, int state)
@@ -1694,22 +2568,6 @@ static const struct capabilities *find_capabilities(const char *uuid,
 	return NULL;
 }
 
-static struct iovec *iov_append(struct iovec **iov, const void *data,
-							size_t len)
-{
-	if (!*iov) {
-		*iov = new0(struct iovec, 1);
-		(*iov)->iov_base = new0(uint8_t, UINT8_MAX);
-	}
-
-	if (data && len) {
-		memcpy((*iov)->iov_base + (*iov)->iov_len, data, len);
-		(*iov)->iov_len += len;
-	}
-
-	return *iov;
-}
-
 static void cmd_register_endpoint(int argc, char *argv[])
 {
 	struct endpoint *ep;
@@ -1718,9 +2576,21 @@ static void cmd_register_endpoint(int argc, char *argv[])
 	ep = g_new0(struct endpoint, 1);
 	ep->uuid = g_strdup(argv[1]);
 	ep->codec = strtol(argv[2], &endptr, 0);
+	ep->cid = 0x0000;
+	ep->vid = 0x0000;
 	ep->path = g_strdup_printf("%s/ep%u", BLUEZ_MEDIA_ENDPOINT_PATH,
 					g_list_length(local_endpoints));
 	local_endpoints = g_list_append(local_endpoints, ep);
+
+	if (strrchr(argv[2], ':')) {
+		ep->codec = 0xff;
+		parse_vendor_codec(argv[2], &ep->cid, &ep->vid);
+		ep->preset = new0(struct preset, 1);
+		ep->preset->custom.name = strdup("custom");
+		ep->preset->default_preset = &ep->preset->custom;
+	} else {
+		ep->preset = find_presets_name(ep->uuid, argv[2]);
+	}
 
 	if (argc > 3)
 		endpoint_set_capabilities(argv[3], ep);
@@ -1799,31 +2669,14 @@ static void cmd_unregister_endpoint(int argc, char *argv[])
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
-struct endpoint_config {
-	GDBusProxy *proxy;
-	struct endpoint *ep;
-	struct iovec *caps;
-};
-
 static void config_endpoint_setup(DBusMessageIter *iter, void *user_data)
 {
 	struct endpoint_config *cfg = user_data;
-	DBusMessageIter dict;
-	const char *key = "Capabilities";
 
 	dbus_message_iter_append_basic(iter, DBUS_TYPE_OBJECT_PATH,
 					&cfg->ep->path);
 
-	dbus_message_iter_open_container(iter, DBUS_TYPE_ARRAY, "{sv}", &dict);
-
-	bt_shell_printf("Capabilities: ");
-	bt_shell_hexdump(cfg->caps->iov_base, cfg->caps->iov_len);
-
-	g_dbus_dict_append_basic_array(&dict, DBUS_TYPE_STRING, &key,
-					DBUS_TYPE_BYTE, &cfg->caps->iov_base,
-					cfg->caps->iov_len);
-
-	dbus_message_iter_close_container(iter, &dict);
+	append_properties(iter, cfg);
 }
 
 static void config_endpoint_reply(DBusMessage *message, void *user_data)
@@ -1896,15 +2749,26 @@ static void cmd_config_endpoint(int argc, char *argv[])
 	}
 
 	if (argc > 3) {
-		preset = find_preset(cfg->ep->uuid, argv[3]);
+		preset = preset_find_name(cfg->ep->preset, argv[3]);
 		if (!preset) {
 			bt_shell_printf("Preset %s not found\n", argv[3]);
 			goto fail;
 		}
 
-		/* Copy capabilities */
-		iov_append(&cfg->caps, preset->data.iov_base,
-						preset->data.iov_len);
+		if (cfg->ep->broadcast) {
+			iov_append(&cfg->ep->bcode, bcast_qos.bcast.bcode,
+				sizeof(bcast_qos.bcast.bcode));
+			/* Copy capabilities for broadcast*/
+			iov_append(&cfg->caps, base_lc3_16_2_1,
+				sizeof(base_lc3_16_2_1));
+		} else {
+			/* Copy capabilities */
+			iov_append(&cfg->caps, preset->data.iov_base,
+							preset->data.iov_len);
+		}
+
+		/* Set QoS parameters */
+		cfg->qos = &preset->qos;
 
 		endpoint_set_config(cfg);
 		return;
@@ -1920,41 +2784,373 @@ fail:
 	return bt_shell_noninteractive_quit(EXIT_FAILURE);
 }
 
-static void cmd_presets_endpoint(int argc, char *argv[])
+static void custom_delay(const char *input, void *user_data)
 {
-	size_t i;
-	struct codec_preset *default_preset = NULL;
+	struct codec_preset *p = user_data;
+	struct codec_qos *qos = (void *)&p->qos;
+	char *endptr = NULL;
 
-	if (argc > 2) {
-		default_preset = find_preset(argv[1], argv[2]);
-		if (!default_preset) {
-			bt_shell_printf("Preset %s not found\n", argv[2]);
+	qos->delay = strtol(input, &endptr, 0);
+	if (!endptr || *endptr != '\0') {
+		bt_shell_printf("Invalid argument: %s\n", input);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+static void custom_latency(const char *input, void *user_data)
+{
+	struct codec_preset *p = user_data;
+	struct codec_qos *qos = (void *)&p->qos;
+	char *endptr = NULL;
+
+	qos->latency = strtol(input, &endptr, 0);
+	if (!endptr || *endptr != '\0') {
+		bt_shell_printf("Invalid argument: %s\n", input);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	bt_shell_prompt_input("QoS", "Enter Presentation Delay (us):",
+					custom_delay, user_data);
+}
+
+static void custom_rtn(const char *input, void *user_data)
+{
+	struct codec_preset *p = user_data;
+	struct codec_qos *qos = (void *)&p->qos;
+	char *endptr = NULL;
+
+	qos->rtn = strtol(input, &endptr, 0);
+	if (!endptr || *endptr != '\0') {
+		bt_shell_printf("Invalid argument: %s\n", input);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	bt_shell_prompt_input("QoS", "Enter Max Transport Latency (ms):",
+					custom_latency, user_data);
+}
+
+static void custom_sdu(const char *input, void *user_data)
+{
+	struct codec_preset *p = user_data;
+	struct codec_qos *qos = (void *)&p->qos;
+	char *endptr = NULL;
+
+	qos->sdu = strtol(input, &endptr, 0);
+	if (!endptr || *endptr != '\0') {
+		bt_shell_printf("Invalid argument: %s\n", input);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	bt_shell_prompt_input("QoS", "Enter RTN:", custom_rtn, user_data);
+}
+
+static void custom_phy(const char *input, void *user_data)
+{
+	struct codec_preset *p = user_data;
+	struct codec_qos *qos = (void *)&p->qos;
+
+	if (!strcmp(input, "1M"))
+		qos->phy = "1M";
+	else if (!strcmp(input, "2M"))
+		qos->phy = "2M";
+	else {
+		char *endptr = NULL;
+		uint8_t phy = strtol(input, &endptr, 0);
+
+		if (!endptr || *endptr != '\0') {
+			bt_shell_printf("Invalid argument: %s\n", input);
 			return bt_shell_noninteractive_quit(EXIT_FAILURE);
 		}
 
-		default_preset->is_default = true;
+		switch (phy) {
+		case 0x01:
+			qos->phy = "1M";
+			break;
+		case 0x02:
+			qos->phy = "2M";
+			break;
+		default:
+			bt_shell_printf("Invalid argument: %s\n", input);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
 	}
 
-	for (i = 0; i < ARRAY_SIZE(presets); i++) {
-		const struct preset *preset = &presets[i];
+	bt_shell_prompt_input("QoS", "Enter Max SDU:", custom_sdu, user_data);
+}
 
-		if (!strcasecmp(preset->uuid, argv[1])) {
-			size_t j;
+static void custom_framing(const char *input, void *user_data)
+{
+	struct codec_preset *p = user_data;
+	struct codec_qos *qos = (void *)&p->qos;
 
-			for (j = 0; j < preset->num_presets; j++) {
-				struct codec_preset *p;
+	if (!strcasecmp(input, "Unframed"))
+		qos->framing = 0x00;
+	else if (!strcasecmp(input, "Framed"))
+		qos->framing = 0x01;
+	else {
+		char *endptr = NULL;
 
-				p = &preset->presets[j];
-
-				if (default_preset && p != default_preset)
-					p->is_default = false;
-
-				if (p->is_default)
-					bt_shell_printf("*%s\n", p->name);
-				else
-					bt_shell_printf("%s\n", p->name);
-			}
+		qos->framing = strtol(input, &endptr, 0);
+		if (!endptr || *endptr != '\0') {
+			bt_shell_printf("Invalid argument: %s\n", input);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
 		}
+	}
+
+	bt_shell_prompt_input("QoS", "Enter PHY (1M, 2M):", custom_phy,
+							user_data);
+}
+
+static void custom_interval(const char *input, void *user_data)
+{
+	struct codec_preset *p = user_data;
+	struct codec_qos *qos = (void *)&p->qos;
+	char *endptr = NULL;
+
+	qos->interval = strtol(input, &endptr, 0);
+	if (!endptr || *endptr != '\0') {
+		bt_shell_printf("Invalid argument: %s\n", input);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	bt_shell_prompt_input("QoS", "Enter Framing (Unframed, Framed):",
+				custom_framing, user_data);
+}
+
+static void custom_target_latency(const char *input, void *user_data)
+{
+	struct codec_preset *p = user_data;
+
+	if (!strcasecmp(input, "Low"))
+		p->target_latency = 0x01;
+	else if (!strcasecmp(input, "Balance"))
+		p->target_latency = 0x02;
+	else if (!strcasecmp(input, "High"))
+		p->target_latency = 0x02;
+	else {
+		char *endptr = NULL;
+
+		p->target_latency = strtol(input, &endptr, 0);
+		if (!endptr || *endptr != '\0') {
+			bt_shell_printf("Invalid argument: %s\n", input);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+	}
+
+	bt_shell_prompt_input("QoS", "Enter SDU Interval (us):",
+					custom_interval, user_data);
+}
+
+static void custom_length(const char *input, void *user_data)
+{
+	struct codec_preset *p = user_data;
+	struct iovec *iov = (void *)&p->data;
+	uint8_t ltv[4] = { 0x03, LC3_CONFIG_FRAME_LEN };
+	uint16_t len;
+	char *endptr = NULL;
+
+	len = strtol(input, &endptr, 0);
+	if (!endptr || *endptr != '\0') {
+		bt_shell_printf("Invalid argument: %s\n", input);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	ltv[2] = len;
+	ltv[3] = len >> 8;
+
+	iov_append(&iov, ltv, sizeof(ltv));
+
+	bt_shell_prompt_input("QoS", "Enter Target Latency "
+				"(Low, Balance, High):",
+				custom_target_latency, user_data);
+}
+
+static void custom_location(const char *input, void *user_data)
+{
+	struct codec_preset *p = user_data;
+	struct iovec *iov = (void *)&p->data;
+	uint32_t location;
+	char *endptr = NULL;
+
+	location = strtol(input, &endptr, 0);
+	if (!endptr || *endptr != '\0') {
+		bt_shell_printf("Invalid argument: %s\n", input);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	/* Only add Channel Allocation if set */
+	if (location) {
+		uint8_t ltv[6] = { 0x05, LC3_CONFIG_CHAN_ALLOC };
+
+		location = cpu_to_le32(location);
+		memcpy(&ltv[2], &location, sizeof(location));
+		iov_append(&iov, ltv, sizeof(ltv));
+	}
+
+	bt_shell_prompt_input("Codec", "Enter frame length:",
+					custom_length, user_data);
+}
+
+static uint8_t val2duration(uint32_t val)
+{
+	switch (val) {
+	case 7:
+		return 0x00;
+	case 10:
+		return 0x01;
+	default:
+		return 0xff;
+	}
+}
+
+static void custom_duration(const char *input, void *user_data)
+{
+	struct codec_preset *p = user_data;
+	struct iovec *iov = (void *)&p->data;
+	uint8_t ltv[3] = { 0x02, LC3_CONFIG_DURATION, 0x00 };
+	char *endptr = NULL;
+	uint32_t val;
+
+	val = strtol(input, &endptr, 0);
+	if (!endptr || *endptr != '\0') {
+		bt_shell_printf("Invalid argument: %s\n", input);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	if (strncmp(input, "0x", 2))
+		ltv[2] = val2duration(val);
+	else
+		ltv[2] = val;
+
+	if (ltv[2] == 0xff) {
+		bt_shell_printf("Invalid argument: %s\n", input);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	iov_append(&iov, ltv, sizeof(ltv));
+
+	bt_shell_prompt_input("Codec", "Enter channel allocation:",
+					custom_location, user_data);
+}
+
+static uint8_t val2freq(uint32_t val)
+{
+	switch (val) {
+	case 8:
+		return 0x01;
+	case 11:
+		return 0x02;
+	case 16:
+		return 0x03;
+	case 22:
+		return 0x04;
+	case 24:
+		return 0x05;
+	case 32:
+		return 0x06;
+	case 44:
+		return 0x07;
+	case 48:
+		return 0x08;
+	case 88:
+		return 0x09;
+	case 96:
+		return 0x0a;
+	case 174:
+		return 0x0b;
+	case 192:
+		return 0x0c;
+	case 384:
+		return 0x0d;
+	default:
+		return 0x00;
+	}
+}
+
+static void custom_frequency(const char *input, void *user_data)
+{
+	struct codec_preset *p = user_data;
+	struct iovec *iov = (void *)&p->data;
+	uint8_t ltv[3] = { 0x02, LC3_CONFIG_FREQ, 0x00 };
+	uint32_t val;
+	char *endptr = NULL;
+
+	val = strtol(input, &endptr, 0);
+	if (!endptr || *endptr != '\0') {
+		bt_shell_printf("Invalid argument: %s\n", input);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	if (strncmp(input, "0x", 2))
+		ltv[2] = val2freq(val);
+	else
+		ltv[2] = val;
+
+	if (!ltv[2]) {
+		bt_shell_printf("Invalid argument: %s\n", input);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	/* Reset iov to start over the codec configuration */
+	free(iov->iov_base);
+	iov->iov_base = NULL;
+	iov->iov_len = 0;
+	iov_append(&iov, ltv, sizeof(ltv));
+
+	bt_shell_prompt_input("Codec", "Enter frame duration (ms):",
+				custom_duration, user_data);
+}
+
+static void print_presets(struct preset *preset)
+{
+	size_t i;
+	struct codec_preset *p;
+
+	p = &preset->custom;
+
+	bt_shell_printf("%s%s\n", p == preset->default_preset ? "*" : "",
+								p->name);
+
+	for (i = 0; i < preset->num_presets; i++) {
+		p = &preset->presets[i];
+		bt_shell_printf("%s%s\n", p == preset->default_preset ?
+						"*" : "", p->name);
+	}
+}
+
+static void cmd_presets_endpoint(int argc, char *argv[])
+{
+	struct preset *preset;
+	struct codec_preset *default_preset = NULL;
+
+	if (argc > 3) {
+		default_preset = find_preset(argv[1], argv[2], argv[3]);
+		if (!default_preset) {
+			bt_shell_printf("Preset %s not found\n", argv[3]);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+	}
+
+	preset = find_presets_name(argv[1], argv[2]);
+	if (!preset) {
+		bt_shell_printf("No preset found\n");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	if (default_preset) {
+		preset->default_preset = default_preset;
+		goto done;
+	}
+
+	print_presets(preset);
+
+done:
+	if (default_preset && !strcmp(default_preset->name, "custom")) {
+		bt_shell_prompt_input("Codec", "Enter frequency (Khz):",
+					custom_frequency, default_preset);
+		return;
 	}
 
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
@@ -1969,7 +3165,7 @@ static const struct bt_shell_menu endpoint_menu = {
 	{ "show",         "<endpoint>", cmd_show_endpoint,
 						"Endpoint information",
 						endpoint_generator },
-	{ "register",     "<UUID> <codec> [capabilities...]",
+	{ "register",     "<UUID> <codec[:company]> [capabilities...]",
 						cmd_register_endpoint,
 						"Register Endpoint",
 						uuid_generator },
@@ -1980,17 +3176,60 @@ static const struct bt_shell_menu endpoint_menu = {
 						cmd_config_endpoint,
 						"Configure Endpoint",
 						endpoint_generator },
-	{ "presets",      "<UUID> [default]", cmd_presets_endpoint,
+	{ "presets",      "<UUID> <codec[:company]> [default]",
+						cmd_presets_endpoint,
 						"List available presets",
 						uuid_generator },
 	{} },
 };
+
+static struct endpoint *endpoint_new(const struct capabilities *cap)
+{
+	struct endpoint *ep;
+
+	ep = new0(struct endpoint, 1);
+	ep->uuid = g_strdup(cap->uuid);
+	ep->broadcast = strcmp(cap->uuid, BAA_SERVICE_UUID) ? false : true;
+	ep->codec = cap->codec_id;
+	ep->path = g_strdup_printf("%s/ep%u", BLUEZ_MEDIA_ENDPOINT_PATH,
+					g_list_length(local_endpoints));
+	/* Copy capabilities */
+	iov_append(&ep->caps, cap->data.iov_base, cap->data.iov_len);
+	local_endpoints = g_list_append(local_endpoints, ep);
+
+	return ep;
+}
+
+static void register_endpoints(GDBusProxy *proxy)
+{
+	struct endpoint *ep;
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(caps); i++) {
+		const struct capabilities *cap = &caps[i];
+
+		if (!media_supports_uuid(proxy, cap->uuid))
+			continue;
+
+		ep = endpoint_new(cap);
+		ep->preset = find_presets(ep->uuid, ep->codec, ep->vid,
+								ep->cid);
+		ep->max_transports = UINT8_MAX;
+		ep->auto_accept = true;
+		ep->iso_group = BT_ISO_QOS_GROUP_UNSET;
+		ep->iso_stream = BT_ISO_QOS_STREAM_UNSET;
+		endpoint_register(ep);
+	}
+}
 
 static void media_added(GDBusProxy *proxy)
 {
 	medias = g_list_append(medias, proxy);
 
 	print_media(proxy, COLORED_NEW);
+
+	if (bt_shell_get_env("AUTO_REGISTER_ENDPOINT"))
+		register_endpoints(proxy);
 }
 
 static void player_added(GDBusProxy *proxy)
@@ -2206,8 +3445,32 @@ static struct endpoint *find_ep_by_transport(const char *path)
 	for (l = local_endpoints; l; l = g_list_next(l)) {
 		struct endpoint *ep = l->data;
 
-		if (ep->transport && !strcmp(ep->transport, path))
+		if (queue_find(ep->transports, match_str, path))
 			return ep;
+	}
+
+	return NULL;
+}
+
+static GDBusProxy *find_link_by_proxy(GDBusProxy *proxy)
+{
+	DBusMessageIter iter, array;
+
+	if (!g_dbus_proxy_get_property(proxy, "Links", &iter))
+		return NULL;
+
+	dbus_message_iter_recurse(&iter, &array);
+
+	while (dbus_message_iter_get_arg_type(&array) ==
+				DBUS_TYPE_OBJECT_PATH) {
+		const char *transport;
+
+		dbus_message_iter_get_basic(&array, &transport);
+
+		proxy = g_dbus_proxy_lookup(transports, NULL, transport,
+					BLUEZ_MEDIA_TRANSPORT_INTERFACE);
+		if (proxy)
+			return proxy;
 	}
 
 	return NULL;
@@ -2219,6 +3482,8 @@ static void transport_close(struct transport *transport)
 		return;
 
 	close(transport->fd);
+	transport->fd = -1;
+
 	free(transport->filename);
 }
 
@@ -2226,6 +3491,7 @@ static void transport_free(void *data)
 {
 	struct transport *transport = data;
 
+	io_destroy(transport->timer_io);
 	io_destroy(transport->io);
 	free(transport);
 }
@@ -2255,11 +3521,11 @@ static bool transport_recv(struct io *io, void *user_data)
 		return true;
 	}
 
-	bt_shell_printf("[seq %d] recv: %u bytes\n", transport->seq, ret);
+	bt_shell_echo("[seq %d] recv: %u bytes", transport->seq, ret);
 
 	transport->seq++;
 
-	if (transport->fd) {
+	if (transport->fd >= 0) {
 		len = write(transport->fd, buf, ret);
 		if (len < 0)
 			bt_shell_printf("Unable to write: %s (%d)",
@@ -2291,12 +3557,49 @@ static void transport_new(GDBusProxy *proxy, int sk, uint16_t mtu[2])
 	queue_push_tail(ios, transport);
 }
 
+static void ep_set_acquiring(struct endpoint *ep, GDBusProxy *proxy, bool value)
+{
+	bt_shell_printf("Transport %s %s\n", g_dbus_proxy_get_path(proxy),
+			value ? "acquiring" : "acquiring complete");
+
+	if (value && !ep->acquiring)
+		ep->acquiring = queue_new();
+
+	if (value)
+		queue_push_tail(ep->acquiring, proxy);
+	else
+		queue_remove(ep->acquiring, proxy);
+}
+
+static void transport_set_acquiring(GDBusProxy *proxy, bool value)
+{
+	struct endpoint *ep;
+	GDBusProxy *link;
+
+	ep = find_ep_by_transport(g_dbus_proxy_get_path(proxy));
+	if (!ep)
+		return;
+
+	ep_set_acquiring(ep, proxy, value);
+
+	link = find_link_by_proxy(proxy);
+	if (link) {
+		ep = find_ep_by_transport(g_dbus_proxy_get_path(link));
+		if (!ep)
+			return;
+
+		ep_set_acquiring(ep, link, value);
+	}
+}
+
 static void acquire_reply(DBusMessage *message, void *user_data)
 {
 	GDBusProxy *proxy = user_data;
 	DBusError error;
 	int sk;
 	uint16_t mtu[2];
+
+	transport_set_acquiring(proxy, false);
 
 	dbus_error_init(&error);
 
@@ -2325,22 +3628,61 @@ static void acquire_reply(DBusMessage *message, void *user_data)
 	return bt_shell_noninteractive_quit(EXIT_FAILURE);
 }
 
-static void transport_acquire(const char *input, void *user_data)
+static void prompt_acquire(const char *input, void *user_data)
 {
 	GDBusProxy *proxy = user_data;
 
 	if (!strcasecmp(input, "y") || !strcasecmp(input, "yes")) {
-		if (!g_dbus_proxy_method_call(proxy, "Acquire", NULL,
-						acquire_reply, proxy, NULL))
-			bt_shell_printf("Failed acquire transport\n");
+		if (g_dbus_proxy_method_call(proxy, "Acquire", NULL,
+						acquire_reply, proxy, NULL)) {
+			transport_set_acquiring(proxy, true);
+			return;
+		}
+		bt_shell_printf("Failed acquire transport\n");
 	}
+}
+
+static void transport_acquire(GDBusProxy *proxy, bool prompt)
+{
+	struct endpoint *ep;
+	GDBusProxy *link;
+
+	/* only attempt to acquire if transport is configured with a local
+	 * endpoint.
+	 */
+	ep = find_ep_by_transport(g_dbus_proxy_get_path(proxy));
+	if (!ep || queue_find(ep->acquiring, NULL, proxy))
+		return;
+
+	link = find_link_by_proxy(proxy);
+	if (link) {
+		ep = find_ep_by_transport(g_dbus_proxy_get_path(link));
+		/* if link already acquiring wait it to be complete */
+		if (!ep || queue_find(ep->acquiring, NULL, link))
+			return;
+	}
+
+	if (ep->auto_accept || !prompt) {
+		if (!prompt)
+			bt_shell_printf("auto acquiring...\n");
+		if (!g_dbus_proxy_method_call(proxy, "Acquire", NULL,
+						acquire_reply, proxy, NULL)) {
+			bt_shell_printf("failed acquire transport\n");
+			return;
+		}
+
+		transport_set_acquiring(proxy, true);
+		return;
+	}
+
+	bt_shell_prompt_input(g_dbus_proxy_get_path(proxy), "acquire (yes/no):",
+					prompt_acquire, proxy);
 }
 
 static void transport_property_changed(GDBusProxy *proxy, const char *name,
 						DBusMessageIter *iter)
 {
 	char *str;
-	struct endpoint *ep;
 
 	str = proxy_description(proxy, "Transport", COLORED_CHG);
 	print_iter(str, name, iter);
@@ -2354,23 +3696,7 @@ static void transport_property_changed(GDBusProxy *proxy, const char *name,
 	if (strcmp(str, "pending"))
 		return;
 
-	/* Only attempt to acquire if transport is configured with a local
-	 * endpoint.
-	 */
-	ep = find_ep_by_transport(g_dbus_proxy_get_path(proxy));
-	if (!ep)
-		return;
-
-	if (ep->auto_accept) {
-		bt_shell_printf("Auto Accepting...\n");
-		if (!g_dbus_proxy_method_call(proxy, "Acquire", NULL,
-						acquire_reply, proxy, NULL))
-			bt_shell_printf("Failed acquire transport\n");
-		return;
-	}
-
-	bt_shell_prompt_input(g_dbus_proxy_get_path(proxy), "Acquire (yes/no):",
-					transport_acquire, proxy);
+	transport_acquire(proxy, true);
 }
 
 static void property_changed(GDBusProxy *proxy, const char *name,
@@ -2431,6 +3757,15 @@ static void cmd_show_transport(int argc, char *argv[])
 	print_property(proxy, "Volume");
 	print_property(proxy, "Endpoint");
 
+	print_property(proxy, "Interval");
+	print_property(proxy, "Framing");
+	print_property(proxy, "SDU");
+	print_property(proxy, "Retransmissions");
+	print_property(proxy, "Latency");
+	print_property(proxy, "Location");
+	print_property(proxy, "Metadata");
+	print_property(proxy, "Links");
+
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
@@ -2450,23 +3785,23 @@ static struct transport *find_transport(GDBusProxy *proxy)
 static void cmd_acquire_transport(int argc, char *argv[])
 {
 	GDBusProxy *proxy;
+	int i;
 
-	proxy = g_dbus_proxy_lookup(transports, NULL, argv[1],
+	for (i = 1; i < argc; i++) {
+		proxy = g_dbus_proxy_lookup(transports, NULL, argv[i],
 					BLUEZ_MEDIA_TRANSPORT_INTERFACE);
-	if (!proxy) {
-		bt_shell_printf("Transport %s not found\n", argv[1]);
-		return bt_shell_noninteractive_quit(EXIT_FAILURE);
-	}
+		if (!proxy) {
+			bt_shell_printf("Transport %s not found\n", argv[i]);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
 
-	if (find_transport(proxy)) {
-		bt_shell_printf("Transport %s already acquired\n", argv[1]);
-		return bt_shell_noninteractive_quit(EXIT_FAILURE);
-	}
+		if (find_transport(proxy)) {
+			bt_shell_printf("Transport %s already acquired\n",
+					argv[i]);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
 
-	if (!g_dbus_proxy_method_call(proxy, "Acquire", NULL,
-					acquire_reply, proxy, NULL)) {
-		bt_shell_printf("Failed acquire transport\n");
-		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		transport_acquire(proxy, false);
 	}
 
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
@@ -2496,25 +3831,29 @@ static void release_reply(DBusMessage *message, void *user_data)
 static void cmd_release_transport(int argc, char *argv[])
 {
 	GDBusProxy *proxy;
-	struct transport *transport;
+	int i;
 
-	proxy = g_dbus_proxy_lookup(transports, NULL, argv[1],
+	for (i = 1; i < argc; i++) {
+		struct transport *transport;
+
+		proxy = g_dbus_proxy_lookup(transports, NULL, argv[i],
 					BLUEZ_MEDIA_TRANSPORT_INTERFACE);
-	if (!proxy) {
-		bt_shell_printf("Transport %s not found\n", argv[1]);
-		return bt_shell_noninteractive_quit(EXIT_FAILURE);
-	}
+		if (!proxy) {
+			bt_shell_printf("Transport %s not found\n", argv[1]);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
 
-	transport = find_transport(proxy);
-	if (!transport) {
-		bt_shell_printf("Transport %s not acquired\n", argv[1]);
-		return bt_shell_noninteractive_quit(EXIT_FAILURE);
-	}
+		transport = find_transport(proxy);
+		if (!transport) {
+			bt_shell_printf("Transport %s not acquired\n", argv[i]);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
 
-	if (!g_dbus_proxy_method_call(proxy, "Release", NULL,
+		if (!g_dbus_proxy_method_call(proxy, "Release", NULL,
 					release_reply, transport, NULL)) {
-		bt_shell_printf("Failed release transport\n");
-		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+			bt_shell_printf("Failed release transport\n");
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
 	}
 
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
@@ -2538,80 +3877,229 @@ static int open_file(const char *filename, int flags)
 	return fd;
 }
 
-static int transport_send(struct transport *transport, int fd)
+static int elapsed_time(bool reset, int *secs, int *nsecs)
 {
-	uint8_t *buf;
+	static struct timespec start;
+	struct timespec curr;
 
-	buf = malloc(transport->mtu[1]);
-	if (!buf) {
-		bt_shell_printf("malloc: %s (%d)", strerror(errno), errno);
-		return -ENOMEM;
+	if (reset) {
+		if (clock_gettime(CLOCK_MONOTONIC, &start) < 0) {
+			bt_shell_printf("clock_gettime: %s (%d)",
+						strerror(errno), errno);
+			return -errno;
+		}
 	}
 
-	for (transport->seq = 0; ; transport->seq++) {
+	if (clock_gettime(CLOCK_MONOTONIC, &curr) < 0) {
+		bt_shell_printf("clock_gettime: %s (%d)", strerror(errno),
+						errno);
+		return -errno;
+	}
+
+	*secs = curr.tv_sec - start.tv_sec;
+	*nsecs = curr.tv_nsec - start.tv_nsec;
+	if (*nsecs < 0) {
+		(*secs)--;
+		*nsecs += 1000000000;
+	}
+
+	return 0;
+}
+
+static int transport_send_seq(struct transport *transport, int fd, uint32_t num)
+{
+	uint8_t *buf;
+	uint32_t i;
+
+	if (!num)
+		return 0;
+
+	buf = malloc(transport->mtu[1]);
+	if (!buf)
+		return -ENOMEM;
+
+	for (i = 0; i < num; i++, transport->seq++) {
 		ssize_t ret;
-		int queued;
+		int secs = 0, nsecs = 0;
+		off_t offset;
 
 		ret = read(fd, buf, transport->mtu[1]);
 		if (ret <= 0) {
 			if (ret < 0)
 				bt_shell_printf("read failed: %s (%d)",
 						strerror(errno), errno);
-			close(fd);
+			free(buf);
 			return ret;
 		}
 
 		ret = send(transport->sk, buf, ret, 0);
 		if (ret <= 0) {
-			bt_shell_printf("Send failed: %s (%d)",
+			bt_shell_printf("send failed: %s (%d)",
 							strerror(errno), errno);
+			free(buf);
 			return -errno;
 		}
 
-		ioctl(transport->sk, TIOCOUTQ, &queued);
+		elapsed_time(!transport->seq, &secs, &nsecs);
 
-		bt_shell_printf("[seq %d] send: %zd bytes "
-				"(TIOCOUTQ %d bytes)\n",
-				transport->seq, ret, queued);
+		if (!transport->seq && fstat(fd, &transport->stat) < 0) {
+			bt_shell_printf("fstat failed: %s (%d)",
+							strerror(errno), errno);
+			free(buf);
+			return -errno;
+		}
+
+		offset = lseek(fd, 0, SEEK_CUR);
+
+		bt_shell_echo("[seq %d %d.%03ds] send: %zd/%zd bytes",
+				transport->seq, secs,
+				(nsecs + 500000) / 1000000,
+				offset, transport->stat.st_size);
 	}
 
 	free(buf);
+
+	return i;
+}
+
+static bool transport_timer_read(struct io *io, void *user_data)
+{
+	struct transport *transport = user_data;
+	struct bt_iso_qos qos;
+	socklen_t len;
+	int ret, fd;
+	uint32_t num;
+	uint64_t exp;
+
+	if (transport->fd < 0)
+		return false;
+
+	fd = io_get_fd(io);
+	ret = read(fd, &exp, sizeof(exp));
+	if (ret < 0) {
+		bt_shell_printf("Failed to read: %s (%d)\n", strerror(errno),
+								-errno);
+		return false;
+	}
+
+	/* Read QoS if available */
+	memset(&qos, 0, sizeof(qos));
+	len = sizeof(qos);
+	if (getsockopt(transport->sk, SOL_BLUETOOTH, BT_ISO_QOS, &qos,
+							&len) < 0) {
+		bt_shell_printf("Failed to getsockopt(BT_ISO_QOS): %s (%d)\n",
+					strerror(errno), -errno);
+		return false;
+	}
+
+	/* num of packets = latency (ms) / interval (us) */
+	num = (qos.ucast.out.latency * 1000 / qos.ucast.out.interval);
+
+	ret = transport_send_seq(transport, transport->fd, num);
+	if (ret < 0) {
+		bt_shell_printf("Unable to send: %s (%d)\n",
+					strerror(-ret), ret);
+		return false;
+	}
+
+	if (!ret) {
+		transport_close(transport);
+		return false;
+	}
+
+	return true;
+}
+
+static int transport_send(struct transport *transport, int fd,
+					struct bt_iso_qos *qos)
+{
+	struct itimerspec ts;
+	int timer_fd;
+
+	transport->seq = 0;
+
+	if (!qos)
+		return transport_send_seq(transport, fd, UINT32_MAX);
+
+	if (transport->fd >= 0)
+		return -EALREADY;
+
+	timer_fd = timerfd_create(CLOCK_MONOTONIC, 0);
+	if (timer_fd < 0)
+		return -errno;
+
+	memset(&ts, 0, sizeof(ts));
+	ts.it_value.tv_nsec = qos->ucast.out.latency * 1000000;
+	ts.it_interval.tv_nsec = qos->ucast.out.latency * 1000000;
+
+	if (timerfd_settime(timer_fd, TFD_TIMER_ABSTIME, &ts, NULL) < 0)
+		return -errno;
+
+	transport->fd = fd;
+
+	transport->timer_io = io_new(timer_fd);
+
+	io_set_read_handler(transport->timer_io, transport_timer_read,
+						transport, NULL);
+
+	return transport_send_seq(transport, fd, 1);
 }
 
 static void cmd_send_transport(int argc, char *argv[])
 {
 	GDBusProxy *proxy;
 	struct transport *transport;
-	int fd, err;
+	int fd = -1, err;
+	struct bt_iso_qos qos;
+	socklen_t len;
+	int i;
 
-	proxy = g_dbus_proxy_lookup(transports, NULL, argv[1],
+	for (i = 1; i < argc; i++) {
+		proxy = g_dbus_proxy_lookup(transports, NULL, argv[i],
 					BLUEZ_MEDIA_TRANSPORT_INTERFACE);
-	if (!proxy) {
-		bt_shell_printf("Transport %s not found\n", argv[1]);
-		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		if (!proxy) {
+			bt_shell_printf("Transport %s not found\n", argv[i]);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+
+		transport = find_transport(proxy);
+		if (!transport) {
+			bt_shell_printf("Transport %s not acquired\n", argv[i]);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+
+		if (transport->sk < 0) {
+			bt_shell_printf("No Transport Socked found\n");
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+
+		if (i + 1 < argc) {
+			fd = open_file(argv[++i], O_RDONLY);
+			if (fd < 0)
+				return bt_shell_noninteractive_quit(
+								EXIT_FAILURE);
+		}
+
+		bt_shell_printf("Sending ...\n");
+
+		/* Read QoS if available */
+		memset(&qos, 0, sizeof(qos));
+		len = sizeof(qos);
+		if (getsockopt(transport->sk, SOL_BLUETOOTH, BT_ISO_QOS, &qos,
+							&len) < 0) {
+			bt_shell_printf("Unable to getsockopt(BT_ISO_QOS): %s",
+							strerror(errno));
+			err = transport_send(transport, fd, NULL);
+		} else
+			err = transport_send(transport, fd, &qos);
+
+		if (err < 0) {
+			bt_shell_printf("Unable to send: %s (%d)",
+						strerror(-err), -err);
+			close(fd);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
 	}
-
-	transport = find_transport(proxy);
-	if (!transport) {
-		bt_shell_printf("Transport %s not acquired\n", argv[1]);
-		return bt_shell_noninteractive_quit(EXIT_FAILURE);
-	}
-
-	if (transport->sk < 0) {
-		bt_shell_printf("No Transport Socked found\n");
-		return bt_shell_noninteractive_quit(EXIT_FAILURE);
-	}
-
-	fd = open_file(argv[2], O_RDONLY);
-
-	bt_shell_printf("Sending ...\n");
-
-	err = transport_send(transport, fd);
-
-	close(fd);
-
-	if (err < 0)
-		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
@@ -2707,16 +4195,19 @@ static const struct bt_shell_menu transport_menu = {
 	{ "show",        "<transport>", cmd_show_transport,
 						"Transport information",
 						transport_generator },
-	{ "acquire",     "<transport>",	cmd_acquire_transport,
+	{ "acquire",     "<transport> [transport1...]", cmd_acquire_transport,
 						"Acquire Transport",
 						transport_generator },
-	{ "release",     "<transport>",	cmd_release_transport,
+	{ "release",     "<transport> [transport1...]", cmd_release_transport,
 						"Release Transport",
 						transport_generator },
-	{ "send",        "<transport> <filename>", cmd_send_transport,
-						"Send contents of a file" },
+	{ "send",        "<transport> <filename> [transport1...]",
+						cmd_send_transport,
+						"Send contents of a file",
+						transport_generator },
 	{ "receive",     "<transport> [filename]", cmd_receive_transport,
-						"Get/Set file to receive" },
+						"Get/Set file to receive",
+						transport_generator },
 	{ "volume",      "<transport> [value]",	cmd_volume_transport,
 						"Get/Set transport volume",
 						transport_generator },

@@ -6,7 +6,7 @@
  *  Copyright (C) 2006-2007  Nokia Corporation
  *  Copyright (C) 2004-2009  Marcel Holtmann <marcel@holtmann.org>
  *  Copyright (C) 2011  BMW Car IT GmbH. All rights reserved.
- *
+ *  Copyright 2023 NXP
  *
  */
 
@@ -23,6 +23,7 @@
 #include "lib/bluetooth.h"
 #include "lib/sdp.h"
 #include "lib/uuid.h"
+#include "lib/mgmt.h"
 
 #include "gdbus/gdbus.h"
 
@@ -31,12 +32,16 @@
 #include "src/device.h"
 #include "src/dbus-common.h"
 #include "src/profile.h"
+#include "src/service.h"
 
 #include "src/uuid-helper.h"
 #include "src/log.h"
 #include "src/error.h"
+#include "src/gatt-database.h"
 #include "src/shared/util.h"
 #include "src/shared/queue.h"
+#include "src/shared/att.h"
+#include "src/shared/bap.h"
 
 #include "avdtp.h"
 #include "media.h"
@@ -83,12 +88,19 @@ struct endpoint_request {
 
 struct media_endpoint {
 	struct a2dp_sep		*sep;
+	struct bt_bap_pac	*pac;
 	char			*sender;	/* Endpoint DBus bus id */
 	char			*path;		/* Endpoint object path */
 	char			*uuid;		/* Endpoint property UUID */
 	uint8_t			codec;		/* Endpoint codec */
+	uint16_t                cid;            /* Endpoint company ID */
+	uint16_t                vid;            /* Endpoint vendor codec ID */
+	bool			delay_reporting;/* Endpoint delay_reporting */
+	struct bt_bap_pac_qos	qos;		/* Endpoint qos */
 	uint8_t			*capabilities;	/* Endpoint property capabilities */
 	size_t			size;		/* Endpoint capabilities size */
+	uint8_t                 *metadata;      /* Endpoint property metadata */
+	size_t                  metadata_size;  /* Endpoint metadata size */
 	guint			hs_watch;
 	guint			ag_watch;
 	guint			watch;
@@ -164,9 +176,16 @@ static void media_endpoint_destroy(struct media_endpoint *endpoint)
 
 	g_slist_free_full(endpoint->transports,
 				(GDestroyNotify) media_transport_destroy);
+	endpoint->transports = NULL;
+
+	if (endpoint->pac) {
+		bt_bap_remove_pac(endpoint->pac);
+		endpoint->pac = NULL;
+	}
 
 	g_dbus_remove_watch(btd_get_dbus_connection(), endpoint->watch);
 	g_free(endpoint->capabilities);
+	g_free(endpoint->metadata);
 	g_free(endpoint->sender);
 	g_free(endpoint->path);
 	g_free(endpoint->uuid);
@@ -289,6 +308,7 @@ static void endpoint_reply(DBusPendingCall *call, void *user_data)
 	struct endpoint_request *request = user_data;
 	struct media_endpoint *endpoint = request->endpoint;
 	DBusMessage *reply;
+	DBusMessageIter args, props;
 	DBusError err;
 	gboolean value;
 	void *ret = NULL;
@@ -321,7 +341,7 @@ static void endpoint_reply(DBusPendingCall *call, void *user_data)
 	}
 
 	if (dbus_message_is_method_call(request->msg, MEDIA_ENDPOINT_INTERFACE,
-				"SelectConfiguration")) {
+						"SelectConfiguration")) {
 		DBusMessageIter args, array;
 		uint8_t *configuration;
 
@@ -333,7 +353,14 @@ static void endpoint_reply(DBusPendingCall *call, void *user_data)
 
 		ret = configuration;
 		goto done;
-	} else  if (!dbus_message_get_args(reply, &err, DBUS_TYPE_INVALID)) {
+	} else if (dbus_message_is_method_call(request->msg,
+						MEDIA_ENDPOINT_INTERFACE,
+						"SelectProperties")) {
+		dbus_message_iter_init(reply, &args);
+		dbus_message_iter_recurse(&args, &props);
+		ret = &props;
+		goto done;
+	} else if (!dbus_message_get_args(reply, &err, DBUS_TYPE_INVALID)) {
 		error("Wrong reply signature: %s", err.message);
 		dbus_error_free(&err);
 		goto done;
@@ -499,7 +526,7 @@ static gboolean set_configuration(struct media_endpoint *endpoint,
 
 	transport = media_transport_create(device,
 					a2dp_setup_remote_path(data->setup),
-					configuration, size, endpoint);
+					configuration, size, endpoint, NULL);
 	if (transport == NULL)
 		return FALSE;
 
@@ -674,32 +701,544 @@ static void a2dp_destroy_endpoint(void *user_data)
 	release_endpoint(endpoint);
 }
 
-static gboolean endpoint_init_a2dp_source(struct media_endpoint *endpoint,
-						gboolean delay_reporting,
-						int *err)
+static bool endpoint_init_a2dp_source(struct media_endpoint *endpoint, int *err)
 {
 	endpoint->sep = a2dp_add_sep(endpoint->adapter->btd_adapter,
 					AVDTP_SEP_TYPE_SOURCE, endpoint->codec,
-					delay_reporting, &a2dp_endpoint,
-					endpoint, a2dp_destroy_endpoint, err);
+					endpoint->delay_reporting,
+					&a2dp_endpoint, endpoint,
+					a2dp_destroy_endpoint, err);
 	if (endpoint->sep == NULL)
-		return FALSE;
+		return false;
 
-	return TRUE;
+	return true;
 }
 
-static gboolean endpoint_init_a2dp_sink(struct media_endpoint *endpoint,
-						gboolean delay_reporting,
-						int *err)
+static bool endpoint_init_a2dp_sink(struct media_endpoint *endpoint, int *err)
 {
 	endpoint->sep = a2dp_add_sep(endpoint->adapter->btd_adapter,
 					AVDTP_SEP_TYPE_SINK, endpoint->codec,
-					delay_reporting, &a2dp_endpoint,
-					endpoint, a2dp_destroy_endpoint, err);
+					endpoint->delay_reporting,
+					&a2dp_endpoint, endpoint,
+					a2dp_destroy_endpoint, err);
 	if (endpoint->sep == NULL)
-		return FALSE;
+		return false;
 
-	return TRUE;
+	return true;
+}
+
+struct pac_select_data {
+	struct bt_bap_pac *pac;
+	bt_bap_pac_select_t cb;
+	void *user_data;
+};
+
+static int parse_array(DBusMessageIter *iter, struct iovec *iov)
+{
+	DBusMessageIter array;
+
+	if (!iov)
+		return 0;
+
+	dbus_message_iter_recurse(iter, &array);
+	dbus_message_iter_get_fixed_array(&array, &iov->iov_base,
+						(int *)&iov->iov_len);
+	return 0;
+}
+
+static int parse_select_properties(DBusMessageIter *props, struct iovec *caps,
+					struct iovec *metadata,
+					struct bt_bap_qos *qos)
+{
+	const char *key;
+	struct bt_bap_io_qos io_qos;
+	uint8_t framing = 0;
+
+	memset(&io_qos, 0, sizeof(io_qos));
+	while (dbus_message_iter_get_arg_type(props) == DBUS_TYPE_DICT_ENTRY) {
+		DBusMessageIter value, entry;
+		int var;
+
+		dbus_message_iter_recurse(props, &entry);
+		dbus_message_iter_get_basic(&entry, &key);
+
+		dbus_message_iter_next(&entry);
+		dbus_message_iter_recurse(&entry, &value);
+
+		var = dbus_message_iter_get_arg_type(&value);
+
+		if (!strcasecmp(key, "Capabilities")) {
+			if (var != DBUS_TYPE_ARRAY)
+				goto fail;
+
+			if (parse_array(&value, caps))
+				goto fail;
+		} else if (!strcasecmp(key, "Metadata")) {
+			if (var != DBUS_TYPE_ARRAY)
+				goto fail;
+
+			if (parse_array(&value, metadata))
+				goto fail;
+		} else if (!strcasecmp(key, "CIG")) {
+			if (var != DBUS_TYPE_BYTE)
+				goto fail;
+
+			dbus_message_iter_get_basic(&value, &qos->ucast.cig_id);
+		} else if (!strcasecmp(key, "CIS")) {
+			if (var != DBUS_TYPE_BYTE)
+				goto fail;
+
+			dbus_message_iter_get_basic(&value, &qos->ucast.cis_id);
+		} else if (!strcasecmp(key, "Interval")) {
+			if (var != DBUS_TYPE_UINT32)
+				goto fail;
+
+			dbus_message_iter_get_basic(&value, &io_qos.interval);
+		} else if (!strcasecmp(key, "Framing")) {
+			dbus_bool_t val;
+
+			if (var != DBUS_TYPE_BOOLEAN)
+				goto fail;
+
+			dbus_message_iter_get_basic(&value, &val);
+
+			framing = val;
+		} else if (!strcasecmp(key, "PHY")) {
+			const char *str;
+
+			if (var != DBUS_TYPE_STRING)
+				goto fail;
+
+			dbus_message_iter_get_basic(&value, &str);
+
+			if (!strcasecmp(str, "1M"))
+				io_qos.phy = 0x01;
+			else if (!strcasecmp(str, "2M"))
+				io_qos.phy = 0x02;
+			else
+				goto fail;
+		} else if (!strcasecmp(key, "SDU")) {
+			if (var != DBUS_TYPE_UINT16)
+				goto fail;
+
+			dbus_message_iter_get_basic(&value, &io_qos.sdu);
+		} else if (!strcasecmp(key, "Retransmissions")) {
+			if (var != DBUS_TYPE_BYTE)
+				goto fail;
+
+			dbus_message_iter_get_basic(&value, &io_qos.rtn);
+		} else if (!strcasecmp(key, "Latency")) {
+			if (var != DBUS_TYPE_UINT16)
+				goto fail;
+
+			dbus_message_iter_get_basic(&value, &io_qos.latency);
+		} else if (!strcasecmp(key, "Delay")) {
+			if (var != DBUS_TYPE_UINT32)
+				goto fail;
+
+			dbus_message_iter_get_basic(&value, &qos->ucast.delay);
+		} else if (!strcasecmp(key, "TargetLatency")) {
+			if (var != DBUS_TYPE_BYTE)
+				goto fail;
+
+			dbus_message_iter_get_basic(&value,
+						&qos->ucast.target_latency);
+		}
+
+		dbus_message_iter_next(props);
+	}
+
+	memcpy(&qos->ucast.io_qos, &io_qos, sizeof(io_qos));
+	qos->ucast.framing = framing;
+	return 0;
+
+fail:
+	DBG("Failed parsing %s", key);
+
+	return -EINVAL;
+}
+
+static void pac_select_cb(struct media_endpoint *endpoint, void *ret, int size,
+							void *user_data)
+{
+	struct pac_select_data *data = user_data;
+	DBusMessageIter *iter = ret;
+	int err;
+	struct iovec caps, meta;
+	struct bt_bap_qos qos;
+
+	if (!ret) {
+		err = -EPERM;
+		goto done;
+	}
+
+	if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_DICT_ENTRY) {
+		DBG("Unexpected argument type: %c != %c",
+			    dbus_message_iter_get_arg_type(iter),
+			    DBUS_TYPE_DICT_ENTRY);
+		err = -EINVAL;
+		goto done;
+	}
+
+	memset(&qos, 0, sizeof(qos));
+
+	/* Mark CIG and CIS to be auto assigned */
+	qos.ucast.cig_id = BT_ISO_QOS_CIG_UNSET;
+	qos.ucast.cis_id = BT_ISO_QOS_CIS_UNSET;
+
+	memset(&caps, 0, sizeof(caps));
+	memset(&meta, 0, sizeof(meta));
+
+	err = parse_select_properties(iter, &caps, &meta, &qos);
+	if (err < 0)
+		DBG("Unable to parse properties");
+
+done:
+	data->cb(data->pac, err, &caps, &meta, &qos, data->user_data);
+}
+
+static int pac_select(struct bt_bap_pac *lpac, struct bt_bap_pac *rpac,
+			struct bt_bap_pac_qos *qos,
+			bt_bap_pac_select_t cb, void *cb_data, void *user_data)
+{
+	struct media_endpoint *endpoint = user_data;
+	struct iovec *caps;
+	struct iovec *metadata;
+	const char *endpoint_path;
+	struct pac_select_data *data;
+	DBusMessage *msg;
+	DBusMessageIter iter, dict;
+	const char *key = "Capabilities";
+	uint32_t loc;
+
+	bt_bap_pac_get_codec(rpac, NULL, &caps, &metadata);
+	if (!caps)
+		return -EINVAL;
+
+	msg = dbus_message_new_method_call(endpoint->sender, endpoint->path,
+						MEDIA_ENDPOINT_INTERFACE,
+						"SelectProperties");
+	if (msg == NULL) {
+		error("Couldn't allocate D-Bus message");
+		return -ENOMEM;
+	}
+
+	data = new0(struct pac_select_data, 1);
+	data->pac = lpac;
+	data->cb = cb;
+	data->user_data = cb_data;
+
+	dbus_message_iter_init_append(msg, &iter);
+
+	dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sv}", &dict);
+
+	endpoint_path = bt_bap_pac_get_user_data(rpac);
+	if (endpoint_path)
+		g_dbus_dict_append_entry(&dict, "Endpoint",
+					DBUS_TYPE_OBJECT_PATH, &endpoint_path);
+
+	g_dbus_dict_append_basic_array(&dict, DBUS_TYPE_STRING, &key,
+					DBUS_TYPE_BYTE, &caps->iov_base,
+					caps->iov_len);
+
+	loc = bt_bap_pac_get_locations(rpac);
+	if (loc)
+		g_dbus_dict_append_entry(&dict, "Location", DBUS_TYPE_UINT32,
+									&loc);
+
+	if (metadata) {
+		key = "Metadata";
+		g_dbus_dict_append_basic_array(&dict, DBUS_TYPE_STRING, &key,
+						DBUS_TYPE_BYTE,
+						&metadata->iov_base,
+						metadata->iov_len);
+	}
+
+	if (qos && qos->phy) {
+		g_dbus_dict_append_entry(&dict, "Framing", DBUS_TYPE_BYTE,
+							&qos->framing);
+
+		g_dbus_dict_append_entry(&dict, "PHY", DBUS_TYPE_BYTE,
+							&qos->phy);
+
+		g_dbus_dict_append_entry(&dict, "Latency", DBUS_TYPE_UINT16,
+							&qos->latency);
+
+		g_dbus_dict_append_entry(&dict, "MinimumDelay",
+					DBUS_TYPE_UINT32, &qos->pd_min);
+
+		g_dbus_dict_append_entry(&dict, "MaximumDelay",
+					DBUS_TYPE_UINT32, &qos->pd_max);
+
+		g_dbus_dict_append_entry(&dict, "PreferredMinimumDelay",
+					DBUS_TYPE_UINT32, &qos->ppd_min);
+
+		g_dbus_dict_append_entry(&dict, "PreferredMaximumDelay",
+					DBUS_TYPE_UINT32, &qos->ppd_min);
+	}
+
+	dbus_message_iter_close_container(&iter, &dict);
+
+	return media_endpoint_async_call(msg, endpoint, NULL, pac_select_cb,
+								data, free);
+}
+
+struct pac_config_data {
+	struct bt_bap_stream *stream;
+	bt_bap_pac_config_t cb;
+	void *user_data;
+};
+
+static int transport_cmp(gconstpointer data, gconstpointer user_data)
+{
+	const struct media_transport *transport = data;
+
+	if (media_transport_get_stream((void *)transport) == user_data)
+		return 0;
+
+	return -1;
+}
+
+static struct media_transport *find_transport(struct media_endpoint *endpoint,
+						void *stream)
+{
+	GSList *match;
+
+	match = g_slist_find_custom(endpoint->transports, stream,
+								transport_cmp);
+	if (match == NULL)
+		return NULL;
+
+	return match->data;
+}
+
+static void pac_config_cb(struct media_endpoint *endpoint, void *ret, int size,
+							void *user_data)
+{
+	struct pac_config_data *data = user_data;
+	gboolean *ret_value = ret;
+	struct media_transport *transport;
+
+	/* If transport was cleared, configuration was cancelled */
+	transport = find_transport(endpoint, data->stream);
+	if (!transport)
+		return;
+
+	data->cb(data->stream, ret_value ? 0 : -EINVAL);
+}
+
+static struct media_transport *pac_ucast_config(struct bt_bap_stream *stream,
+						struct iovec *cfg,
+						struct media_endpoint *endpoint)
+{
+	struct bt_bap *bap = bt_bap_stream_get_session(stream);
+	struct btd_service *service = bt_bap_get_user_data(bap);
+	struct btd_device *device;
+	const char *path;
+
+	if (service)
+		device = btd_service_get_device(service);
+	else {
+		struct bt_att *att = bt_bap_get_att(bap);
+		int fd = bt_att_get_fd(att);
+
+		device = btd_adapter_find_device_by_fd(fd);
+	}
+
+	if (!device) {
+		error("Unable to find device");
+		return NULL;
+	}
+
+	path = bt_bap_stream_get_user_data(stream);
+
+	return media_transport_create(device, path, cfg->iov_base, cfg->iov_len,
+					endpoint, stream);
+}
+
+static struct media_transport *pac_bcast_config(struct bt_bap_stream *stream,
+						struct iovec *cfg,
+						struct media_endpoint *endpoint)
+{
+	struct bt_bap *bap = bt_bap_stream_get_session(stream);
+	struct btd_adapter *adapter = bt_bap_get_user_data(bap);
+	const char *path;
+
+	if (!adapter) {
+		error("Unable to find adapter");
+		return NULL;
+	}
+
+	path = bt_bap_stream_get_user_data(stream);
+
+	return media_transport_create(NULL, path, cfg->iov_base, cfg->iov_len,
+					endpoint, stream);
+}
+
+static int pac_config(struct bt_bap_stream *stream, struct iovec *cfg,
+			struct bt_bap_qos *qos, bt_bap_pac_config_t cb,
+			void *user_data)
+{
+	struct media_endpoint *endpoint = user_data;
+	DBusConnection *conn = btd_get_dbus_connection();
+	struct pac_config_data *data;
+	struct media_transport *transport;
+	DBusMessage *msg;
+	DBusMessageIter iter;
+	const char *path;
+
+	DBG("endpoint %p stream %p", endpoint, stream);
+
+	transport = find_transport(endpoint, stream);
+	if (!transport) {
+		switch (bt_bap_stream_get_type(stream)) {
+		case BT_BAP_STREAM_TYPE_UCAST:
+			transport = pac_ucast_config(stream, cfg, endpoint);
+			break;
+		case BT_BAP_STREAM_TYPE_BCAST:
+			transport = pac_bcast_config(stream, cfg, endpoint);
+			break;
+		}
+
+		if (!transport)
+			return -EINVAL;
+
+		endpoint->transports = g_slist_append(endpoint->transports,
+								transport);
+	}
+
+	msg = dbus_message_new_method_call(endpoint->sender, endpoint->path,
+						MEDIA_ENDPOINT_INTERFACE,
+						"SetConfiguration");
+	if (msg == NULL) {
+		error("Couldn't allocate D-Bus message");
+		endpoint_remove_transport(endpoint, transport);
+		return FALSE;
+	}
+
+	data = new0(struct pac_config_data, 1);
+	data->stream = stream;
+	data->cb = cb;
+	data->user_data = user_data;
+
+	dbus_message_iter_init_append(msg, &iter);
+
+	path = media_transport_get_path(transport);
+	dbus_message_iter_append_basic(&iter, DBUS_TYPE_OBJECT_PATH, &path);
+
+	g_dbus_get_properties(conn, path, "org.bluez.MediaTransport1", &iter);
+
+	return media_endpoint_async_call(msg, endpoint, transport,
+					pac_config_cb, data, free);
+}
+
+static void pac_clear(struct bt_bap_stream *stream, void *user_data)
+{
+	struct media_endpoint *endpoint = user_data;
+	struct media_transport *transport;
+
+	DBG("endpoint %p stream %p", endpoint, stream);
+
+	transport = find_transport(endpoint, stream);
+	if (transport)
+		clear_configuration(endpoint, transport);
+}
+
+static struct bt_bap_pac_ops pac_ops = {
+	.select = pac_select,
+	.config = pac_config,
+	.clear = pac_clear,
+};
+
+static void bap_debug(const char *str, void *user_data)
+{
+	DBG("%s", str);
+}
+
+static bool endpoint_init_pac(struct media_endpoint *endpoint, uint8_t type,
+								int *err)
+{
+	struct btd_gatt_database *database;
+	struct gatt_db *db;
+	struct iovec data;
+	struct iovec *metadata = NULL;
+	char *name;
+
+	if (!(g_dbus_get_flags() & G_DBUS_FLAG_ENABLE_EXPERIMENTAL)) {
+		warn("D-Bus experimental not enabled");
+		*err = -ENOTSUP;
+		return false;
+	}
+
+	database = btd_adapter_get_database(endpoint->adapter->btd_adapter);
+	if (!database) {
+		error("Adapter database not found");
+		return false;
+	}
+
+	if (!bap_print_cc(endpoint->capabilities, endpoint->size, bap_debug,
+								NULL)) {
+		error("Unable to parse endpoint capabilities");
+		return false;
+	}
+
+	if (!bap_print_cc(endpoint->metadata, endpoint->metadata_size,
+					bap_debug, NULL)) {
+		error("Unable to parse endpoint metadata");
+		return false;
+	}
+
+	db = btd_gatt_database_get_db(database);
+
+	data.iov_base = endpoint->capabilities;
+	data.iov_len = endpoint->size;
+
+	if (asprintf(&name, "%s:%s", endpoint->sender, endpoint->path) < 0) {
+		error("Could not allocate name for pac %s:%s",
+				endpoint->sender, endpoint->path);
+		return false;
+	}
+
+	/* TODO: Add support for metadata */
+	if (endpoint->metadata_size) {
+		metadata = g_new0(struct iovec, 1);
+		metadata->iov_base = endpoint->metadata;
+		metadata->iov_len = endpoint->metadata_size;
+	}
+
+	endpoint->pac = bt_bap_add_vendor_pac(db, name, type, endpoint->codec,
+				endpoint->cid, endpoint->vid, &endpoint->qos,
+				&data, metadata);
+	if (!endpoint->pac) {
+		error("Unable to create PAC");
+		free(metadata);
+		return false;
+	}
+
+	bt_bap_pac_set_ops(endpoint->pac, &pac_ops, endpoint);
+
+	DBG("PAC %s registered", name);
+
+	free(name);
+	free(metadata);
+
+	return true;
+}
+
+static bool endpoint_init_pac_sink(struct media_endpoint *endpoint, int *err)
+{
+	return endpoint_init_pac(endpoint, BT_BAP_SINK, err);
+}
+
+static bool endpoint_init_pac_source(struct media_endpoint *endpoint, int *err)
+{
+	return endpoint_init_pac(endpoint, BT_BAP_SOURCE, err);
+}
+
+static bool endpoint_init_broadcast_source(struct media_endpoint *endpoint,
+						int *err)
+{
+	return endpoint_init_pac(endpoint, BT_BAP_BCAST_SOURCE, err);
 }
 
 static bool endpoint_properties_exists(const char *uuid,
@@ -784,24 +1323,86 @@ static bool endpoint_properties_get(const char *uuid,
 	return true;
 }
 
-static struct media_endpoint *media_endpoint_create(struct media_adapter *adapter,
+static bool a2dp_endpoint_supported(struct btd_adapter *adapter)
+{
+	if (!btd_adapter_has_settings(adapter, MGMT_SETTING_BREDR))
+		return false;
+
+	return true;
+}
+
+static bool experimental_endpoint_supported(struct btd_adapter *adapter)
+{
+	if (!btd_adapter_has_exp_feature(adapter, EXP_FEAT_ISO_SOCKET))
+		return false;
+
+	if (!btd_adapter_has_settings(adapter, MGMT_SETTING_CIS_CENTRAL |
+					MGMT_SETTING_CIS_PERIPHERAL))
+		return false;
+
+	return g_dbus_get_flags() & G_DBUS_FLAG_ENABLE_EXPERIMENTAL;
+}
+
+static bool experimental_broadcaster_ep_supported(struct btd_adapter *adapter)
+{
+	if (!btd_adapter_has_exp_feature(adapter, EXP_FEAT_ISO_SOCKET))
+		return false;
+
+	if (!btd_adapter_has_settings(adapter, MGMT_SETTING_ISO_BROADCASTER))
+		return false;
+
+	return g_dbus_get_flags() & G_DBUS_FLAG_ENABLE_EXPERIMENTAL;
+}
+
+static struct media_endpoint_init {
+	const char *uuid;
+	bool (*func)(struct media_endpoint *endpoint, int *err);
+	bool (*supported)(struct btd_adapter *adapter);
+} init_table[] = {
+	{ A2DP_SOURCE_UUID, endpoint_init_a2dp_source,
+				a2dp_endpoint_supported },
+	{ A2DP_SINK_UUID, endpoint_init_a2dp_sink,
+				a2dp_endpoint_supported },
+	{ PAC_SINK_UUID, endpoint_init_pac_sink,
+				experimental_endpoint_supported },
+	{ PAC_SOURCE_UUID, endpoint_init_pac_source,
+				experimental_endpoint_supported },
+	{ BAA_SERVICE_UUID, endpoint_init_broadcast_source,
+			experimental_broadcaster_ep_supported },
+};
+
+static struct media_endpoint *
+media_endpoint_create(struct media_adapter *adapter,
 						const char *sender,
 						const char *path,
 						const char *uuid,
 						gboolean delay_reporting,
 						uint8_t codec,
+						uint16_t cid,
+						uint16_t vid,
+						struct bt_bap_pac_qos *qos,
 						uint8_t *capabilities,
 						int size,
+						uint8_t *metadata,
+						int metadata_size,
 						int *err)
 {
 	struct media_endpoint *endpoint;
-	gboolean succeeded;
+	struct media_endpoint_init *init;
+	size_t i;
+	bool succeeded = false;
 
 	endpoint = g_new0(struct media_endpoint, 1);
 	endpoint->sender = g_strdup(sender);
 	endpoint->path = g_strdup(path);
 	endpoint->uuid = g_strdup(uuid);
 	endpoint->codec = codec;
+	endpoint->cid = cid;
+	endpoint->vid = vid;
+	endpoint->delay_reporting = delay_reporting;
+
+	if (qos)
+		endpoint->qos = *qos;
 
 	if (size > 0) {
 		endpoint->capabilities = g_new(uint8_t, size);
@@ -809,28 +1410,28 @@ static struct media_endpoint *media_endpoint_create(struct media_adapter *adapte
 		endpoint->size = size;
 	}
 
+	if (metadata_size > 0) {
+		endpoint->metadata = g_new(uint8_t, metadata_size);
+		memcpy(endpoint->metadata, metadata, metadata_size);
+		endpoint->metadata_size = metadata_size;
+	}
+
 	endpoint->adapter = adapter;
 
-	if (strcasecmp(uuid, A2DP_SOURCE_UUID) == 0)
-		succeeded = endpoint_init_a2dp_source(endpoint,
-							delay_reporting, err);
-	else if (strcasecmp(uuid, A2DP_SINK_UUID) == 0)
-		succeeded = endpoint_init_a2dp_sink(endpoint,
-							delay_reporting, err);
-	else if (strcasecmp(uuid, HFP_AG_UUID) == 0 ||
-					strcasecmp(uuid, HSP_AG_UUID) == 0)
-		succeeded = TRUE;
-	else if (strcasecmp(uuid, HFP_HS_UUID) == 0 ||
-					strcasecmp(uuid, HSP_HS_UUID) == 0)
-		succeeded = TRUE;
-	else {
-		succeeded = FALSE;
+	for (i = 0; i < ARRAY_SIZE(init_table); i++) {
+		init = &init_table[i];
 
-		if (err)
-			*err = -EINVAL;
+		if (!init->supported(adapter->btd_adapter))
+			continue;
+
+		if (!strcasecmp(init->uuid, uuid)) {
+			succeeded = init->func(endpoint, err);
+			break;
+		}
 	}
 
 	if (!succeeded) {
+		error("Unable initialize endpoint for UUID %s", uuid);
 		media_endpoint_destroy(endpoint);
 		return NULL;
 	}
@@ -854,12 +1455,21 @@ static struct media_endpoint *media_endpoint_create(struct media_adapter *adapte
 	return endpoint;
 }
 
+struct vendor {
+	uint16_t cid;
+	uint16_t vid;
+} __packed;
+
 static int parse_properties(DBusMessageIter *props, const char **uuid,
 				gboolean *delay_reporting, uint8_t *codec,
-				uint8_t **capabilities, int *size)
+				uint16_t *cid, uint16_t *vid,
+				struct bt_bap_pac_qos *qos,
+				uint8_t **capabilities, int *size,
+				uint8_t **metadata, int *metadata_size)
 {
 	gboolean has_uuid = FALSE;
 	gboolean has_codec = FALSE;
+	struct vendor vendor;
 
 	while (dbus_message_iter_get_arg_type(props) == DBUS_TYPE_DICT_ENTRY) {
 		const char *key;
@@ -883,6 +1493,12 @@ static int parse_properties(DBusMessageIter *props, const char **uuid,
 				return -EINVAL;
 			dbus_message_iter_get_basic(&value, codec);
 			has_codec = TRUE;
+		} else if (strcasecmp(key, "Vendor") == 0) {
+			if (var != DBUS_TYPE_UINT32)
+				return -EINVAL;
+			dbus_message_iter_get_basic(&value, &vendor);
+			*cid = vendor.cid;
+			*vid = vendor.vid;
 		} else if (strcasecmp(key, "DelayReporting") == 0) {
 			if (var != DBUS_TYPE_BOOLEAN)
 				return -EINVAL;
@@ -896,6 +1512,43 @@ static int parse_properties(DBusMessageIter *props, const char **uuid,
 			dbus_message_iter_recurse(&value, &array);
 			dbus_message_iter_get_fixed_array(&array, capabilities,
 							size);
+		} else if (strcasecmp(key, "Metadata") == 0) {
+			DBusMessageIter array;
+
+			if (var != DBUS_TYPE_ARRAY)
+				return -EINVAL;
+
+			dbus_message_iter_recurse(&value, &array);
+			dbus_message_iter_get_fixed_array(&array, metadata,
+							metadata_size);
+		} else if (strcasecmp(key, "Framing") == 0) {
+			if (var != DBUS_TYPE_BYTE)
+				return -EINVAL;
+			dbus_message_iter_get_basic(&value, &qos->framing);
+		} else if (strcasecmp(key, "PHY") == 0) {
+			if (var != DBUS_TYPE_BYTE)
+				return -EINVAL;
+			dbus_message_iter_get_basic(&value, &qos->phy);
+		} else if (strcasecmp(key, "RTN") == 0) {
+			if (var != DBUS_TYPE_BYTE)
+				return -EINVAL;
+			dbus_message_iter_get_basic(&value, &qos->rtn);
+		} else if (strcasecmp(key, "MinimumDelay") == 0) {
+			if (var != DBUS_TYPE_UINT16)
+				return -EINVAL;
+			dbus_message_iter_get_basic(&value, &qos->pd_min);
+		} else if (strcasecmp(key, "MaximumDelay") == 0) {
+			if (var != DBUS_TYPE_UINT16)
+				return -EINVAL;
+			dbus_message_iter_get_basic(&value, &qos->pd_max);
+		} else if (strcasecmp(key, "PreferredMinimumDelay") == 0) {
+			if (var != DBUS_TYPE_UINT16)
+				return -EINVAL;
+			dbus_message_iter_get_basic(&value, &qos->ppd_min);
+		} else if (strcasecmp(key, "PreferredMaximumDelay") == 0) {
+			if (var != DBUS_TYPE_UINT16)
+				return -EINVAL;
+			dbus_message_iter_get_basic(&value, &qos->ppd_max);
 		}
 
 		dbus_message_iter_next(props);
@@ -911,9 +1564,14 @@ static DBusMessage *register_endpoint(DBusConnection *conn, DBusMessage *msg,
 	DBusMessageIter args, props;
 	const char *sender, *path, *uuid;
 	gboolean delay_reporting = FALSE;
-	uint8_t codec;
-	uint8_t *capabilities;
+	uint8_t codec = 0;
+	uint16_t cid = 0;
+	uint16_t vid = 0;
+	struct bt_bap_pac_qos qos = {};
+	uint8_t *capabilities = NULL;
+	uint8_t *metadata = NULL;
 	int size = 0;
+	int metadata_size = 0;
 	int err;
 
 	sender = dbus_message_get_sender(msg);
@@ -930,12 +1588,15 @@ static DBusMessage *register_endpoint(DBusConnection *conn, DBusMessage *msg,
 	if (dbus_message_iter_get_arg_type(&props) != DBUS_TYPE_DICT_ENTRY)
 		return btd_error_invalid_args(msg);
 
-	if (parse_properties(&props, &uuid, &delay_reporting, &codec,
-						&capabilities, &size) < 0)
+	if (parse_properties(&props, &uuid, &delay_reporting, &codec, &cid,
+			&vid, &qos, &capabilities, &size, &metadata,
+			&metadata_size) < 0)
 		return btd_error_invalid_args(msg);
 
 	if (media_endpoint_create(adapter, sender, path, uuid, delay_reporting,
-				codec, capabilities, size, &err) == NULL) {
+					codec, cid, vid, &qos, capabilities,
+					size, metadata, metadata_size,
+					&err) == NULL) {
 		if (err == -EPROTONOSUPPORT)
 			return btd_error_not_supported(msg);
 		else
@@ -2013,8 +2674,12 @@ static void app_register_endpoint(void *data, void *user_data)
 	const char *uuid;
 	gboolean delay_reporting = FALSE;
 	uint8_t codec;
+	struct vendor vendor;
+	struct bt_bap_pac_qos qos;
 	uint8_t *capabilities = NULL;
 	int size = 0;
+	uint8_t *metadata = NULL;
+	int metadata_size = 0;
 	DBusMessageIter iter, array;
 	struct media_endpoint *endpoint;
 
@@ -2041,6 +2706,15 @@ static void app_register_endpoint(void *data, void *user_data)
 
 	dbus_message_iter_get_basic(&iter, &codec);
 
+	memset(&vendor, 0, sizeof(vendor));
+
+	if (g_dbus_proxy_get_property(proxy, "Vendor", &iter)) {
+		if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_UINT32)
+			goto fail;
+
+		dbus_message_iter_get_basic(&iter, &vendor);
+	}
+
 	/* DelayReporting and Capabilities are considered optional */
 	if (g_dbus_proxy_get_property(proxy, "DelayReporting", &iter))	{
 		if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_BOOLEAN)
@@ -2057,9 +2731,72 @@ static void app_register_endpoint(void *data, void *user_data)
 		dbus_message_iter_get_fixed_array(&array, &capabilities, &size);
 	}
 
+	if (g_dbus_proxy_get_property(proxy, "Metadata", &iter)) {
+		if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_ARRAY)
+			goto fail;
+
+		dbus_message_iter_recurse(&iter, &array);
+		dbus_message_iter_get_fixed_array(&array, &metadata,
+						&metadata_size);
+	}
+
+	/* Parse QoS preferences */
+	memset(&qos, 0, sizeof(qos));
+	if (g_dbus_proxy_get_property(proxy, "Framing", &iter)) {
+		if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_BYTE)
+			goto fail;
+
+		dbus_message_iter_get_basic(&iter, &qos.framing);
+	}
+
+	if (g_dbus_proxy_get_property(proxy, "PHY", &iter)) {
+		if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_BYTE)
+			goto fail;
+
+		dbus_message_iter_get_basic(&iter, &qos.phy);
+	}
+
+	if (g_dbus_proxy_get_property(proxy, "Latency", &iter)) {
+		if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_UINT16)
+			goto fail;
+
+		dbus_message_iter_get_basic(&iter, &qos.latency);
+	}
+
+	if (g_dbus_proxy_get_property(proxy, "MinimumDelay", &iter)) {
+		if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_UINT32)
+			goto fail;
+
+		dbus_message_iter_get_basic(&iter, &qos.pd_min);
+	}
+
+	if (g_dbus_proxy_get_property(proxy, "MaximumDelay", &iter)) {
+		if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_UINT32)
+			goto fail;
+
+		dbus_message_iter_get_basic(&iter, &qos.pd_max);
+	}
+
+	if (g_dbus_proxy_get_property(proxy, "PreferredMinimumDelay", &iter)) {
+		if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_UINT32)
+			goto fail;
+
+		dbus_message_iter_get_basic(&iter, &qos.ppd_min);
+	}
+
+	if (g_dbus_proxy_get_property(proxy, "PreferredMaximumDelay", &iter)) {
+		if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_UINT32)
+			goto fail;
+
+		dbus_message_iter_get_basic(&iter, &qos.ppd_min);
+	}
+
 	endpoint = media_endpoint_create(app->adapter, app->sender, path, uuid,
-					delay_reporting, codec, capabilities,
-					size, &app->err);
+						delay_reporting, codec,
+						vendor.cid, vendor.vid, &qos,
+						capabilities, size,
+						metadata, metadata_size,
+						&app->err);
 	if (!endpoint) {
 		error("Unable to register endpoint %s:%s: %s", app->sender,
 						path, strerror(-app->err));
@@ -2197,9 +2934,6 @@ static void client_ready_cb(GDBusClient *client, void *user_data)
 		goto reply;
 	}
 
-	queue_foreach(app->proxies, app_register_endpoint, app);
-	queue_foreach(app->proxies, app_register_player, app);
-
 	if (app->err) {
 		if (app->err == -EPROTONOSUPPORT)
 			reply = btd_error_not_supported(app->reg);
@@ -2243,6 +2977,10 @@ static void proxy_added_cb(GDBusProxy *proxy, void *user_data)
 	path = g_dbus_proxy_get_path(proxy);
 
 	DBG("Proxy added: %s, iface: %s", path, iface);
+
+	app_register_endpoint(proxy, app);
+	app_register_player(proxy, app);
+
 }
 
 static bool match_endpoint_by_path(const void *a, const void *b)
@@ -2445,17 +3183,56 @@ static const GDBusMethodTable media_methods[] = {
 	{ },
 };
 
+static gboolean supported_uuids(const GDBusPropertyTable *property,
+					DBusMessageIter *iter, void *data)
+{
+	struct media_adapter *adapter = data;
+	DBusMessageIter entry;
+	size_t i;
+
+	dbus_message_iter_open_container(iter, DBUS_TYPE_ARRAY,
+				DBUS_TYPE_STRING_AS_STRING, &entry);
+
+	for (i = 0; i < ARRAY_SIZE(init_table); i++) {
+		struct media_endpoint_init *init = &init_table[i];
+
+		if (init->supported(adapter->btd_adapter))
+			dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING,
+							&init->uuid);
+	}
+
+	dbus_message_iter_close_container(iter, &entry);
+
+	return TRUE;
+}
+
+static const GDBusPropertyTable media_properties[] = {
+	{ "SupportedUUIDs", "as", supported_uuids },
+	{ }
+};
+
 static void path_free(void *data)
 {
 	struct media_adapter *adapter = data;
+	GSList *l;
 
 	queue_destroy(adapter->apps, app_free);
 
-	while (adapter->endpoints)
-		release_endpoint(adapter->endpoints->data);
+	for (l = adapter->endpoints; l;) {
+		struct media_endpoint *endpoint	= l->data;
 
-	while (adapter->players)
-		media_player_destroy(adapter->players->data);
+		l = g_slist_next(l);
+
+		release_endpoint(endpoint);
+	}
+
+	for (l = adapter->players; l;) {
+		struct media_player *mp = l->data;
+
+		l = g_slist_next(l);
+
+		media_player_destroy(mp);
+	}
 
 	adapters = g_slist_remove(adapters, adapter);
 
@@ -2474,7 +3251,7 @@ int media_register(struct btd_adapter *btd_adapter)
 	if (!g_dbus_register_interface(btd_get_dbus_connection(),
 					adapter_get_path(btd_adapter),
 					MEDIA_INTERFACE,
-					media_methods, NULL, NULL,
+					media_methods, NULL, media_properties,
 					adapter, path_free)) {
 		error("D-Bus failed to register %s path",
 						adapter_get_path(btd_adapter));
@@ -2516,4 +3293,10 @@ const char *media_endpoint_get_uuid(struct media_endpoint *endpoint)
 uint8_t media_endpoint_get_codec(struct media_endpoint *endpoint)
 {
 	return endpoint->codec;
+}
+
+struct btd_adapter *media_endpoint_get_btd_adapter(
+					struct media_endpoint *endpoint)
+{
+	return endpoint->adapter->btd_adapter;
 }

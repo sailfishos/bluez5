@@ -24,6 +24,9 @@
 #include "mesh/net.h"
 #include "mesh/appkey.h"
 #include "mesh/cfgmod.h"
+#include "mesh/prov.h"
+#include "mesh/remprv.h"
+#include "mesh/prv-beacon.h"
 #include "mesh/error.h"
 #include "mesh/dbus.h"
 #include "mesh/util.h"
@@ -74,6 +77,12 @@ static struct l_queue *mesh_virtuals;
 static bool is_internal(uint32_t id)
 {
 	if (id == CONFIG_SRV_MODEL || id == CONFIG_CLI_MODEL)
+		return true;
+
+	if (id == REM_PROV_SRV_MODEL || id == REM_PROV_CLI_MODEL)
+		return true;
+
+	if (id == PRV_BEACON_SRV_MODEL || id == PRV_BEACON_CLI_MODEL)
 		return true;
 
 	return false;
@@ -457,13 +466,25 @@ static int dev_packet_decrypt(struct mesh_node *node, const uint8_t *data,
 					dst, key_aid, seq, iv_idx, out, key))
 		return APP_IDX_DEV_LOCAL;
 
-	if (!keyring_get_remote_dev_key(node, src, dev_key))
+	key = dev_key;
+
+	if (keyring_get_remote_dev_key(node, src, dev_key)) {
+		if (mesh_crypto_payload_decrypt(NULL, 0, data, size, szmict,
+				src, dst, key_aid, seq, iv_idx, out, key))
+			return APP_IDX_DEV_REMOTE;
+	}
+
+	/* See if there is a local Device Key Candidate as last resort */
+	if (!node_get_device_key_candidate(node, dev_key))
 		return -1;
 
-	key = dev_key;
-	if (mesh_crypto_payload_decrypt(NULL, 0, data, size, szmict, src,
-					dst, key_aid, seq, iv_idx, out, key))
-		return APP_IDX_DEV_REMOTE;
+	if (mesh_crypto_payload_decrypt(NULL, 0, data, size, szmict,
+				src, dst, key_aid, seq, iv_idx, out, key)) {
+
+		/* If candidate dev_key worked, it is considered finalized */
+		node_finalize_candidate(node);
+		return APP_IDX_DEV_LOCAL;
+	}
 
 	return -1;
 }
@@ -628,6 +649,9 @@ static int update_binding(struct mesh_node *node, uint16_t addr, uint32_t id,
 	}
 
 	if (id == CONFIG_SRV_MODEL || id == CONFIG_CLI_MODEL)
+		return MESH_STATUS_INVALID_MODEL;
+
+	if (id == PRV_BEACON_SRV_MODEL || id == PRV_BEACON_CLI_MODEL)
 		return MESH_STATUS_INVALID_MODEL;
 
 	if (!appkey_have_key(node_get_net(node), app_idx))
@@ -1063,7 +1087,8 @@ int mesh_model_pub_set(struct mesh_node *node, uint16_t addr, uint32_t id,
 	if (!mod->pub_enabled || (mod->cbs && !(mod->cbs->pub)))
 		return MESH_STATUS_INVALID_PUB_PARAM;
 
-	if (!appkey_have_key(node_get_net(node), idx))
+	if (!appkey_have_key(node_get_net(node), idx) ||
+			!has_binding(mod->bindings, idx))
 		return MESH_STATUS_INVALID_APPKEY;
 
 	/*
@@ -1637,7 +1662,8 @@ static struct mesh_model *model_setup(struct mesh_net *net, uint8_t ele_idx,
 						SET_ID(SIG_VENDOR, db_mod->id));
 
 	/* Implicitly bind config server model to device key */
-	if (db_mod->id == CONFIG_SRV_MODEL) {
+	if (db_mod->id == CONFIG_SRV_MODEL ||
+					db_mod->id == PRV_BEACON_SRV_MODEL) {
 
 		if (ele_idx != PRIMARY_ELE_IDX) {
 			l_free(mod);

@@ -709,21 +709,24 @@ struct gatt_db_attribute *gatt_db_insert_service(struct gatt_db *db,
 	if (service) {
 		const bt_uuid_t *type;
 		bt_uuid_t value;
+		struct gatt_db_attribute *attr = service->attributes[0];
+
+		if (!attr)
+			return NULL;
 
 		if (primary)
 			type = &primary_service_uuid;
 		else
 			type = &secondary_service_uuid;
 
-		gatt_db_attribute_get_service_uuid(service->attributes[0],
-									&value);
+		gatt_db_attribute_get_service_uuid(attr, &value);
 
 		/* Check if service match */
-		if (!bt_uuid_cmp(&service->attributes[0]->uuid, type) &&
+		if (!bt_uuid_cmp(&attr->uuid, type) &&
 				!bt_uuid_cmp(&value, uuid) &&
 				service->num_handles == num_handles &&
-				service->attributes[0]->handle == handle)
-			return service->attributes[0];
+				attr->handle == handle)
+			return attr;
 
 		return NULL;
 	}
@@ -1066,7 +1069,7 @@ gatt_db_service_add_ccc(struct gatt_db_attribute *attrib, uint32_t permissions)
 	struct gatt_db_attribute *value;
 	uint16_t handle = 0;
 
-	if (!attrib)
+	if (!attrib || !permissions)
 		return NULL;
 
 	db = attrib->service->db;
@@ -1328,6 +1331,7 @@ unsigned int gatt_db_find_by_type_value(struct gatt_db *db,
 {
 	struct find_by_type_value_data data;
 
+	memset(&data, 0, sizeof(data));
 	data.func = func;
 	data.user_data = user_data;
 	data.value = value;
@@ -1545,7 +1549,7 @@ static int gatt_db_attribute_get_index(const struct gatt_db_attribute *attrib)
 	return -1;
 }
 
-static struct gatt_db_attribute *
+struct gatt_db_attribute *
 gatt_db_attribute_get_value(struct gatt_db_attribute *attrib)
 {
 	struct gatt_db_service *service;
@@ -1555,18 +1559,18 @@ gatt_db_attribute_get_value(struct gatt_db_attribute *attrib)
 		return NULL;
 
 	index = gatt_db_attribute_get_index(attrib);
-	if (index < 0)
+	if (index <= 0)
 		return NULL;
 
 	service = attrib->service;
 
 	if (!bt_uuid_cmp(&characteristic_uuid, &attrib->uuid))
-		index++;
-	else if (bt_uuid_cmp(&characteristic_uuid,
+		return service->attributes[index + 1];
+	else if (!bt_uuid_cmp(&characteristic_uuid,
 				&service->attributes[index - 1]->uuid))
-		return NULL;
+		return service->attributes[index];
 
-	return service->attributes[index];
+	return gatt_db_attribute_get_value(service->attributes[index - 1]);
 }
 
 void gatt_db_service_foreach_desc(struct gatt_db_attribute *attrib,
@@ -1706,6 +1710,15 @@ uint16_t gatt_db_attribute_get_handle(const struct gatt_db_attribute *attrib)
 		return 0;
 
 	return attrib->handle;
+}
+
+struct gatt_db_attribute *
+gatt_db_attribute_get_service(const struct gatt_db_attribute *attrib)
+{
+	if (!attrib)
+		return NULL;
+
+	return attrib->service->attributes[0];
 }
 
 bool gatt_db_attribute_get_service_uuid(const struct gatt_db_attribute *attrib,
@@ -2091,7 +2104,7 @@ bool gatt_db_attribute_write(struct gatt_db_attribute *attrib, uint16_t offset,
 {
 	uint8_t err = 0;
 
-	if (!attrib || !func)
+	if (!attrib || (!func && attrib->write_func))
 		return false;
 
 	if (attrib->write_func) {
@@ -2154,7 +2167,8 @@ bool gatt_db_attribute_write(struct gatt_db_attribute *attrib, uint16_t offset,
 	memcpy(&attrib->value[offset], value, len);
 
 done:
-	func(attrib, err, user_data);
+	if (func)
+		func(attrib, err, user_data);
 
 	return true;
 }

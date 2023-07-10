@@ -153,6 +153,29 @@ OPTIONS
    * - **le_random**
      - LE Random Address
 
+-e, --enc=<ENCRYPTION>  Socket QoS BIG Encryption
+
+.. list-table::
+   :header-rows: 1
+   :widths: auto
+   :stub-columns: 1
+   :align: left
+
+   * - *ENCRYPTION*
+     - Description
+
+   * - **0x00**
+     - BIG unencrypted
+
+   * - **0x01**
+     - BIG encrypted
+
+-k, --bcode=<BCODE>  Socket QoS Broadcast Code
+
+-N, --nbis=<NBIS>  Number of BISes to create as part of a
+                   BIG (BIS broadcaster) or to synchronize
+                   to (BIS broadcast receiver)
+
 EXAMPLES
 ========
 

@@ -225,6 +225,9 @@ const bt_uuid_t *gatt_db_attribute_get_type(
 
 uint16_t gatt_db_attribute_get_handle(const struct gatt_db_attribute *attrib);
 
+struct gatt_db_attribute *
+gatt_db_attribute_get_service(const struct gatt_db_attribute *attrib);
+
 bool gatt_db_attribute_get_service_uuid(const struct gatt_db_attribute *attrib,
 							bt_uuid_t *uuid);
 
@@ -281,6 +284,8 @@ bool gatt_db_attribute_write(struct gatt_db_attribute *attrib, uint16_t offset,
 bool gatt_db_attribute_write_result(struct gatt_db_attribute *attrib,
 						unsigned int id, int err);
 
+struct gatt_db_attribute *
+gatt_db_attribute_get_value(struct gatt_db_attribute *attrib);
 struct gatt_db_attribute *
 gatt_db_attribute_get_ccc(struct gatt_db_attribute *attrib);
 

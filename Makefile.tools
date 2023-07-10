@@ -3,6 +3,7 @@ if CLIENT
 bin_PROGRAMS += client/bluetoothctl
 
 client_bluetoothctl_SOURCES = client/main.c \
+					client/print.h client/print.c \
 					client/display.h client/display.c \
 					client/agent.h client/agent.c \
 					client/advertising.h \
@@ -86,7 +87,8 @@ noinst_PROGRAMS += emulator/btvirt emulator/b1ee emulator/hfp \
 					tools/l2cap-tester tools/sco-tester \
 					tools/smp-tester tools/hci-tester \
 					tools/rfcomm-tester tools/bnep-tester \
-					tools/userchan-tester tools/iso-tester
+					tools/userchan-tester tools/iso-tester \
+					tools/mesh-tester tools/ioctl-tester
 
 emulator_btvirt_SOURCES = emulator/main.c monitor/bt.h \
 				emulator/serial.h emulator/serial.c \
@@ -125,6 +127,15 @@ tools_mgmt_tester_SOURCES = tools/mgmt-tester.c monitor/bt.h \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
 tools_mgmt_tester_LDADD = lib/libbluetooth-internal.la \
+				src/libshared-glib.la $(GLIB_LIBS)
+
+tools_mesh_tester_SOURCES = tools/mesh-tester.c monitor/bt.h \
+				emulator/hciemu.h emulator/hciemu.c \
+				emulator/vhci.h emulator/vhci.c \
+				emulator/btdev.h emulator/btdev.c \
+				emulator/bthost.h emulator/bthost.c \
+				emulator/smp.c
+tools_mesh_tester_LDADD = lib/libbluetooth-internal.la \
 				src/libshared-glib.la $(GLIB_LIBS)
 
 tools_l2cap_tester_SOURCES = tools/l2cap-tester.c monitor/bt.h \
@@ -202,6 +213,15 @@ tools_iso_tester_SOURCES = tools/iso-tester.c monitor/bt.h \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
 tools_iso_tester_LDADD = lib/libbluetooth-internal.la \
+				src/libshared-glib.la $(GLIB_LIBS)
+
+tools_ioctl_tester_SOURCES = tools/ioctl-tester.c monitor/bt.h \
+				emulator/hciemu.h emulator/hciemu.c \
+				emulator/vhci.h emulator/vhci.c \
+				emulator/btdev.h emulator/btdev.c \
+				emulator/bthost.h emulator/bthost.c \
+				emulator/smp.c
+tools_ioctl_tester_LDADD = lib/libbluetooth-internal.la \
 				src/libshared-glib.la $(GLIB_LIBS)
 endif
 
@@ -329,6 +349,8 @@ man_MANS += tools/rctest.1 tools/l2ping.1 tools/btattach.1 tools/isotest.1
 endif
 
 if MESH
+
+if DEPRECATED
 bin_PROGRAMS += tools/meshctl
 
 tools_meshctl_SOURCES = tools/meshctl.c \
@@ -353,6 +375,9 @@ tools_meshctl_LDADD = gdbus/libgdbus-internal.la src/libshared-glib.la \
 				lib/libbluetooth-internal.la \
 				$(GLIB_LIBS) $(DBUS_LIBS) -ljson-c -lreadline
 
+EXTRA_DIST += tools/mesh-gatt/local_node.json tools/mesh-gatt/prov_db.json
+endif
+
 bin_PROGRAMS +=  tools/mesh-cfgclient
 
 tools_mesh_cfgclient_SOURCES = tools/mesh-cfgclient.c \
@@ -375,8 +400,6 @@ tools_mesh_cfgtest_SOURCES = tools/mesh-cfgtest.c
 tools_mesh_cfgtest_LDADD = lib/libbluetooth-internal.la src/libshared-ell.la \
 						$(ell_ldadd)
 endif
-
-EXTRA_DIST += tools/mesh-gatt/local_node.json tools/mesh-gatt/prov_db.json
 
 if DEPRECATED
 bin_PROGRAMS += tools/hciattach tools/hciconfig tools/hcitool tools/hcidump \
@@ -472,7 +495,8 @@ tools_obex_server_tool_SOURCES = $(gobex_sources) $(btio_sources) \
 tools_obex_server_tool_LDADD = lib/libbluetooth-internal.la \
 			       src/libshared-glib.la $(GLIB_LIBS)
 
-tools_bluetooth_player_SOURCES = tools/bluetooth-player.c client/player.c
+tools_bluetooth_player_SOURCES = tools/bluetooth-player.c client/print.c \
+				client/player.c
 tools_bluetooth_player_LDADD = gdbus/libgdbus-internal.la \
 				src/libshared-glib.la \
 				$(GLIB_LIBS) $(DBUS_LIBS) -lreadline

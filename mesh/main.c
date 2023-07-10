@@ -48,6 +48,12 @@ static const struct option main_options[] = {
 	{ }
 };
 
+static const char *io_usage =
+	       "\t(auto | generic:[hci]<index> | unit:<fd_path>)\n"
+	       "\t\tauto - Use first available controller (MGMT or raw HCI)\n"
+	       "\t\tgeneric - Use raw HCI io on interface hci<index>\n"
+	       "\t\tunit - Use test IO (for automatic testing only)\n";
+
 static void usage(void)
 {
 	fprintf(stderr,
@@ -55,18 +61,14 @@ static void usage(void)
 	       "\tbluetooth-meshd [options]\n");
 	fprintf(stderr,
 		"Options:\n"
-	       "\t--io <io>         Use specified io (default: generic)\n"
+	       "\t--io <io>         Use specified io (default: auto)\n"
 	       "\t--config          Daemon configuration directory\n"
 	       "\t--storage         Mesh node(s) configuration directory\n"
 	       "\t--nodetach        Run in foreground\n"
 	       "\t--debug           Enable debug output\n"
 	       "\t--dbus-debug      Enable D-Bus debugging\n"
 	       "\t--help            Show %s information\n", __func__);
-	fprintf(stderr,
-	       "io:\n"
-	       "\t([hci]<index> | generic[:[hci]<index>] | unit:<fd_path>)\n"
-	       "\t\tUse generic HCI io on interface hci<index>, or the first\n"
-	       "\t\tavailable one\n");
+	fprintf(stderr, "\n\t io: %s", io_usage);
 }
 
 static void do_debug(const char *str, void *user_data)
@@ -123,6 +125,12 @@ static void disconnect_callback(void *user_data)
 	l_main_quit();
 }
 
+static void kill_to(struct l_timeout *timeout, void *user_data)
+{
+	l_timeout_remove(timeout);
+	l_main_quit();
+}
+
 static void signal_handler(uint32_t signo, void *user_data)
 {
 	static bool terminated;
@@ -131,25 +139,38 @@ static void signal_handler(uint32_t signo, void *user_data)
 		return;
 
 	l_info("Terminating");
-	l_main_quit();
+
+	mesh_cleanup(true);
+
+	if (io_type != MESH_IO_TYPE_UNIT_TEST)
+		l_timeout_create(1, kill_to, NULL, NULL);
+	else
+		l_main_quit();
+
 	terminated = true;
 }
 
 static bool parse_io(const char *optarg, enum mesh_io_type *type, void **opts)
 {
-	if (strstr(optarg, "generic") == optarg) {
+	if (strstr(optarg, "auto") == optarg) {
+		int *index = l_new(int, 1);
+
+		*type = MESH_IO_TYPE_AUTO;
+		*opts = index;
+
+		optarg += strlen("auto");
+		*index = MGMT_INDEX_NONE;
+		return true;
+
+		return false;
+	} else if (strstr(optarg, "generic") == optarg) {
 		int *index = l_new(int, 1);
 
 		*type = MESH_IO_TYPE_GENERIC;
 		*opts = index;
 
 		optarg += strlen("generic");
-		if (!*optarg) {
-			*index = MGMT_INDEX_NONE;
-			return true;
-		}
-
-		if (*optarg != ':')
+		if (!*optarg || *optarg != ':')
 			return false;
 
 		optarg++;
@@ -251,10 +272,10 @@ int main(int argc, char *argv[])
 	}
 
 	if (!io)
-		io = l_strdup_printf("generic");
+		io = l_strdup_printf("auto");
 
 	if (!parse_io(io, &io_type, &io_opts)) {
-		l_error("Invalid io: %s", io);
+		l_error("Invalid io: %s\n%s", io, io_usage);
 		status = EXIT_FAILURE;
 		goto done;
 	}
@@ -295,7 +316,7 @@ done:
 	l_free(io);
 	l_free(io_opts);
 
-	mesh_cleanup();
+	mesh_cleanup(false);
 	l_dbus_destroy(dbus);
 	l_main_exit();
 

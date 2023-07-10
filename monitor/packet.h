@@ -22,6 +22,7 @@
 #define PACKET_FILTER_SHOW_SCO_DATA	(1 << 5)
 #define PACKET_FILTER_SHOW_A2DP_STREAM	(1 << 6)
 #define PACKET_FILTER_SHOW_MGMT_SOCKET	(1 << 7)
+#define PACKET_FILTER_SHOW_ISO_DATA	(1 << 8)
 
 struct packet_conn_data {
 	uint16_t index;
@@ -30,6 +31,11 @@ struct packet_conn_data {
 	uint8_t  type;
 	uint8_t  dst[6];
 	uint8_t  dst_type;
+	struct queue *tx_q;
+	struct queue *chan_q;
+	struct timeval tx_min;
+	struct timeval tx_max;
+	struct timeval tx_med;
 	void     *data;
 	void     (*destroy)(void *data);
 };

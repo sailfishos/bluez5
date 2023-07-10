@@ -30,8 +30,8 @@
 		(SET_ID(SIG_VENDOR, l_get_le16(pkt))))
 
 /* Supported composition pages, sorted high to low */
-/* Only page 0 is currently supported */
 static const uint8_t supported_pages[] = {
+	128,
 	0
 };
 
@@ -110,8 +110,6 @@ static uint16_t config_pub_set(struct mesh_node *node, const uint8_t *pkt,
 	pkt += (virt ? 14 : 0);
 
 	idx = l_get_le16(pkt + 4);
-	if (idx > CREDFLAG_MASK)
-		return 0;
 
 	cred_flag = !!(CREDFLAG_MASK & idx);
 	idx &= APP_IDX_MASK;
@@ -288,6 +286,10 @@ static uint16_t cfg_virt_sub_add_msg(struct mesh_node *node, const uint8_t *pkt,
 						label, true, addr, opcode))
 		msg[n] = MESH_STATUS_STORAGE_FAIL;
 
+	/* If processing failed, set addr field to zero in reply */
+	if (msg[n] != MESH_STATUS_SUCCESS)
+		addr = UNASSIGNED_ADDRESS;
+
 	l_put_le16(ele_addr, msg + n + 1);
 	l_put_le16(addr, msg + n + 3);
 
@@ -434,6 +436,10 @@ static uint16_t cfg_key_refresh_phase(struct mesh_node *node,
 				return 0;
 		}
 
+		if (pkt[2] == KEY_REFRESH_TRANS_THREE &&
+						phase == KEY_REFRESH_PHASE_NONE)
+			goto done;
+
 		status = mesh_net_key_refresh_phase_set(net, idx, pkt[2]);
 		l_debug("Set KR Phase: net=%3.3x transition=%d", idx, pkt[2]);
 
@@ -453,14 +459,14 @@ done:
 static uint8_t uint32_to_log(uint32_t value)
 {
 	uint32_t val = 1;
-	uint8_t ret = 1;
+	uint8_t ret = 0;
 
 	if (!value)
 		return 0;
 	else if (value > 0x10000)
 		return 0xff;
 
-	while (val < value) {
+	while (val <= value) {
 		val <<= 1;
 		ret++;
 	}
@@ -468,7 +474,7 @@ static uint8_t uint32_to_log(uint32_t value)
 	return ret;
 }
 
-static uint16_t hb_subscription_get(struct mesh_node *node, int status)
+static uint16_t hb_subscription_status(struct mesh_node *node, int status)
 {
 	struct mesh_net *net = node_get_net(node);
 	struct mesh_net_heartbeat_sub *sub = mesh_net_get_heartbeat_sub(net);
@@ -493,11 +499,33 @@ static uint16_t hb_subscription_get(struct mesh_node *node, int status)
 	l_put_le16(sub->dst, msg + n);
 	n += 2;
 	msg[n++] = uint32_to_log(time_now.tv_sec);
-	msg[n++] = uint32_to_log(sub->count);
-	msg[n++] = sub->count ? sub->min_hops : 0;
+	msg[n++] = sub->count != 0xffff ? uint32_to_log(sub->count) : 0xff;
+	msg[n++] = sub->min_hops;
 	msg[n++] = sub->max_hops;
 
 	return n;
+}
+
+static uint16_t hb_subscription_get(struct mesh_node *node, int status)
+{
+	struct mesh_net *net = node_get_net(node);
+	struct mesh_net_heartbeat_sub *sub = mesh_net_get_heartbeat_sub(net);
+
+	/*
+	 * MshPRFv1.0.1 section 4.4.1.2.16, Heartbeat Subscription state:
+	 * If this is a GET request and the source or destination is unassigned,
+	 * all fields shall be set to zero in the status reply.
+	 */
+	if (IS_UNASSIGNED(sub->src) || IS_UNASSIGNED(sub->dst)) {
+		uint16_t n;
+
+		n = mesh_model_opcode_set(OP_CONFIG_HEARTBEAT_SUB_STATUS, msg);
+		memset(msg + n, 0, 9);
+		n += 9;
+		return n;
+	}
+
+	return hb_subscription_status(node, status);
 }
 
 static uint16_t hb_subscription_set(struct mesh_node *node, const uint8_t *pkt)
@@ -523,7 +551,7 @@ static uint16_t hb_subscription_set(struct mesh_node *node, const uint8_t *pkt)
 
 	status = mesh_net_set_heartbeat_sub(net, src, dst, period_log);
 
-	return hb_subscription_get(node, status);
+	return hb_subscription_status(node, status);
 }
 
 static uint16_t hb_publication_get(struct mesh_node *node, int status)
@@ -536,7 +564,7 @@ static uint16_t hb_publication_get(struct mesh_node *node, int status)
 	msg[n++] = status;
 	l_put_le16(pub->dst, msg + n);
 	n += 2;
-	msg[n++] = uint32_to_log(pub->count);
+	msg[n++] = pub->count != 0xffff ? uint32_to_log(pub->count) : 0xff;
 	msg[n++] = uint32_to_log(pub->period);
 	msg[n++] = pub->ttl;
 	l_put_le16(pub->features, msg + n);
@@ -573,7 +601,17 @@ static uint16_t hb_publication_set(struct mesh_node *node, const uint8_t *pkt)
 	status = mesh_net_set_heartbeat_pub(net, dst, features, net_idx, ttl,
 						count_log, period_log);
 
-	return hb_publication_get(node, status);
+	if (status != MESH_STATUS_SUCCESS) {
+		uint16_t n;
+
+		n = mesh_model_opcode_set(OP_CONFIG_HEARTBEAT_PUB_STATUS, msg);
+		msg[n++] = status;
+		memcpy(msg + n, pkt, 9);
+		n += 9;
+
+		return n;
+	} else
+		return hb_publication_get(node, status);
 }
 
 static void node_reset(void *user_data)
@@ -698,7 +736,7 @@ static uint16_t cfg_net_tx_msg(struct mesh_node *node, const uint8_t *pkt,
 static uint16_t get_composition(struct mesh_node *node, uint8_t page,
 								uint8_t *buf)
 {
-	const uint8_t *comp;
+	const uint8_t *comp = NULL;
 	uint16_t len = 0;
 	size_t i;
 
@@ -713,7 +751,7 @@ static uint16_t get_composition(struct mesh_node *node, uint8_t page,
 			break;
 	}
 
-	if (!len)
+	if (!len || !comp)
 		return 0;
 
 	*buf++ = page;

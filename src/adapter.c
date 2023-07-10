@@ -239,6 +239,14 @@ struct btd_adapter_pin_cb_iter {
 	/* When the iterator reaches the end, it is NULL and attempt is 0 */
 };
 
+enum {
+	ADAPTER_POWER_STATE_OFF,
+	ADAPTER_POWER_STATE_ON,
+	ADAPTER_POWER_STATE_ON_DISABLING,
+	ADAPTER_POWER_STATE_OFF_ENABLING,
+	ADAPTER_POWER_STATE_OFF_BLOCKED,
+};
+
 struct btd_adapter {
 	int ref_count;
 
@@ -252,6 +260,7 @@ struct btd_adapter {
 	char *short_name;		/* controller short name */
 	uint32_t supported_settings;	/* controller supported settings */
 	uint32_t pending_settings;	/* pending controller settings */
+	uint32_t power_state;		/* the power state */
 	uint32_t current_settings;	/* current controller settings */
 
 	char *path;			/* adapter object path */
@@ -324,6 +333,24 @@ struct btd_adapter {
 
 	struct queue *exps;
 };
+
+static char *adapter_power_state_str(uint32_t power_state)
+{
+	switch (power_state) {
+	case ADAPTER_POWER_STATE_OFF:
+		return "off";
+	case ADAPTER_POWER_STATE_ON:
+		return "on";
+	case ADAPTER_POWER_STATE_ON_DISABLING:
+		return "on-disabling";
+	case ADAPTER_POWER_STATE_OFF_ENABLING:
+		return "off-enabling";
+	case ADAPTER_POWER_STATE_OFF_BLOCKED:
+		return "off-blocked";
+	}
+	DBG("Invalid power state %d", power_state);
+	return "";
+}
 
 typedef enum {
 	ADAPTER_AUTHORIZE_DISCONNECTED = 0,
@@ -618,6 +645,29 @@ static void settings_changed(struct btd_adapter *adapter, uint32_t settings)
 	}
 }
 
+static void adapter_set_power_state(struct btd_adapter *adapter, uint32_t value)
+{
+	if (adapter->power_state == value)
+		return;
+
+	DBG("%s", adapter_power_state_str(value));
+	adapter->power_state = value;
+	g_dbus_emit_property_changed(dbus_conn, adapter->path,
+					ADAPTER_INTERFACE, "PowerState");
+}
+
+static void reset_power_state_target(struct btd_adapter *adapter,
+					uint32_t value)
+{
+	if (value &&
+	    adapter->power_state == ADAPTER_POWER_STATE_OFF_ENABLING) {
+		adapter_set_power_state(adapter, ADAPTER_POWER_STATE_ON);
+	} else if (!value &&
+		   adapter->power_state == ADAPTER_POWER_STATE_ON_DISABLING) {
+		adapter_set_power_state(adapter, ADAPTER_POWER_STATE_OFF);
+	}
+}
+
 static void new_settings_callback(uint16_t index, uint16_t length,
 					const void *param, void *user_data)
 {
@@ -635,19 +685,39 @@ static void new_settings_callback(uint16_t index, uint16_t length,
 	if (settings == adapter->current_settings)
 		return;
 
+	if ((adapter->current_settings ^ settings) & MGMT_SETTING_POWERED) {
+		reset_power_state_target(adapter,
+					settings & MGMT_SETTING_POWERED ?
+					0x01 : 0x00);
+	}
+
 	DBG("Settings: 0x%08x", settings);
 
 	settings_changed(adapter, settings);
 }
 
+struct set_mode_data {
+	struct btd_adapter *adapter;
+	uint32_t setting;
+	uint8_t value;
+};
+
 static void set_mode_complete(uint8_t status, uint16_t length,
 					const void *param, void *user_data)
 {
-	struct btd_adapter *adapter = user_data;
+	struct set_mode_data *data = user_data;
+	struct btd_adapter *adapter = data->adapter;
 
 	if (status != MGMT_STATUS_SUCCESS) {
 		btd_error(adapter->dev_id, "Failed to set mode: %s (0x%02x)",
 						mgmt_errstr(status), status);
+		if (status == MGMT_STATUS_RFKILLED)
+			adapter_set_power_state(adapter,
+					ADAPTER_POWER_STATE_OFF_BLOCKED);
+		adapter->pending_settings &= ~data->setting;
+		if (status != MGMT_STATUS_RFKILLED &&
+		    data->setting & MGMT_SETTING_POWERED)
+			reset_power_state_target(adapter, data->value);
 		return;
 	}
 
@@ -677,6 +747,7 @@ static bool set_mode(struct btd_adapter *adapter, uint16_t opcode,
 {
 	struct mgmt_mode cp;
 	uint32_t setting = 0;
+	struct set_mode_data *data;
 
 	memset(&cp, 0, sizeof(cp));
 	cp.val = mode;
@@ -684,6 +755,11 @@ static bool set_mode(struct btd_adapter *adapter, uint16_t opcode,
 	switch (opcode) {
 	case MGMT_OP_SET_POWERED:
 		setting = MGMT_SETTING_POWERED;
+		if (adapter->power_state != ADAPTER_POWER_STATE_OFF_BLOCKED) {
+			adapter_set_power_state(adapter, mode ?
+					ADAPTER_POWER_STATE_OFF_ENABLING :
+					ADAPTER_POWER_STATE_ON_DISABLING);
+		}
 		break;
 	case MGMT_OP_SET_CONNECTABLE:
 		setting = MGMT_SETTING_CONNECTABLE;
@@ -699,15 +775,26 @@ static bool set_mode(struct btd_adapter *adapter, uint16_t opcode,
 		break;
 	}
 
-	adapter->pending_settings |= setting;
-
 	DBG("sending set mode command for index %u", adapter->dev_id);
+
+	data = g_new0(struct set_mode_data, 1);
+	data->adapter = adapter;
+	data->setting = setting;
+	data->value = mode;
 
 	if (mgmt_send(adapter->mgmt, opcode,
 				adapter->dev_id, sizeof(cp), &cp,
-				set_mode_complete, adapter, NULL) > 0)
+				set_mode_complete, data, g_free) > 0) {
+		adapter->pending_settings |= setting;
 		return true;
-
+	}
+	g_free(data);
+	if (setting == MGMT_SETTING_POWERED) {
+		/* cancel the earlier setting */
+		adapter_set_power_state(adapter, mode ?
+					ADAPTER_POWER_STATE_OFF :
+					ADAPTER_POWER_STATE_ON);
+	}
 	btd_error(adapter->dev_id, "Failed to set mode for index %u",
 							adapter->dev_id);
 
@@ -718,6 +805,7 @@ static bool set_discoverable(struct btd_adapter *adapter, uint8_t mode,
 							uint16_t timeout)
 {
 	struct mgmt_cp_set_discoverable cp;
+	struct set_mode_data *data;
 
 	memset(&cp, 0, sizeof(cp));
 	cp.val = mode;
@@ -734,11 +822,16 @@ static bool set_discoverable(struct btd_adapter *adapter, uint8_t mode,
 									mode);
 	}
 
+	data = g_new0(struct set_mode_data, 1);
+	data->adapter = adapter;
+	data->setting = 0;
+
 	if (mgmt_send(adapter->mgmt, MGMT_OP_SET_DISCOVERABLE,
 				adapter->dev_id, sizeof(cp), &cp,
-				set_mode_complete, adapter, NULL) > 0)
+				set_mode_complete, data, g_free) > 0)
 		return true;
 
+	g_free(data);
 	btd_error(adapter->dev_id, "Failed to set mode for index %u",
 							adapter->dev_id);
 
@@ -1362,6 +1455,39 @@ struct btd_device *btd_adapter_get_device(struct btd_adapter *adapter,
 		return device;
 
 	return adapter_create_device(adapter, addr, addr_type);
+}
+
+struct btd_device *btd_adapter_find_device_by_fd(int fd)
+{
+	bdaddr_t src, dst;
+	uint8_t dst_type;
+	GIOChannel *io = NULL;
+	GError *gerr = NULL;
+	struct btd_adapter *adapter;
+
+	io = g_io_channel_unix_new(fd);
+	if (!io)
+		return NULL;
+
+	bt_io_get(io, &gerr,
+			BT_IO_OPT_SOURCE_BDADDR, &src,
+			BT_IO_OPT_DEST_BDADDR, &dst,
+			BT_IO_OPT_DEST_TYPE, &dst_type,
+			BT_IO_OPT_INVALID);
+	if (gerr) {
+		error("bt_io_get: %s", gerr->message);
+		g_error_free(gerr);
+		g_io_channel_unref(io);
+		return NULL;
+	}
+
+	g_io_channel_unref(io);
+
+	adapter = adapter_find(&src);
+	if (!adapter)
+		return NULL;
+
+	return btd_adapter_find_device(adapter, &dst, dst_type);
 }
 
 sdp_list_t *btd_adapter_get_services(struct btd_adapter *adapter)
@@ -2066,12 +2192,27 @@ static int merge_discovery_filters(struct btd_adapter *adapter, int *rssi,
 	bool empty_uuid = false;
 	bool has_regular_discovery = false;
 	bool has_filtered_discovery = false;
+	uint8_t adapter_scan_type = get_scan_type(adapter);
 
 	for (l = adapter->discovery_list; l != NULL; l = g_slist_next(l)) {
 		struct discovery_client *client = l->data;
 		struct discovery_filter *item = client->discovery_filter;
 
 		if (!item) {
+			has_regular_discovery = true;
+			continue;
+		}
+
+		/*
+		 * Detect empty filter with only discoverable
+		 * (which does not require a kernel filter) set.
+		 */
+		if (item->uuids == NULL &&
+		    item->pathloss == DISTANCE_VAL_INVALID &&
+		    item->rssi == DISTANCE_VAL_INVALID &&
+		    item->type == adapter_scan_type &&
+		    item->duplicate == false &&
+		    item->pattern == NULL) {
 			has_regular_discovery = true;
 			continue;
 		}
@@ -2125,7 +2266,7 @@ static int merge_discovery_filters(struct btd_adapter *adapter, int *rssi,
 		 * It there is both regular and filtered scan running, then
 		 * clear whole fitler to report all devices.
 		 */
-		*transport = get_scan_type(adapter);
+		*transport = adapter_scan_type;
 		*rssi = HCI_RSSI_INVALID;
 		g_slist_free(*uuids);
 		*uuids = NULL;
@@ -2877,7 +3018,9 @@ static gboolean property_get_mode(struct btd_adapter *adapter,
 
 struct property_set_data {
 	struct btd_adapter *adapter;
+	uint32_t setting;
 	GDBusPendingPropertySet id;
+	uint8_t value;
 };
 
 static void property_set_mode_complete(uint8_t status, uint16_t length,
@@ -2894,13 +3037,21 @@ static void property_set_mode_complete(uint8_t status, uint16_t length,
 		btd_error(adapter->dev_id, "Failed to set mode: %s (0x%02x)",
 						mgmt_errstr(status), status);
 
-		if (status == MGMT_STATUS_RFKILLED)
+		if (status == MGMT_STATUS_RFKILLED) {
 			dbus_err = ERROR_INTERFACE ".Blocked";
-		else
+			adapter_set_power_state(adapter,
+					ADAPTER_POWER_STATE_OFF_BLOCKED);
+		} else {
 			dbus_err = ERROR_INTERFACE ".Failed";
+		}
 
 		g_dbus_pending_property_error(data->id, dbus_err,
 							mgmt_errstr(status));
+
+		adapter->pending_settings &= ~data->setting;
+		if (status != MGMT_STATUS_RFKILLED &&
+		    data->setting & MGMT_SETTING_POWERED)
+			reset_power_state_target(adapter, data->value);
 		return;
 	}
 
@@ -2969,8 +3120,6 @@ static void property_set_mode(struct btd_adapter *adapter, uint32_t setting,
 
 	mode = (enable == TRUE) ? 0x01 : 0x00;
 
-	adapter->pending_settings |= setting;
-
 	switch (setting) {
 	case MGMT_SETTING_POWERED:
 		opcode = MGMT_OP_SET_POWERED;
@@ -3024,13 +3173,31 @@ static void property_set_mode(struct btd_adapter *adapter, uint32_t setting,
 		goto failed;
 
 	data->adapter = adapter;
+	data->setting = setting;
 	data->id = id;
+	data->setting = setting;
+	data->value = mode;
+
+	if (setting == MGMT_SETTING_POWERED &&
+	    adapter->power_state != ADAPTER_POWER_STATE_OFF_BLOCKED) {
+		adapter_set_power_state(adapter, mode ?
+					ADAPTER_POWER_STATE_OFF_ENABLING :
+					ADAPTER_POWER_STATE_ON_DISABLING);
+	}
 
 	if (mgmt_send(adapter->mgmt, opcode, adapter->dev_id, len, param,
-			property_set_mode_complete, data, g_free) > 0)
+			property_set_mode_complete, data, g_free) > 0) {
+		adapter->pending_settings |= setting;
 		return;
+	}
 
 	g_free(data);
+	if (setting == MGMT_SETTING_POWERED) {
+		/* cancel the earlier setting */
+		adapter_set_power_state(adapter, mode ?
+					ADAPTER_POWER_STATE_OFF :
+					ADAPTER_POWER_STATE_ON);
+	}
 
 failed:
 	btd_error(adapter->dev_id, "Failed to set mode for index %u",
@@ -3060,6 +3227,18 @@ static void property_set_powered(const GDBusPropertyTable *property,
 	}
 
 	property_set_mode(adapter, MGMT_SETTING_POWERED, iter, id);
+}
+
+static gboolean property_get_power_state(const GDBusPropertyTable *property,
+					DBusMessageIter *iter, void *user_data)
+{
+	struct btd_adapter *adapter = user_data;
+	const char *str;
+
+	str = adapter_power_state_str(adapter->power_state);
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_STRING, &str);
+
+	return TRUE;
 }
 
 static gboolean property_get_discoverable(const GDBusPropertyTable *property,
@@ -3347,7 +3526,7 @@ static gboolean property_get_experimental(const GDBusPropertyTable *property,
 	return TRUE;
 }
 
-static gboolean property_experimental_exits(const GDBusPropertyTable *property,
+static gboolean property_experimental_exists(const GDBusPropertyTable *property,
 								void *data)
 {
 	struct btd_adapter *adapter = data;
@@ -3701,6 +3880,8 @@ static const GDBusPropertyTable adapter_properties[] = {
 	{ "Alias", "s", property_get_alias, property_set_alias },
 	{ "Class", "u", property_get_class },
 	{ "Powered", "b", property_get_powered, property_set_powered },
+	{ "PowerState", "s", property_get_power_state, NULL, NULL,
+			     G_DBUS_PROPERTY_FLAG_EXPERIMENTAL },
 	{ "Discoverable", "b", property_get_discoverable,
 					property_set_discoverable },
 	{ "DiscoverableTimeout", "u", property_get_discoverable_timeout,
@@ -3714,7 +3895,7 @@ static const GDBusPropertyTable adapter_properties[] = {
 					property_exists_modalias },
 	{ "Roles", "as", property_get_roles },
 	{ "ExperimentalFeatures", "as", property_get_experimental, NULL,
-					property_experimental_exits },
+					property_experimental_exists },
 	{ }
 };
 
@@ -4222,8 +4403,8 @@ static void load_ltks(struct btd_adapter *adapter, GSList *keys)
 		if (dev) {
 			device_set_paired(dev, info->bdaddr_type);
 			device_set_bonded(dev, info->bdaddr_type);
-			device_set_ltk_enc_size(dev, info->enc_size);
-			device_set_ltk_enc_size(dev, info->enc_size);
+			device_set_ltk(dev, info->val, info->central,
+						info->enc_size);
 		}
 	}
 
@@ -5396,10 +5577,12 @@ void adapter_set_device_flags(struct btd_adapter *adapter,
 				mgmt_request_func_t func, void *user_data)
 {
 	struct mgmt_cp_set_device_flags cp;
+	uint32_t supported = btd_device_get_supported_flags(device);
 	const bdaddr_t *bdaddr;
 	uint8_t bdaddr_type;
 
-	if (!btd_has_kernel_features(KERNEL_CONN_CONTROL))
+	if (!btd_has_kernel_features(KERNEL_CONN_CONTROL) ||
+				(supported | flags) != supported)
 		return;
 
 	bdaddr = device_get_address(device);
@@ -5505,6 +5688,7 @@ static void adapter_start(struct btd_adapter *adapter)
 {
 	g_dbus_emit_property_changed(dbus_conn, adapter->path,
 						ADAPTER_INTERFACE, "Powered");
+	adapter_set_power_state(adapter, ADAPTER_POWER_STATE_ON);
 
 	DBG("adapter %s has been enabled", adapter->path);
 
@@ -6624,6 +6808,7 @@ static void load_config(struct btd_adapter *adapter)
 static struct btd_adapter *btd_adapter_new(uint16_t index)
 {
 	struct btd_adapter *adapter;
+	int blocked;
 
 	adapter = g_try_new0(struct btd_adapter, 1);
 	if (!adapter)
@@ -6632,6 +6817,9 @@ static struct btd_adapter *btd_adapter_new(uint16_t index)
 	adapter->dev_id = index;
 	adapter->mgmt = mgmt_ref(mgmt_primary);
 	adapter->pincode_requested = false;
+	blocked = rfkill_get_blocked(index);
+	if (blocked > 0)
+		adapter->power_state = ADAPTER_POWER_STATE_OFF_BLOCKED;
 
 	/*
 	 * Setup default configuration values. These are either adapter
@@ -6657,6 +6845,9 @@ static struct btd_adapter *btd_adapter_new(uint16_t index)
 	DBG("Modalias: %s", adapter->modalias);
 	DBG("Discoverable timeout: %u seconds", adapter->discoverable_timeout);
 	DBG("Pairable timeout: %u seconds", adapter->pairable_timeout);
+	if (blocked > 0)
+		DBG("Power state: %s",
+			adapter_power_state_str(adapter->power_state));
 
 	adapter->auths = g_queue_new();
 	adapter->exps = queue_new();
@@ -6898,12 +7089,10 @@ static bool device_is_discoverable(struct btd_adapter *adapter,
 	return discoverable;
 }
 
-void btd_adapter_update_found_device(struct btd_adapter *adapter,
+void btd_adapter_device_found(struct btd_adapter *adapter,
 					const bdaddr_t *bdaddr,
 					uint8_t bdaddr_type, int8_t rssi,
-					bool confirm, bool legacy,
-					bool not_connectable,
-					bool name_resolve_failed,
+					uint32_t flags,
 					const uint8_t *data, uint8_t data_len,
 					bool monitoring)
 {
@@ -6912,8 +7101,19 @@ void btd_adapter_update_found_device(struct btd_adapter *adapter,
 	struct eir_data eir_data;
 	bool name_known, discoverable;
 	char addr[18];
+	bool confirm;
+	bool legacy;
+	bool not_connectable;
+	bool name_resolve_failed;
+	bool scan_rsp;
 	bool duplicate = false;
 	struct queue *matched_monitors = NULL;
+
+	confirm = (flags & MGMT_DEV_FOUND_CONFIRM_NAME);
+	legacy = (flags & MGMT_DEV_FOUND_LEGACY_PAIRING);
+	not_connectable = (flags & MGMT_DEV_FOUND_NOT_CONNECTABLE);
+	name_resolve_failed = (flags & MGMT_DEV_FOUND_NAME_REQUEST_FAILED);
+	scan_rsp = (flags & MGMT_DEV_FOUND_SCAN_RSP);
 
 	if (!btd_adv_monitor_offload_enabled(adapter->adv_monitor_manager) ||
 				(MGMT_VERSION(mgmt_version, mgmt_revision) <
@@ -6947,7 +7147,15 @@ void btd_adapter_update_found_device(struct btd_adapter *adapter,
 
 	dev = btd_adapter_find_device(adapter, bdaddr, bdaddr_type);
 	if (!dev) {
-		if (!discoverable && !monitoring) {
+		/* In case of being just a scan response don't attempt to create
+		 * the device.
+		 */
+		if (scan_rsp) {
+			eir_data_free(&eir_data);
+			return;
+		}
+
+		if (!discoverable && !monitoring && !eir_data.rsi) {
 			eir_data_free(&eir_data);
 			return;
 		}
@@ -6994,7 +7202,7 @@ void btd_adapter_update_found_device(struct btd_adapter *adapter,
 	/* If there is no matched Adv monitors, don't continue if not
 	 * discoverable or if active discovery filter don't match.
 	 */
-	if (!monitoring && (!discoverable ||
+	if (!eir_data.rsi && !monitoring && (!discoverable ||
 		(adapter->filtered_discovery && !is_filter_match(
 				adapter->discovery_list, &eir_data, rssi)))) {
 		eir_data_free(&eir_data);
@@ -7127,10 +7335,6 @@ static void device_found_callback(uint16_t index, uint16_t length,
 	const uint8_t *eir;
 	uint16_t eir_len;
 	uint32_t flags;
-	bool confirm_name;
-	bool legacy;
-	bool not_connectable;
-	bool name_resolve_failed;
 	char addr[18];
 
 	if (length < sizeof(*ev)) {
@@ -7152,22 +7356,15 @@ static void device_found_callback(uint16_t index, uint16_t length,
 	else
 		eir = ev->eir;
 
-	flags = btohl(ev->flags);
+	flags = le32_to_cpu(ev->flags);
 
 	ba2str(&ev->addr.bdaddr, addr);
 	DBG("hci%u addr %s, rssi %d flags 0x%04x eir_len %u",
 			index, addr, ev->rssi, flags, eir_len);
 
-	confirm_name = (flags & MGMT_DEV_FOUND_CONFIRM_NAME);
-	legacy = (flags & MGMT_DEV_FOUND_LEGACY_PAIRING);
-	not_connectable = (flags & MGMT_DEV_FOUND_NOT_CONNECTABLE);
-	name_resolve_failed = (flags & MGMT_DEV_FOUND_NAME_REQUEST_FAILED);
-
-	btd_adapter_update_found_device(adapter, &ev->addr.bdaddr,
-					ev->addr.type, ev->rssi, confirm_name,
-					legacy, not_connectable,
-					name_resolve_failed, eir, eir_len,
-					false);
+	btd_adapter_device_found(adapter, &ev->addr.bdaddr,
+					ev->addr.type, ev->rssi, flags,
+					eir, eir_len, false);
 }
 
 struct agent *adapter_get_agent(struct btd_adapter *adapter)
@@ -7250,12 +7447,21 @@ static void adapter_stop(struct btd_adapter *adapter)
 
 	g_dbus_emit_property_changed(dbus_conn, adapter->path,
 						ADAPTER_INTERFACE, "Powered");
+	g_dbus_emit_property_changed(dbus_conn, adapter->path,
+						ADAPTER_INTERFACE,
+						"PowerState");
 
 	DBG("adapter %s has been disabled", adapter->path);
 }
 
 int btd_register_adapter_driver(struct btd_adapter_driver *driver)
 {
+	if (driver->experimental && !(g_dbus_get_flags() &
+					G_DBUS_FLAG_ENABLE_EXPERIMENTAL)) {
+		DBG("D-Bus experimental not enabled");
+		return -ENOTSUP;
+	}
+
 	adapter_drivers = g_slist_append(adapter_drivers, driver);
 
 	if (driver->probe == NULL)
@@ -7337,7 +7543,7 @@ static gboolean process_auth_queue(gpointer user_data)
 			goto next;
 		}
 
-		if (device_is_trusted(device) == TRUE) {
+		if (btd_device_is_trusted(device) == TRUE) {
 			auth->cb(NULL, auth->user_data);
 			goto next;
 		}
@@ -7526,11 +7732,28 @@ int btd_cancel_authorization(guint id)
 
 int btd_adapter_restore_powered(struct btd_adapter *adapter)
 {
-	if (btd_adapter_get_powered(adapter))
+	bool powered;
+
+	powered = btd_adapter_get_powered(adapter);
+	if (adapter->power_state == ADAPTER_POWER_STATE_OFF_BLOCKED &&
+	    rfkill_get_blocked(adapter->dev_id) == 0) {
+		adapter_set_power_state(adapter,
+					powered ?
+					ADAPTER_POWER_STATE_ON :
+					ADAPTER_POWER_STATE_OFF);
+	}
+
+	if (powered)
 		return 0;
 
 	set_mode(adapter, MGMT_OP_SET_POWERED, 0x01);
 
+	return 0;
+}
+
+int btd_adapter_set_blocked(struct btd_adapter *adapter)
+{
+	adapter_set_power_state(adapter, ADAPTER_POWER_STATE_OFF_BLOCKED);
 	return 0;
 }
 
@@ -8476,7 +8699,7 @@ static void new_long_term_key_callback(uint16_t index, uint16_t length,
 		device_set_bonded(device, addr->type);
 	}
 
-	device_set_ltk_enc_size(device, ev->key.enc_size);
+	device_set_ltk(device, ev->key.val, ev->key.central, ev->key.enc_size);
 
 	bonding_complete(adapter, &addr->bdaddr, addr->type, 0);
 }
@@ -9966,7 +10189,8 @@ static void read_info_complete(uint8_t status, uint16_t length,
 	}
 
 	if (missing_settings & MGMT_SETTING_SECURE_CONN)
-		set_mode(adapter, MGMT_OP_SET_SECURE_CONN, 0x01);
+		set_mode(adapter, MGMT_OP_SET_SECURE_CONN,
+					btd_opts.secure_conn);
 
 	if (adapter->supported_settings & MGMT_SETTING_PRIVACY)
 		set_privacy(adapter, btd_opts.privacy);
@@ -10529,6 +10753,14 @@ bool btd_le_connect_before_pairing(void)
 		return true;
 
 	return false;
+}
+
+bool btd_adapter_has_settings(struct btd_adapter *adapter, uint32_t settings)
+{
+	if (!adapter)
+		return false;
+
+	return (adapter->current_settings & settings) ? true : false;
 }
 
 bool btd_has_kernel_features(uint32_t features)

@@ -36,6 +36,12 @@ enum mps_mode_t {
 	MPS_MULTIPLE,
 };
 
+enum sc_mode_t {
+	SC_OFF,
+	SC_ON,
+	SC_ONLY,
+};
+
 struct btd_br_defaults {
 	uint16_t	page_scan_type;
 	uint16_t	page_scan_interval;
@@ -86,6 +92,13 @@ struct btd_defaults {
 	struct btd_le_defaults le;
 };
 
+struct btd_csis {
+	bool    encrypt;
+	uint8_t sirk[16];
+	uint8_t size;
+	uint8_t rank;
+};
+
 struct btd_avdtp_opts {
 	uint8_t  session_mode;
 	uint8_t  stream_mode;
@@ -98,22 +111,23 @@ struct btd_advmon_opts {
 struct btd_opts {
 	char		*name;
 	uint32_t	class;
-	gboolean	pairable;
+	bool		pairable;
 	uint32_t	pairto;
 	uint32_t	discovto;
 	uint32_t	tmpto;
 	uint8_t		privacy;
 	bool		device_privacy;
 	uint32_t	name_request_retry_delay;
+	uint8_t		secure_conn;
 
 	struct btd_defaults defaults;
 
-	gboolean	reverse_discovery;
-	gboolean	name_resolv;
-	gboolean	debug_keys;
-	gboolean	fast_conn;
-	gboolean	refresh_discovery;
-	gboolean	experimental;
+	bool		reverse_discovery;
+	bool		name_resolv;
+	bool		debug_keys;
+	bool		fast_conn;
+	bool		refresh_discovery;
+	bool		experimental;
 	struct queue	*kernel;
 
 	uint16_t	did_source;
@@ -135,6 +149,8 @@ struct btd_opts {
 	enum jw_repairing_t jw_repairing;
 
 	struct btd_advmon_opts	advmon;
+
+	struct btd_csis csis;
 };
 
 extern struct btd_opts btd_opts;
@@ -144,6 +160,7 @@ void plugin_cleanup(void);
 
 void rfkill_init(void);
 void rfkill_exit(void);
+int rfkill_get_blocked(uint16_t index);
 
 GKeyFile *btd_get_main_conf(void);
 bool btd_kernel_experimental_enabled(const char *uuid);

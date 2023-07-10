@@ -120,3 +120,28 @@ plugins_sixaxis_la_LDFLAGS = $(AM_LDFLAGS) -module -avoid-version
 plugins_sixaxis_la_LIBADD = $(UDEV_LIBS)
 plugins_sixaxis_la_CFLAGS = $(AM_CFLAGS) -fvisibility=hidden
 endif
+
+if BAP
+builtin_modules += bap
+builtin_sources += profiles/audio/bap.c
+endif
+
+if BASS
+builtin_modules += bass
+builtin_sources += profiles/audio/bass.c
+endif
+
+if MCP
+builtin_modules += mcp
+builtin_sources += profiles/audio/mcp.c
+endif
+
+if VCP
+builtin_modules += vcp
+builtin_sources += profiles/audio/vcp.c
+endif
+
+if CSIP
+builtin_modules += csip
+builtin_sources += profiles/audio/csip.c
+endif

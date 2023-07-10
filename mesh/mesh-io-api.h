@@ -10,8 +10,7 @@
 
 struct mesh_io_private;
 
-typedef bool (*mesh_io_init_t)(struct mesh_io *io, void *opts,
-				mesh_io_ready_func_t cb, void *user_data);
+typedef bool (*mesh_io_init_t)(struct mesh_io *io, void *opts, void *user_data);
 typedef bool (*mesh_io_destroy_t)(struct mesh_io *io);
 typedef bool (*mesh_io_caps_t)(struct mesh_io *io, struct mesh_io_caps *caps);
 typedef bool (*mesh_io_send_t)(struct mesh_io *io,
@@ -35,10 +34,21 @@ struct mesh_io_api {
 	mesh_io_tx_cancel_t	cancel;
 };
 
+struct mesh_io_reg {
+	mesh_io_recv_func_t cb;
+	void *user_data;
+	uint8_t len;
+	uint8_t filter[];
+};
+
 struct mesh_io {
-	enum mesh_io_type		type;
-	const struct mesh_io_api	*api;
+	int				index;
+	int				favored_index;
+	mesh_io_ready_func_t		ready;
+	struct l_queue			*rx_regs;
 	struct mesh_io_private		*pvt;
+	void				*user_data;
+	const struct mesh_io_api	*api;
 };
 
 struct mesh_io_table {

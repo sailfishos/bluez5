@@ -38,10 +38,17 @@
 #define GATT_SVC_UUID	0x1801
 #define SVC_CHNGD_UUID	0x2a05
 #define DBG(_client, _format, arg...) \
-	gatt_log(_client, "%s:%s() " _format, __FILE__, __func__, ## arg)
+	gatt_log(_client, "[%p] %s:%s() " _format, _client, __FILE__, \
+		__func__, ## arg)
 
 struct ready_cb {
 	bt_gatt_client_callback_t callback;
+	bt_gatt_client_destroy_func_t destroy;
+	void *data;
+};
+
+struct idle_cb {
+	bt_gatt_client_idle_callback_t callback;
 	bt_gatt_client_destroy_func_t destroy;
 	void *data;
 };
@@ -55,6 +62,7 @@ struct bt_gatt_client {
 	struct queue *clones;
 
 	struct queue *ready_cbs;
+	struct queue *idle_cbs;
 
 	bt_gatt_client_service_changed_callback_t svc_chngd_callback;
 	bt_gatt_client_destroy_func_t svc_chngd_destroy;
@@ -146,9 +154,49 @@ static struct request *request_create(struct bt_gatt_client *client)
 	return request_ref(req);
 }
 
+static void idle_destroy(void *data)
+{
+	struct idle_cb *idle = data;
+
+	if (idle->destroy)
+		idle->destroy(idle->data);
+
+	free(idle);
+}
+
+static bool idle_notify(const void *data, const void *user_data)
+{
+	const struct idle_cb *idle = data;
+
+	idle->callback(idle->data);
+
+	return true;
+}
+
+static struct bt_gatt_client *
+bt_gatt_client_ref_safe(struct bt_gatt_client *client)
+{
+	if (!client || !client->ref_count)
+		return NULL;
+
+	return bt_gatt_client_ref(client);
+}
+
+static void notify_client_idle(struct bt_gatt_client *client)
+{
+	client = bt_gatt_client_ref_safe(client);
+	if (!client)
+		return;
+
+	queue_remove_all(client->idle_cbs, idle_notify, NULL, idle_destroy);
+
+	bt_gatt_client_unref(client);
+}
+
 static void request_unref(void *data)
 {
 	struct request *req = data;
+	struct bt_gatt_client *client = req->client;
 
 	if (__sync_sub_and_fetch(&req->ref_count, 1))
 		return;
@@ -156,8 +204,11 @@ static void request_unref(void *data)
 	if (req->destroy)
 		req->destroy(req->data);
 
-	if (!req->removed)
-		queue_remove(req->client->pending_requests, req);
+	if (!req->removed) {
+		queue_remove(client->pending_requests, req);
+		if (queue_isempty(client->pending_requests))
+			notify_client_idle(client);
+	}
 
 	free(req);
 }
@@ -211,22 +262,6 @@ static void notify_data_unref(void *data)
 	free(notify_data);
 }
 
-static void find_ccc(struct gatt_db_attribute *attr, void *user_data)
-{
-	struct gatt_db_attribute **ccc_ptr = user_data;
-	bt_uuid_t uuid;
-
-	if (*ccc_ptr)
-		return;
-
-	bt_uuid16_create(&uuid, GATT_CLIENT_CHARAC_CFG_UUID);
-
-	if (bt_uuid_cmp(&uuid, gatt_db_attribute_get_type(attr)))
-		return;
-
-	*ccc_ptr = attr;
-}
-
 static bool match_notify_chrc(const void *data, const void *user_data)
 {
 	const struct notify_data *notify_data = data;
@@ -273,24 +308,25 @@ static void chrc_removed(struct gatt_db_attribute *attr, void *user_data)
 }
 
 static struct notify_chrc *notify_chrc_create(struct bt_gatt_client *client,
-							uint16_t value_handle)
+							uint16_t handle)
 {
 	struct gatt_db_attribute *attr, *ccc;
 	struct notify_chrc *chrc;
-	bt_uuid_t uuid;
+	uint16_t value_handle;
 	uint8_t properties;
 
-	/* Check that chrc_value_handle belongs to a known characteristic */
-	attr = gatt_db_get_attribute(client->db, value_handle - 1);
+	/* Check that there is an attribute with handle */
+	attr = gatt_db_get_attribute(client->db, handle);
 	if (!attr)
 		return NULL;
 
-	bt_uuid16_create(&uuid, GATT_CHARAC_UUID);
-	if (bt_uuid_cmp(&uuid, gatt_db_attribute_get_type(attr)))
+	if (!gatt_db_attribute_get_char_data(attr, NULL, &value_handle,
+						&properties, NULL, NULL))
 		return NULL;
 
-	if (!gatt_db_attribute_get_char_data(attr, NULL, NULL, &properties,
-								NULL, NULL))
+	/* Check that there is an attribute with value_handle */
+	attr = gatt_db_get_attribute(client->db, value_handle);
+	if (!attr)
 		return NULL;
 
 	chrc = new0(struct notify_chrc, 1);
@@ -301,13 +337,7 @@ static struct notify_chrc *notify_chrc_create(struct bt_gatt_client *client,
 		return NULL;
 	}
 
-	/*
-	 * Find the CCC characteristic. Some characteristics that allow
-	 * notifications may not have a CCC descriptor. We treat these as
-	 * automatically successful.
-	 */
-	ccc = NULL;
-	gatt_db_service_foreach_desc(attr, find_ccc, &ccc);
+	ccc = gatt_db_attribute_get_ccc(attr);
 	if (ccc)
 		chrc->ccc_handle = gatt_db_attribute_get_handle(ccc);
 
@@ -378,15 +408,28 @@ static void discovery_op_free(struct discovery_op *op)
 
 static bool read_db_hash(struct discovery_op *op);
 
+static void gatt_log_va(struct bt_gatt_client *client, const char *format,
+						va_list va)
+{
+	if (!client || !format)
+		return;
+
+	if (client->debug_callback)
+		util_debug_va(client->debug_callback, client->debug_data,
+							format, va);
+	else
+		gatt_log_va(client->parent, format, va);
+}
+
 static void gatt_log(struct bt_gatt_client *client, const char *format, ...)
 {
 	va_list ap;
 
-	if (!client || !format || !client->debug_callback)
+	if (!client || !format)
 		return;
 
 	va_start(ap, format);
-	util_debug_va(client->debug_callback, client->debug_data, format, ap);
+	gatt_log_va(client, format, ap);
 	va_end(ap);
 }
 
@@ -521,6 +564,24 @@ static void discovery_req_clear(struct bt_gatt_client *client)
 	client->discovery_req = NULL;
 }
 
+static void discover_remove_pending(struct discovery_op *op,
+					struct gatt_db_attribute *attr)
+{
+	struct gatt_db_attribute *svc;
+
+	svc = gatt_db_attribute_get_service(attr);
+	if (!svc)
+		return;
+
+	if (!queue_remove(op->pending_svcs, svc))
+		return;
+
+	gatt_db_service_set_active(svc, true);
+
+	if (op->cur_svc == svc)
+		op->cur_svc = NULL;
+}
+
 static void discover_chrcs_cb(bool success, uint8_t att_ecode,
 						struct bt_gatt_result *result,
 						void *user_data);
@@ -597,12 +658,26 @@ static void discover_incl_cb(bool success, uint8_t att_ecode,
 				gatt_db_attribute_get_handle(attr), handle);
 			goto failed;
 		}
+
+		if (!gatt_db_attribute_get_service_data(attr, NULL, &end,
+							NULL, NULL)) {
+			DBG(client, "Unable to get service data at 0x%04x",
+								handle);
+			goto failed;
+		}
+
+		/* Skip if there are no attributes */
+		if (handle == end)
+			discover_remove_pending(op, attr);
 	}
 
 next:
 	range = queue_pop_head(op->discov_ranges);
-	if (!range)
+	if (!range) {
+		/* Skip if there are no attributes */
+		discover_remove_pending(op, op->cur_svc);
 		goto failed;
+	}
 
 	client->discovery_req = bt_gatt_discover_characteristics(client->att,
 							range->start,
@@ -746,6 +821,9 @@ static bool discover_descs(struct discovery_op *op, bool *discovering)
 		goto failed;
 	}
 
+	/* Done with the current service */
+	discover_remove_pending(op, op->cur_svc);
+
 done:
 	free(chrc_data);
 	return true;
@@ -818,9 +896,6 @@ static void ext_prop_read_cb(bool success, uint8_t att_ecode,
 
 	if (discovering)
 		return;
-
-	/* Done with the current service */
-	gatt_db_service_set_active(op->cur_svc, true);
 
 	goto done;
 
@@ -908,9 +983,6 @@ next:
 
 	if (discovering)
 		return;
-
-	/* Done with the current service */
-	gatt_db_service_set_active(op->cur_svc, true);
 
 	goto done;
 
@@ -1018,9 +1090,6 @@ next:
 	if (discovering)
 		return;
 
-	/* Done with the current service */
-	gatt_db_service_set_active(op->cur_svc, true);
-
 	goto done;
 
 failed:
@@ -1039,6 +1108,20 @@ static bool match_handle_range(const void *data, const void *match_data)
 					(match_range->start <= range->end);
 }
 
+static struct handle_range *range_new(uint16_t start, uint16_t end)
+{
+	struct handle_range *range;
+
+	if (!start || !end || start > end)
+		return NULL;
+
+	range = new0(struct handle_range, 1);
+	range->start = start;
+	range->end = end;
+
+	return range;
+}
+
 static void remove_discov_range(struct discovery_op *op, uint16_t start,
 								uint16_t end)
 {
@@ -1055,16 +1138,18 @@ static void remove_discov_range(struct discovery_op *op, uint16_t start,
 	if ((range->start == start) && (range->end == end)) {
 		queue_remove(op->discov_ranges, range);
 		free(range);
-	} else if (range->start == start)
+	} else if (range->start == start) {
 		range->start = end + 1;
-	else if (range->end == end)
+		if (!range->start || range->start > range->end) {
+			queue_remove(op->discov_ranges, range);
+			free(range);
+		}
+	} else if (range->end == end)
 		range->end = start - 1;
 	else {
-		new_range = new0(struct handle_range, 1);
-		new_range->start = end + 1;
-		new_range->end = range->end;
-
-		queue_push_after(op->discov_ranges, range, new_range);
+		new_range = range_new(end + 1, range->end);
+		if (new_range)
+			queue_push_after(op->discov_ranges, range, new_range);
 
 		range->end = start - 1;
 	}
@@ -1286,10 +1371,13 @@ static void notify_client_ready(struct bt_gatt_client *client, bool success,
 {
 	const struct queue_entry *entry;
 
-	if (client->ready)
+	client = bt_gatt_client_ref_safe(client);
+	if (!client)
 		return;
 
-	bt_gatt_client_ref(client);
+	if (client->ready)
+		goto done;
+
 	client->ready = success;
 
 	if (client->parent)
@@ -1312,6 +1400,7 @@ static void notify_client_ready(struct bt_gatt_client *client, bool success,
 		notify_client_ready(clone, success, att_ecode);
 	}
 
+done:
 	bt_gatt_client_unref(client);
 }
 
@@ -1571,31 +1660,30 @@ static void complete_notify_request(void *data)
 }
 
 static bool notify_data_write_ccc(struct notify_data *notify_data, bool enable,
-						bt_att_response_func_t callback)
+					bt_gatt_client_callback_t callback)
 {
-	uint8_t pdu[4];
 	unsigned int att_id;
+	uint16_t value;
 	uint16_t properties = notify_data->chrc->properties;
 
 	assert(notify_data->chrc->ccc_handle);
-	memset(pdu, 0, sizeof(pdu));
-	put_le16(notify_data->chrc->ccc_handle, pdu);
 
 	if (enable) {
 		/* Try to enable notifications or indications based on
 		 * whatever the characteristic supports.
 		 */
 		if (properties & BT_GATT_CHRC_PROP_NOTIFY)
-			pdu[2] = 0x01;
+			value = cpu_to_le16(0x0001);
 		else if (properties & BT_GATT_CHRC_PROP_INDICATE)
-			pdu[2] = 0x02;
-
-		if (!pdu[2])
+			value = cpu_to_le16(0x0002);
+		else
 			return false;
 	}
 
-	att_id = bt_att_send(notify_data->client->att, BT_ATT_OP_WRITE_REQ,
-						pdu, sizeof(pdu), callback,
+	att_id = bt_gatt_client_write_value(notify_data->client,
+						notify_data->chrc->ccc_handle,
+						(void *)&value, sizeof(value),
+						callback,
 						notify_data_ref(notify_data),
 						notify_data_unref);
 	notify_data->chrc->ccc_write_id = notify_data->att_id = att_id;
@@ -1625,8 +1713,8 @@ static bool notify_set_ecode(const void *data, const void *match_data)
 	return true;
 }
 
-static void enable_ccc_callback(uint8_t opcode, const void *pdu,
-					uint16_t length, void *user_data)
+static void enable_ccc_callback(bool success, uint8_t att_ecode,
+						void *user_data)
 {
 	struct notify_data *notify_data = user_data;
 
@@ -1634,10 +1722,9 @@ static void enable_ccc_callback(uint8_t opcode, const void *pdu,
 
 	notify_data->chrc->ccc_write_id = 0;
 
-	bt_gatt_client_ref(notify_data->client);
+	bt_gatt_client_ref_safe(notify_data->client);
 
-	if (opcode == BT_ATT_OP_ERROR_RSP)
-		notify_data->att_ecode = process_error(pdu, length);
+	notify_data->att_ecode = att_ecode;
 
 	/* Notify for all remaining requests. */
 	complete_notify_request(notify_data);
@@ -1676,8 +1763,11 @@ static unsigned int register_notify(struct bt_gatt_client *client,
 		 * descriptor.
 		 */
 		chrc = notify_chrc_create(client, handle);
-		if (!chrc)
+		if (!chrc) {
+			DBG(client, "Unable to locate characteristic at 0x%04x",
+							handle);
 			return 0;
+		}
 	}
 
 	/* Fail if we've hit the maximum allowed notify sessions */
@@ -1715,9 +1805,10 @@ static unsigned int register_notify(struct bt_gatt_client *client,
 	}
 
 	/*
-	 * If the ref count > 1, then notifications are already enabled.
+	 * If the ref count > 1, ccc handle cannot be found or registration
+	 * callback is not set consider notifications are already enabled.
 	 */
-	if (chrc->notify_count > 1 || !chrc->ccc_handle) {
+	if (chrc->notify_count > 1 || !chrc->ccc_handle || !callback) {
 		complete_notify_request(notify_data);
 		return notify_data->id;
 	}
@@ -2072,8 +2163,8 @@ struct value_data {
 	const void *data;
 };
 
-static void disable_ccc_callback(uint8_t opcode, const void *pdu,
-					uint16_t length, void *user_data)
+static void disable_ccc_callback(bool success, uint8_t att_ecode,
+						void *user_data)
 {
 	struct notify_data *notify_data = user_data;
 	struct notify_data *next_data;
@@ -2141,6 +2232,9 @@ static void notify_cb(struct bt_att_chan *chan, uint8_t opcode,
 	struct bt_gatt_client *client = user_data;
 	struct value_data data;
 
+	if (queue_isempty(client->notify_list))
+		return;
+
 	bt_gatt_client_ref(client);
 
 	memset(&data, 0, sizeof(data));
@@ -2192,6 +2286,7 @@ static void bt_gatt_client_free(struct bt_gatt_client *client)
 	queue_destroy(client->notify_list, notify_data_cleanup);
 
 	queue_destroy(client->ready_cbs, ready_destroy);
+	queue_destroy(client->idle_cbs, idle_destroy);
 
 	if (client->debug_destroy)
 		client->debug_destroy(client->debug_data);
@@ -2250,6 +2345,7 @@ static struct bt_gatt_client *gatt_client_new(struct gatt_db *db,
 
 	client->clones = queue_new();
 	client->ready_cbs = queue_new();
+	client->idle_cbs = queue_new();
 	client->long_write_queue = queue_new();
 	client->svc_chngd_queue = queue_new();
 	client->notify_list = queue_new();
@@ -2719,7 +2815,7 @@ unsigned int bt_gatt_client_read_multiple(struct bt_gatt_client *client,
 					void *user_data,
 					bt_gatt_client_destroy_func_t destroy)
 {
-	uint8_t pdu[num_handles * 2];
+	uint8_t *pdu = newa(uint8_t, num_handles * 2);
 	struct request *req;
 	struct read_op *op;
 	uint8_t opcode;
@@ -2756,7 +2852,7 @@ unsigned int bt_gatt_client_read_multiple(struct bt_gatt_client *client,
 		BT_GATT_CHRC_CLI_FEAT_EATT ? BT_ATT_OP_READ_MULT_VL_REQ :
 		BT_ATT_OP_READ_MULT_REQ;
 
-	req->att_id = bt_att_send(client->att, opcode, pdu, sizeof(pdu),
+	req->att_id = bt_att_send(client->att, opcode, pdu, num_handles * 2,
 							read_multiple_cb, req,
 							request_unref);
 	if (!req->att_id) {
@@ -2949,7 +3045,7 @@ unsigned int bt_gatt_client_write_without_response(
 					uint16_t value_handle,
 					bool signed_write,
 					const uint8_t *value, uint16_t length) {
-	uint8_t pdu[2 + length];
+	uint8_t *pdu = newa(uint8_t, 2 + length);
 	struct request *req;
 	int security;
 	uint8_t op;
@@ -2972,7 +3068,7 @@ unsigned int bt_gatt_client_write_without_response(
 	put_le16(value_handle, pdu);
 	memcpy(pdu + 2, value, length);
 
-	req->att_id = bt_att_send(client->att, op, pdu, sizeof(pdu), NULL, req,
+	req->att_id = bt_att_send(client->att, op, pdu, 2 + length, NULL, req,
 								request_unref);
 	if (!req->att_id) {
 		request_unref(req);
@@ -3030,7 +3126,7 @@ unsigned int bt_gatt_client_write_value(struct bt_gatt_client *client,
 {
 	struct request *req;
 	struct write_op *op;
-	uint8_t pdu[2 + length];
+	uint8_t *pdu = newa(uint8_t, 2 + length);
 
 	if (!client)
 		return 0;
@@ -3054,7 +3150,7 @@ unsigned int bt_gatt_client_write_value(struct bt_gatt_client *client,
 	memcpy(pdu + 2, value, length);
 
 	req->att_id = bt_att_send(client->att, BT_ATT_OP_WRITE_REQ,
-							pdu, sizeof(pdu),
+							pdu, 2 + length,
 							write_cb, req,
 							request_unref);
 	if (!req->att_id) {
@@ -3469,7 +3565,7 @@ unsigned int bt_gatt_client_prepare_write(struct bt_gatt_client *client,
 {
 	struct request *req;
 	struct prep_write_op *op;
-	uint8_t pdu[4 + length];
+	uint8_t *pdu = newa(uint8_t, 4 + length);
 
 	if (!client)
 		return 0;
@@ -3528,7 +3624,7 @@ unsigned int bt_gatt_client_prepare_write(struct bt_gatt_client *client,
 	 * Note that request_unref will be done on write execute
 	 */
 	req->att_id = bt_att_send(client->att, BT_ATT_OP_PREP_WRITE_REQ, pdu,
-					sizeof(pdu), prep_write_cb, req,
+					length, prep_write_cb, req,
 					NULL);
 	if (!req->att_id) {
 		op->destroy = NULL;
@@ -3635,7 +3731,8 @@ unsigned int bt_gatt_client_register_notify(struct bt_gatt_client *client,
 				void *user_data,
 				bt_gatt_client_destroy_func_t destroy)
 {
-	if (!client || !client->db || !chrc_value_handle || !callback)
+	if (!client || !client->db || !chrc_value_handle ||
+				(!callback && !notify))
 		return 0;
 
 	if (client->in_svc_chngd)
@@ -3683,4 +3780,40 @@ int bt_gatt_client_get_security(struct bt_gatt_client *client)
 		return -1;
 
 	return bt_att_get_security(client->att, NULL);
+}
+
+unsigned int bt_gatt_client_idle_register(struct bt_gatt_client *client,
+					bt_gatt_client_idle_callback_t callback,
+					void *user_data,
+					bt_gatt_client_destroy_func_t destroy)
+{
+	struct idle_cb *idle;
+
+	if (!client)
+		return 0;
+
+	idle = new0(struct idle_cb, 1);
+	idle->callback = callback;
+	idle->destroy = destroy;
+	idle->data = user_data;
+
+	queue_push_tail(client->idle_cbs, idle);
+
+	return PTR_TO_UINT(idle);
+}
+
+bool bt_gatt_client_idle_unregister(struct bt_gatt_client *client,
+						unsigned int id)
+{
+	struct idle_cb *idle = UINT_TO_PTR(id);
+
+	if (!client || !id)
+		return false;
+
+	if (queue_remove(client->idle_cbs, idle)) {
+		idle_destroy(idle);
+		return true;
+	}
+
+	return false;
 }

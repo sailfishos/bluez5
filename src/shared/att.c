@@ -799,8 +799,8 @@ static bool handle_error_rsp(struct bt_att_chan *chan, uint8_t *pdu,
 
 	chan->pending_req = NULL;
 
-	/* Push operation back to request queue */
-	return queue_push_head(att->req_queue, op);
+	/* Push operation back to channel queue */
+	return queue_push_head(chan->queue, op);
 }
 
 static void handle_rsp(struct bt_att_chan *chan, uint8_t opcode, uint8_t *pdu,
@@ -1588,6 +1588,14 @@ unsigned int bt_att_send(struct bt_att *att, uint8_t opcode,
 
 	op->id = att->next_send_id++;
 
+	/* Always use fixed channel for BT_ATT_OP_MTU_REQ */
+	if (opcode == BT_ATT_OP_MTU_REQ) {
+		struct bt_att_chan *chan = queue_peek_tail(att->chans);
+
+		result = queue_push_tail(chan->queue, op);
+		goto done;
+	}
+
 	/* Add the op to the correct queue based on its type */
 	switch (op->type) {
 	case ATT_OP_TYPE_REQ:
@@ -1606,6 +1614,7 @@ unsigned int bt_att_send(struct bt_att *att, uint8_t opcode,
 		break;
 	}
 
+done:
 	if (!result) {
 		free(op->pdu);
 		free(op);

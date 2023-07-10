@@ -175,10 +175,8 @@ int qualcomm_init(int fd, int speed, struct termios *ti, const char *bdaddr)
 		}
 
 		/* Read reply. */
-		if (read_hci_event(fd, resp, 100) < 0) {
-			perror("Failed to read init response");
-			return -1;
-		}
+		n = read_hci_event(fd, resp, 100);
+		FAILIF(n < 0, "Failed to read init response");
 
 		/* Wait for command complete event for our Opcode */
 	} while (resp[4] != cmd[1] && resp[5] != cmd[2]);
@@ -215,23 +213,20 @@ int qualcomm_init(int fd, int speed, struct termios *ti, const char *bdaddr)
 		}
 
 		/* Read reply. */
-		if ((n = read_hci_event(fd, resp, 100)) < 0) {
-			perror("Failed to read vendor init response");
-			return -1;
-		}
+		n = read_hci_event(fd, resp, 100);
+		FAILIF(n < 0, "Failed to read vendor init response");
 
 	} while (resp[3] != 0 && resp[4] != 2);
 
-	snprintf(fw, sizeof(fw), "/etc/firmware/%c%c%c%c%c%c_%c%c%c%c.bin",
+	snprintf(fw, sizeof(fw), "%s/%c%c%c%c%c%c_%c%c%c%c.bin",
+				FIRMWARE_DIR,
 				resp[18], resp[19], resp[20], resp[21],
 				resp[22], resp[23],
 				resp[32], resp[33], resp[34], resp[35]);
 
 	/* Wait for command complete event for our Opcode */
-	if (read_hci_event(fd, resp, 100) < 0) {
-		perror("Failed to read init response");
-		return -1;
-	}
+	n = read_hci_event(fd, resp, 100);
+	FAILIF(n < 0, "Failed to read init response");
 
 	qualcomm_load_firmware(fd, fw, bdaddr);
 
@@ -249,10 +244,8 @@ int qualcomm_init(int fd, int speed, struct termios *ti, const char *bdaddr)
 		}
 
 		/* Read reply. */
-		if ((n = read_hci_event(fd, resp, 100)) < 0) {
-			perror("Failed to read reset response");
-			return -1;
-		}
+		n = read_hci_event(fd, resp, 100);
+		FAILIF(n < 0, "Failed to read reset response");
 
 	} while (resp[4] != cmd[1] && resp[5] != cmd[2]);
 

@@ -5,6 +5,7 @@
  *
  *  Copyright (C) 2011-2014  Intel Corporation
  *  Copyright (C) 2002-2010  Marcel Holtmann <marcel@holtmann.org>
+ *  Copyright 2023 NXP
  *
  *
  */
@@ -1786,6 +1787,12 @@ struct bt_hci_rsp_read_local_pairing_options {
 #define BT_HCI_LOCAL_CODEC_BREDR_SCO		BIT(1)
 #define BT_HCI_LOCAL_CODEC_LE_CIS		BIT(2)
 #define BT_HCI_LOCAL_CODEC_LE_BIS		BIT(3)
+
+struct bt_hci_vnd_codec_v2 {
+	uint16_t cid;
+	uint16_t vid;
+	uint8_t  transport;
+} __attribute__ ((packed));
 
 struct bt_hci_vnd_codec {
 	uint8_t  id;
@@ -3706,14 +3713,17 @@ struct bt_hci_evt_le_big_info_adv_report {
 #define BT_HCI_ERR_AUTH_FAILURE			0x05
 #define BT_HCI_ERR_PIN_OR_KEY_MISSING		0x06
 #define BT_HCI_ERR_MEM_CAPACITY_EXCEEDED	0x07
+#define BT_HCI_ERR_CONN_ALREADY_EXISTS		0x0b
 #define BT_HCI_ERR_COMMAND_DISALLOWED		0x0c
 #define BT_HCI_ERR_UNSUPPORTED_FEATURE		0x11
 #define BT_HCI_ERR_INVALID_PARAMETERS		0x12
+#define BT_HCI_ERR_LOCAL_HOST_TERM		0x16
 #define BT_HCI_ERR_UNSPECIFIED_ERROR		0x1f
 #define BT_HCI_ERR_ADV_TIMEOUT			0x3c
 #define BT_HCI_ERR_CONN_FAILED_TO_ESTABLISH	0x3e
 #define BT_HCI_ERR_UNKNOWN_ADVERTISING_ID	0x42
 #define BT_HCI_ERR_CANCELLED			0x44
+#define BT_HCI_ERR_ENC_MODE_NOT_ACCEPTABLE	0x25
 
 struct bt_l2cap_hdr {
 	uint16_t len;
