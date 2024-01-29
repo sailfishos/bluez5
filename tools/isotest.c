@@ -434,16 +434,60 @@ error:
 
 }
 
-static void do_listen(char *filename, void (*handler)(int fd, int sk),
-							char *peer)
+static int accept_conn(int sk, struct sockaddr_iso *addr, char *peer)
+{
+	socklen_t optlen;
+	int nsk, err, sk_err;
+	struct pollfd fds;
+	socklen_t len;
+
+	memset(addr, 0, sizeof(*addr) + sizeof(*addr->iso_bc));
+	optlen = sizeof(*addr);
+
+	if (peer)
+		optlen += sizeof(*addr->iso_bc);
+
+	nsk = accept(sk, (struct sockaddr *) addr, &optlen);
+	if (nsk < 0) {
+		syslog(LOG_ERR, "Accept failed: %s (%d)",
+						strerror(errno), errno);
+		return -1;
+	}
+
+	/* Check if connection was successful */
+	memset(&fds, 0, sizeof(fds));
+	fds.fd = nsk;
+	fds.events = POLLERR;
+
+	if (poll(&fds, 1, 0) > 0 && (fds.revents & POLLERR)) {
+		len = sizeof(sk_err);
+
+		if (getsockopt(nsk, SOL_SOCKET, SO_ERROR,
+					&sk_err, &len) < 0)
+			err = -errno;
+		else
+			err = -sk_err;
+
+		if (err < 0)
+			syslog(LOG_ERR, "Connection failed: %s (%d)",
+					strerror(-err), -err);
+
+		close(nsk);
+		return -1;
+	}
+
+	return nsk;
+}
+
+static void do_listen(char *filename,
+		void (*handler)(int fd, int sk, char *peer),
+		char *peer)
 {
 	struct sockaddr_iso *addr = NULL;
 	socklen_t optlen;
 	int sk, nsk, fd = -1;
 	char ba[18];
-	struct pollfd fds;
-	int err, sk_err;
-	socklen_t len;
+	int read_len;
 
 	if (filename) {
 		fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -519,41 +563,27 @@ static void do_listen(char *filename, void (*handler)(int fd, int sk),
 
 	syslog(LOG_INFO, "Waiting for connection %s...", peer ? peer : "");
 
-	while (1) {
-		memset(addr, 0, sizeof(*addr) + sizeof(*addr->iso_bc));
-		optlen = sizeof(*addr);
-
-		if (peer)
-			optlen += sizeof(*addr->iso_bc);
-
-		nsk = accept(sk, (struct sockaddr *) addr, &optlen);
-		if (nsk < 0) {
-			syslog(LOG_ERR, "Accept failed: %s (%d)",
-							strerror(errno), errno);
+	/* Handle deferred setup */
+	if (defer_setup && peer) {
+		nsk = accept_conn(sk, addr, peer);
+		if (nsk < 0)
 			goto error;
-		}
 
-		/* Check if connection was successful */
-		memset(&fds, 0, sizeof(fds));
-		fds.fd = nsk;
-		fds.events = POLLERR;
+		close(sk);
+		sk = nsk;
 
-		if (poll(&fds, 1, 0) > 0 && (fds.revents & POLLERR)) {
-			len = sizeof(sk_err);
+		read_len = read(sk, buf, data_size);
+		if (read_len < 0)
+			syslog(LOG_ERR, "Initial read error: %s (%d)",
+						strerror(errno), errno);
+		else
+			syslog(LOG_INFO, "Initial bytes %d", read_len);
+	}
 
-			if (getsockopt(nsk, SOL_SOCKET, SO_ERROR,
-						&sk_err, &len) < 0)
-				err = -errno;
-			else
-				err = -sk_err;
-
-			if (err < 0)
-				syslog(LOG_ERR, "Connection failed: %s (%d)",
-						strerror(-err), -err);
-
-			close(nsk);
+	while (1) {
+		nsk = accept_conn(sk, addr, peer);
+		if (nsk < 0)
 			continue;
-		}
 
 		if (fork()) {
 			/* Parent */
@@ -583,7 +613,7 @@ static void do_listen(char *filename, void (*handler)(int fd, int sk),
 			}
 		}
 
-		handler(fd, nsk);
+		handler(fd, nsk, peer);
 
 		syslog(LOG_INFO, "Disconnect");
 		exit(0);
@@ -598,11 +628,11 @@ error:
 	exit(1);
 }
 
-static void dump_mode(int fd, int sk)
+static void dump_mode(int fd, int sk, char *peer)
 {
 	int len;
 
-	if (defer_setup) {
+	if (defer_setup && !peer) {
 		len = read(sk, buf, data_size);
 		if (len < 0)
 			syslog(LOG_ERR, "Initial read error: %s (%d)",
@@ -625,14 +655,14 @@ static void dump_mode(int fd, int sk)
 	}
 }
 
-static void recv_mode(int fd, int sk)
+static void recv_mode(int fd, int sk, char *peer)
 {
 	struct timeval tv_beg, tv_end, tv_diff;
 	long total;
 	int len;
 	uint32_t seq;
 
-	if (defer_setup) {
+	if (defer_setup && !peer) {
 		len = read(sk, buf, data_size);
 		if (len < 0)
 			syslog(LOG_ERR, "Initial read error: %s (%d)",
@@ -998,7 +1028,7 @@ static void multy_connect_mode(char *peer)
 	.bcast = { \
 		.big = BT_ISO_QOS_BIG_UNSET, \
 		.bis = BT_ISO_QOS_BIS_UNSET, \
-		.sync_interval = 0x07, \
+		.sync_factor = 0x07, \
 		.packing = 0x00, \
 		.framing = 0x00, \
 		.out = QOS_IO(_interval, _latency, _sdu, _phy, _rtn), \
@@ -1043,22 +1073,35 @@ static struct qos_preset {
 	QOS_PRESET("48_5_1", false, 7500, 15, 117, 0x02, 5),
 	QOS_PRESET("44_6_1", false, 10000, 20, 155, 0x02, 5),
 	/* QoS Configuration settings for high reliability audio data */
-	QOS_PRESET("8_1_2", true, 7500, 45, 26, 0x02, 41),
-	QOS_PRESET("8_2_2", true, 10000, 60, 30, 0x02, 53),
-	QOS_PRESET("16_1_2", true, 7500, 45, 30, 0x02, 41),
-	QOS_PRESET("16_2_2", true, 10000, 60, 40, 0x02, 47),
-	QOS_PRESET("24_1_2", true, 7500, 45, 45, 0x02, 35),
-	QOS_PRESET("24_2_2", true, 10000, 60, 60, 0x02, 41),
-	QOS_PRESET("32_1_2", true, 7500, 45, 60, 0x02, 29),
-	QOS_PRESET("32_2_1", true, 10000, 60, 80, 0x02, 35),
-	QOS_PRESET("44_1_2", false, 8163, 54, 98, 0x02, 23),
-	QOS_PRESET("44_2_2", false, 10884, 71, 130, 0x02, 23),
-	QOS_PRESET("48_1_2", false, 7500, 45, 75, 0x02, 23),
-	QOS_PRESET("48_2_2", false, 10000, 60, 100, 0x02, 23),
-	QOS_PRESET("48_3_2", false, 7500, 45, 90, 0x02, 23),
-	QOS_PRESET("48_4_2", false, 10000, 60, 120, 0x02, 23),
-	QOS_PRESET("48_5_2", false, 7500, 45, 117, 0x02, 23),
-	QOS_PRESET("44_6_2", false, 10000, 60, 155, 0x02, 23),
+	QOS_PRESET("8_1_2", true, 7500, 75, 26, 0x02, 13),
+	QOS_PRESET("8_2_2", true, 10000, 95, 30, 0x02, 13),
+	QOS_PRESET("16_1_2", true, 7500, 75, 30, 0x02, 13),
+	QOS_PRESET("16_2_2", true, 10000, 95, 40, 0x02, 13),
+	QOS_PRESET("24_1_2", true, 7500, 75, 45, 0x02, 13),
+	QOS_PRESET("24_2_2", true, 10000, 95, 60, 0x02, 13),
+	QOS_PRESET("32_1_2", true, 7500, 75, 60, 0x02, 13),
+	QOS_PRESET("32_2_2", true, 10000, 95, 80, 0x02, 13),
+	QOS_PRESET("44_1_2", false, 8163, 80, 97, 0x02, 13),
+	QOS_PRESET("44_2_2", false, 10884, 85, 130, 0x02, 13),
+	QOS_PRESET("48_1_2", false, 7500, 75, 75, 0x02, 13),
+	QOS_PRESET("48_2_2", false, 10000, 95, 100, 0x02, 13),
+	QOS_PRESET("48_3_2", false, 7500, 75, 90, 0x02, 13),
+	QOS_PRESET("48_4_2", false, 10000, 100, 120, 0x02, 13),
+	QOS_PRESET("48_5_2", false, 7500, 75, 117, 0x02, 13),
+	QOS_PRESET("44_6_2", false, 10000, 100, 155, 0x02, 13),
+	/* QoS configuration support setting requirements for the UGG and UGT */
+	QOS_PRESET("16_1_gs", true, 7500, 15, 30, 0x02, 1),
+	QOS_PRESET("16_2_gs", true, 10000, 20, 40, 0x02, 1),
+	QOS_PRESET("32_1_gs", true, 7500, 15, 60, 0x02, 1),
+	QOS_PRESET("32_2_gs", true, 10000, 20, 80, 0x02, 1),
+	QOS_PRESET("48_1_gs", true, 7500, 15, 75, 0x02, 1),
+	QOS_PRESET("48_2_gs", true, 10000, 20, 100, 0x02, 1),
+	QOS_PRESET("32_1_gr", true, 7500, 15, 60, 0x02, 1),
+	QOS_PRESET("32_2_gr", true, 10000, 20, 80, 0x02, 1),
+	QOS_PRESET("48_1_gr", true, 7500, 15, 75, 0x02, 1),
+	QOS_PRESET("48_2_gr", true, 10000, 20, 100, 0x02, 1),
+	QOS_PRESET("48_3_gr", true, 7500, 15, 90, 0x02, 1),
+	QOS_PRESET("48_4_gr", true, 10000, 20, 120, 0x02, 1),
 };
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
@@ -1446,7 +1489,11 @@ int main(int argc, char *argv[])
 					}
 
 					/* Child */
-					dump_mode(-1, sk_arr[i]);
+					if (!strcmp(peer, "00:00:00:00:00:00"))
+						dump_mode(-1, sk_arr[i], peer);
+					else
+						dump_mode(-1, sk_arr[i], NULL);
+
 					exit(0);
 				}
 
@@ -1462,7 +1509,11 @@ int main(int argc, char *argv[])
 				sk = do_connect(argv[optind + i]);
 				if (sk < 0)
 					exit(1);
-				dump_mode(-1, sk);
+
+				if (!strcmp(peer, "00:00:00:00:00:00"))
+					dump_mode(-1, sk, peer);
+				else
+					dump_mode(-1, sk, NULL);
 			}
 
 			break;

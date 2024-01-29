@@ -157,8 +157,11 @@ extern "C" {
 #define PAC_SOURCE_UUID		"00002bcb-0000-1000-8000-00805f9b34fb"
 #define PAC_SOURCE_LOC_CHRC_UUID			0x2bcc
 
-#define BAA_SERVICE		0x1852
-#define BAA_SERVICE_UUID	"00001852-0000-1000-8000-00805f9b34fb"
+#define BCAA_SERVICE				0x1852
+#define BCAA_SERVICE_UUID	"00001852-0000-1000-8000-00805f9b34fb"
+
+#define BAA_SERVICE					0x1851
+#define BAA_SERVICE_UUID	"00001851-0000-1000-8000-00805f9b34fb"
 
 #define PAC_CONTEXT					0x2bcd
 #define PAC_SUPPORTED_CONTEXT				0x2bce
@@ -184,6 +187,13 @@ extern "C" {
 #define VOCS_CP_CHRC_UUID			0x2B82
 #define VOCS_AUDIO_OP_DESC_CHAR_UUID		0x2B83
 
+#define	AICS_INPUT_STATE_CHAR_UUID		0x2B77
+#define	AICS_GAIN_SETTING_PROP_CHAR_UUID	0x2B78
+#define	AICS_AUDIO_INPUT_TYPE_CHAR_UUID		0x2B79
+#define	AICS_INPUT_STATUS_CHAR_UUID		0X2B7A
+#define	AICS_AUDIO_INPUT_CP_CHRC_UUID		0X2B7B
+#define	AICS_INPUT_DESCR_CHAR_UUID		0X2B7C
+
 #define GMCS_UUID                               0x1849
 #define MEDIA_PLAYER_NAME_CHRC_UUID             0x2b93
 #define MEDIA_TRACK_CHNGD_CHRC_UUID             0x2b96
@@ -205,6 +215,11 @@ extern "C" {
 #define CS_SIZE						0x2B85
 #define CS_LOCK						0x2B86
 #define CS_RANK						0x2B87
+
+
+/* Microphone Control Service(MICS) */
+#define MICS_UUID					0x184D
+#define MUTE_CHRC_UUID					0x2BC3
 
 typedef struct {
 	enum {

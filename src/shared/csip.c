@@ -66,6 +66,7 @@ struct bt_csis {
 	struct gatt_db_attribute *lock;
 	struct gatt_db_attribute *lock_ccc;
 	struct gatt_db_attribute *rank;
+	bt_csip_encrypt_func_t encrypt;
 };
 
 struct bt_csip_cb {
@@ -95,9 +96,6 @@ struct bt_csip {
 	bt_csip_debug_func_t debug_func;
 	bt_csip_destroy_func_t debug_destroy;
 	void *debug_data;
-
-	bt_csip_ltk_func_t ltk_func;
-	void *ltk_data;
 
 	bt_csip_sirk_func_t sirk_func;
 	void *sirk_data;
@@ -218,46 +216,6 @@ static void csip_debug(struct bt_csip *csip, const char *format, ...)
 	va_end(ap);
 }
 
-static bool csip_match_att(const void *data, const void *match_data)
-{
-	const struct bt_csip *csip = data;
-	const struct bt_att *att = match_data;
-
-	return bt_csip_get_att((void *)csip) == att;
-}
-
-static bool csis_sirk_enc(struct bt_csis *csis, struct bt_att *att,
-						struct csis_sirk *sirk)
-{
-	struct bt_csip *csip;
-	uint8_t k[16];
-	struct bt_crypto *crypto;
-	bool ret;
-
-	csip = queue_find(sessions, csip_match_att, att);
-	if (!csip)
-		return false;
-
-	if (!csip->ltk_func(csip, k, csip->ltk_data)) {
-		DBG(csip, "Unable to read sef key");
-		return false;
-	}
-
-	crypto = bt_crypto_new();
-	if (!crypto) {
-		DBG(csip, "Failed to open crypto");
-		return false;
-	}
-
-	ret = bt_crypto_sef(crypto, k, sirk->val, sirk->val);
-	if (!ret)
-		DBG(csip, "Failed to encrypt SIRK using sef");
-
-	bt_crypto_unref(crypto);
-
-	return ret;
-}
-
 static void csis_sirk_read(struct gatt_db_attribute *attrib,
 				unsigned int id, uint16_t offset,
 				uint8_t opcode, struct bt_att *att,
@@ -270,7 +228,7 @@ static void csis_sirk_read(struct gatt_db_attribute *attrib,
 	memcpy(&sirk, csis->sirk_val, sizeof(sirk));
 
 	if (sirk.type == BT_CSIP_SIRK_ENCRYPT &&
-				!csis_sirk_enc(csis, att, &sirk)) {
+				!csis->encrypt(att, sirk.val)) {
 		gatt_db_attribute_read_result(attrib, id, BT_ATT_ERROR_UNLIKELY,
 							NULL, 0);
 		return;
@@ -291,8 +249,8 @@ static void csis_size_read(struct gatt_db_attribute *attrib,
 	struct bt_csis *csis = user_data;
 	struct iovec iov;
 
-	iov.iov_base = &csis->size;
-	iov.iov_len = sizeof(csis->size);
+	iov.iov_base = &csis->size_val;
+	iov.iov_len = sizeof(csis->size_val);
 
 	gatt_db_attribute_read_result(attrib, id, 0, iov.iov_base,
 							iov.iov_len);
@@ -322,9 +280,13 @@ static void csis_rank_read_cb(struct gatt_db_attribute *attrib,
 				uint8_t opcode, struct bt_att *att,
 				void *user_data)
 {
-	uint8_t value = CSIS_RANK;
+	struct bt_csis *csis = user_data;
+	struct iovec iov;
 
-	gatt_db_attribute_read_result(attrib, id, 0, &value, sizeof(value));
+	iov.iov_base = &csis->rank_val;
+	iov.iov_len = sizeof(csis->rank_val);
+
+	gatt_db_attribute_read_result(attrib, id, 0, iov.iov_base, iov.iov_len);
 }
 
 static struct bt_csis *csis_new(struct gatt_db *db)
@@ -387,11 +349,6 @@ static struct bt_csip_db *csip_get_db(struct gatt_db *db)
 		return cdb;
 
 	return csip_db_new(db);
-}
-
-void bt_csip_add_db(struct gatt_db *db)
-{
-	csip_db_new(db);
 }
 
 bool bt_csip_set_debug(struct bt_csip *csip, bt_csip_debug_func_t func,
@@ -602,7 +559,7 @@ static void foreach_csis_char(struct gatt_db_attribute *attr, void *user_data)
 		DBG(csip, "SIRK found: handle 0x%04x", value_handle);
 
 		csis = csip_get_csis(csip);
-		if (!csis || csis->sirk)
+		if (!csis)
 			return;
 
 		csis->sirk = attr;
@@ -726,7 +683,8 @@ static struct csis_sirk *sirk_new(struct bt_csis *csis, struct gatt_db *db,
 	bt_uuid16_create(&uuid, CS_SIRK);
 	csis->sirk = gatt_db_service_add_characteristic(csis->service,
 					&uuid,
-					BT_ATT_PERM_READ,
+					BT_ATT_PERM_READ |
+					BT_ATT_PERM_READ_ENCRYPT,
 					BT_GATT_CHRC_PROP_READ,
 					csis_sirk_read, NULL,
 					csis);
@@ -734,7 +692,8 @@ static struct csis_sirk *sirk_new(struct bt_csis *csis, struct gatt_db *db,
 	bt_uuid16_create(&uuid, CS_SIZE);
 	csis->size = gatt_db_service_add_characteristic(csis->service,
 					&uuid,
-					BT_ATT_PERM_READ,
+					BT_ATT_PERM_READ |
+					BT_ATT_PERM_READ_ENCRYPT,
 					BT_GATT_CHRC_PROP_READ,
 					csis_size_read, NULL,
 					csis);
@@ -742,7 +701,10 @@ static struct csis_sirk *sirk_new(struct bt_csis *csis, struct gatt_db *db,
 	/* Lock */
 	bt_uuid16_create(&uuid, CS_LOCK);
 	csis->lock = gatt_db_service_add_characteristic(csis->service, &uuid,
-					BT_ATT_PERM_READ,
+					BT_ATT_PERM_READ |
+					BT_ATT_PERM_READ_ENCRYPT |
+					BT_ATT_PERM_WRITE |
+					BT_ATT_PERM_WRITE_ENCRYPT,
 					BT_GATT_CHRC_PROP_READ |
 					BT_GATT_CHRC_PROP_WRITE |
 					BT_GATT_CHRC_PROP_NOTIFY,
@@ -756,7 +718,8 @@ static struct csis_sirk *sirk_new(struct bt_csis *csis, struct gatt_db *db,
 	/* Rank */
 	bt_uuid16_create(&uuid, CS_RANK);
 	csis->rank = gatt_db_service_add_characteristic(csis->service, &uuid,
-					BT_ATT_PERM_READ,
+					BT_ATT_PERM_READ |
+					BT_ATT_PERM_READ_ENCRYPT,
 					BT_GATT_CHRC_PROP_READ,
 					csis_rank_read_cb,
 					NULL, csis);
@@ -775,7 +738,7 @@ static struct csis_sirk *sirk_new(struct bt_csis *csis, struct gatt_db *db,
 
 bool bt_csip_set_sirk(struct bt_csip *csip, bool encrypt,
 				uint8_t k[16], uint8_t size, uint8_t rank,
-				bt_csip_ltk_func_t func, void *user_data)
+				bt_csip_encrypt_func_t func)
 {
 	uint8_t zero[16] = {};
 	uint8_t type;
@@ -792,8 +755,7 @@ bool bt_csip_set_sirk(struct bt_csip *csip, bool encrypt,
 	if (!sirk_new(csip->ldb->csis, csip->ldb->db, type, k, size, rank))
 		return false;
 
-	csip->ltk_func = func;
-	csip->ltk_data = user_data;
+	csip->ldb->csis->encrypt = func;
 
 	return true;
 }

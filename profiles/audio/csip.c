@@ -40,6 +40,7 @@
 #include "src/shared/gatt-client.h"
 #include "src/shared/gatt-server.h"
 #include "src/shared/csip.h"
+#include "src/shared/crypto.h"
 
 #include "btio/btio.h"
 #include "src/plugin.h"
@@ -54,7 +55,13 @@
 
 #define CSIS_UUID_STR "00001846-0000-1000-8000-00805f9b34fb"
 
+struct csis_data {
+	struct btd_adapter *adapter;
+	struct bt_csip *csip;
+};
+
 struct csip_data {
+	struct btd_adapter *adapter;
 	struct btd_device *device;
 	struct btd_service *service;
 	struct bt_csip *csip;
@@ -62,6 +69,7 @@ struct csip_data {
 };
 
 static struct queue *sessions;
+static struct queue *servers;
 
 static void csip_debug(const char *str, void *user_data)
 {
@@ -78,12 +86,6 @@ static struct csip_data *csip_data_new(struct btd_device *device)
 	return data;
 }
 
-static bool csip_ltk_read(struct bt_csip *csip, uint8_t k[16], void *user_data)
-{
-	/* TODO: Retrieve LTK using device object */
-	return false;
-}
-
 static void csip_data_add(struct csip_data *data)
 {
 	DBG("data %p", data);
@@ -94,10 +96,6 @@ static void csip_data_add(struct csip_data *data)
 	}
 
 	bt_csip_set_debug(data->csip, csip_debug, NULL, NULL);
-
-	bt_csip_set_sirk(data->csip, btd_opts.csis.encrypt, btd_opts.csis.sirk,
-				btd_opts.csis.size, btd_opts.csis.rank,
-				csip_ltk_read, data);
 
 	if (!sessions)
 		sessions = queue_new();
@@ -201,25 +199,6 @@ static void csip_attached(struct bt_csip *csip, void *user_data)
 	data->csip = csip;
 
 	csip_data_add(data);
-
-}
-
-static int csip_server_probe(struct btd_profile *p,
-				struct btd_adapter *adapter)
-{
-	struct btd_gatt_database *database = btd_adapter_get_database(adapter);
-
-	DBG("CSIP path %s", adapter_get_path(adapter));
-
-	bt_csip_add_db(btd_gatt_database_get_db(database));
-
-	return 0;
-}
-
-static void csip_server_remove(struct btd_profile *p,
-					struct btd_adapter *adapter)
-{
-	DBG("CSIP remove Adapter");
 }
 
 static int csip_accept(struct btd_service *service)
@@ -332,9 +311,141 @@ static struct btd_profile csip_profile = {
 	.accept		= csip_accept,
 	.disconnect	= csip_disconnect,
 
-	.adapter_probe	= csip_server_probe,
-	.adapter_remove	= csip_server_remove,
+	.experimental	= true,
+};
 
+static bool csis_encrypt(struct bt_att *att, uint8_t val[16])
+{
+	struct btd_device *device;
+	struct bt_crypto *crypto;
+	uint8_t ltk[16];
+	bool ret;
+
+	device = btd_adapter_find_device_by_fd(bt_att_get_fd(att));
+	if (!device) {
+		error("Unable to find device");
+		return false;
+	}
+
+	if (!btd_device_get_ltk(device, ltk, NULL, NULL)) {
+		error("Unable to get device LTK");
+		return false;
+	}
+
+	crypto = bt_crypto_new();
+	if (!crypto) {
+		error("Failed to open crypto");
+		return false;
+	}
+
+	ret = bt_crypto_sef(crypto, ltk, val, val);
+	if (!ret)
+		error("Failed to encrypt SIRK using LTK");
+
+	bt_crypto_unref(crypto);
+
+	return ret;
+}
+
+static void csis_data_add(struct csis_data *data)
+{
+	DBG("data %p", data);
+
+	if (queue_find(servers, NULL, data)) {
+		error("data %p already added", data);
+		return;
+	}
+
+	bt_csip_set_debug(data->csip, csip_debug, NULL, NULL);
+
+	bt_csip_set_sirk(data->csip, btd_opts.csis.encrypt, btd_opts.csis.sirk,
+				btd_opts.csis.size, btd_opts.csis.rank,
+				csis_encrypt);
+
+	if (!servers)
+		servers = queue_new();
+
+	queue_push_tail(servers, data);
+}
+
+static struct csis_data *csis_data_new(struct btd_adapter *adapter)
+{
+	struct csis_data *data;
+
+	data = new0(struct csis_data, 1);
+	data->adapter = adapter;
+
+	return data;
+}
+
+static int csis_server_probe(struct btd_profile *p, struct btd_adapter *adapter)
+{
+	struct btd_gatt_database *database = btd_adapter_get_database(adapter);
+	struct csis_data *data;
+
+	DBG("path %s", adapter_get_path(adapter));
+
+	data = csis_data_new(adapter);
+
+	data->csip = bt_csip_new(btd_gatt_database_get_db(database), NULL);
+	if (!data->csip) {
+		error("Unable to create CSIP instance");
+		free(data);
+		return -EINVAL;
+	}
+
+	csis_data_add(data);
+
+	return 0;
+}
+
+static bool match_csis(const void *data, const void *match_data)
+{
+	const struct csis_data *csis = data;
+	const struct btd_adapter *adapter = match_data;
+
+	return csis->adapter == adapter;
+}
+
+static void csis_data_free(struct csis_data *data)
+{
+	bt_csip_unref(data->csip);
+	free(data);
+}
+
+static void csis_data_remove(struct csis_data *data)
+{
+	DBG("data %p", data);
+
+	csis_data_free(data);
+
+	if (queue_isempty(servers)) {
+		queue_destroy(servers, NULL);
+		servers = NULL;
+	}
+}
+
+static void csis_server_remove(struct btd_profile *p,
+					struct btd_adapter *adapter)
+{
+	struct csis_data *data;
+
+	DBG("path %s", adapter_get_path(adapter));
+
+	data = queue_remove_if(servers, match_csis, adapter);
+	if (!data)
+		return;
+
+	csis_data_remove(data);
+}
+
+static struct btd_profile csis_profile = {
+	.name		= "csis",
+	.priority	= BTD_PROFILE_PRIORITY_MEDIUM,
+	.local_uuid	= CSIS_UUID_STR,
+
+	.adapter_probe	= csis_server_probe,
+	.adapter_remove	= csis_server_remove,
 	.experimental	= true,
 };
 
@@ -343,6 +454,10 @@ static unsigned int csip_id;
 static int csip_init(void)
 {
 	int err;
+
+	err = btd_profile_register(&csis_profile);
+	if (err)
+		return err;
 
 	err = btd_profile_register(&csip_profile);
 	if (err)
@@ -355,6 +470,7 @@ static int csip_init(void)
 
 static void csip_exit(void)
 {
+	btd_profile_unregister(&csis_profile);
 	btd_profile_unregister(&csip_profile);
 	bt_csip_unregister(csip_id);
 }

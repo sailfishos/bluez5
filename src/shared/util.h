@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <alloca.h>
 #include <byteswap.h>
 #include <string.h>
@@ -88,6 +89,8 @@ do {						\
 
 char *strdelimit(char *str, char *del, char c);
 int strsuffix(const char *str, const char *suffix);
+char *strstrip(char *str);
+bool strisutf8(const char *str, size_t length);
 
 void *util_malloc(size_t size);
 void *util_memdup(const void *src, size_t size);
@@ -103,6 +106,43 @@ void util_debug(util_debug_func_t function, void *user_data,
 
 void util_hexdump(const char dir, const unsigned char *buf, size_t len,
 				util_debug_func_t function, void *user_data);
+
+#define UTIL_BIT_DEBUG(_bit, _str) \
+{ \
+	.bit = _bit, \
+	.str = _str, \
+}
+
+struct util_bit_debugger {
+	uint64_t bit;
+	const char *str;
+};
+
+uint64_t util_debug_bit(const char *label, uint64_t val,
+				const struct util_bit_debugger *table,
+				util_debug_func_t func, void *user_data);
+
+#define UTIL_LTV_DEBUG(_type, _func) \
+{ \
+	.type = _type, \
+	.func = _func, \
+}
+
+struct util_ltv_debugger {
+	uint8_t  type;
+	void (*func)(const uint8_t *data, uint8_t len,
+			util_debug_func_t func, void *user_data);
+};
+
+bool util_debug_ltv(const uint8_t *data, uint8_t len,
+			const struct util_ltv_debugger *debugger, size_t num,
+			util_debug_func_t function, void *user_data);
+
+typedef void (*util_ltv_func_t)(size_t i, uint8_t l, uint8_t t, uint8_t *v,
+					void *user_data);
+
+bool util_ltv_foreach(const uint8_t *data, uint8_t len, uint8_t *type,
+			util_ltv_func_t func, void *user_data);
 
 unsigned char util_get_dt(const char *parent, const char *name);
 

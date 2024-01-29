@@ -82,7 +82,7 @@ pkginclude_HEADERS += $(lib_headers)
 lib_LTLIBRARIES += lib/libbluetooth.la
 
 lib_libbluetooth_la_SOURCES = $(lib_headers) $(lib_sources)
-lib_libbluetooth_la_LDFLAGS = $(AM_LDFLAGS) -version-info 22:9:19
+lib_libbluetooth_la_LDFLAGS = $(AM_LDFLAGS) -version-info 22:12:19
 lib_libbluetooth_la_DEPENDENCIES = $(local_headers)
 endif
 
@@ -231,8 +231,10 @@ shared_sources = src/shared/io.h src/shared/timeout.h \
 			src/shared/gap.h src/shared/gap.c \
 			src/shared/log.h src/shared/log.c \
 			src/shared/bap.h src/shared/bap.c src/shared/ascs.h \
+			src/shared/bap-debug.h src/shared/bap-debug.c \
 			src/shared/mcs.h src/shared/mcp.h src/shared/mcp.c \
 			src/shared/vcp.c src/shared/vcp.h \
+			src/shared/micp.c src/shared/micp.h \
 			src/shared/csip.c src/shared/csip.h \
 			src/shared/bass.h src/shared/bass.c \
 			src/shared/lc3.h src/shared/tty.h
@@ -371,8 +373,68 @@ CLEANFILES += $(builtin_files) src/bluetooth.service
 
 if MANPAGES
 man_MANS += src/bluetoothd.8
+man_MANS += doc/org.bluez.Adapter.5 doc/org.bluez.Device.5 \
+		doc/org.bluez.DeviceSet.5 doc/org.bluez.AgentManager.5 \
+		doc/org.bluez.Agent.5 doc/org.bluez.ProfileManager.5 \
+		doc/org.bluez.Profile.5 doc/org.bluez.NetworkServer.5 \
+		doc/org.bluez.Network.5 doc/org.bluez.Input.5 \
+		doc/org.bluez.BatteryProviderManager.5 \
+		doc/org.bluez.BatteryProvider.5 doc/org.bluez.Battery.5 \
+		doc/org.bluez.AdminPolicySet.5 \
+		doc/org.bluez.AdminPolicyStatus.5
+man_MANS += doc/org.bluez.Media.5 doc/org.bluez.MediaControl.5 \
+		doc/org.bluez.MediaPlayer.5 doc/org.bluez.MediaFolder.5 \
+		doc/org.bluez.MediaItem.5 doc/org.bluez.MediaEndpoint.5 \
+		doc/org.bluez.MediaTransport.5
+man_MANS += doc/org.bluez.GattManager.5 doc/org.bluez.GattProfile.5 \
+		doc/org.bluez.GattService.5 \
+		doc/org.bluez.GattCharacteristic.5 \
+		doc/org.bluez.GattDescriptor.5 \
+		doc/org.bluez.LEAdvertisingManager.5 \
+		doc/org.bluez.LEAdvertisement.5 \
+		doc/org.bluez.AdvertisementMonitorManager.5 \
+		doc/org.bluez.AdvertisementMonitor.5
+man_MANS += doc/org.bluez.obex.Client.5 doc/org.bluez.obex.Session.5 \
+		doc/org.bluez.obex.Transfer.5 \
+		doc/org.bluez.obex.ObjectPush.5 \
+		doc/org.bluez.obex.FileTransfer.5 \
+		doc/org.bluez.obex.Synchronization.5 \
+		doc/org.bluez.obex.PhonebookAccess.5 \
+		doc/org.bluez.obex.MessageAccess.5 \
+		doc/org.bluez.obex.Message.5 \
+		doc/org.bluez.obex.AgentManager.5 doc/org.bluez.obex.Agent.5
 endif
 manual_pages += src/bluetoothd.8
+manual_pages += doc/org.bluez.Adapter.5 doc/org.bluez.Device.5 \
+		doc/org.bluez.DeviceSet.5 doc/org.bluez.AgentManager.5 \
+		doc/org.bluez.Agent.5 doc/org.bluez.ProfileManager.5 \
+		doc/org.bluez.Profile.5 doc/org.bluez.NetworkServer.5 \
+		doc/org.bluez.Network.5 doc/org.bluez.Input.5\
+		doc/org.bluez.BatteryProviderManager.5 \
+		doc/org.bluez.BatteryProvider.5 doc/org.bluez.Battery.5 \
+		doc/org.bluez.AdminPolicySet.5 \
+		doc/org.bluez.AdminPolicyStatus.5
+manual_pages += doc/org.bluez.Media.5 doc/org.bluez.MediaControl.5 \
+		doc/org.bluez.MediaPlayer.5 doc/org.bluez.MediaFolder.5 \
+		doc/org.bluez.MediaItem.5 doc/org.bluez.MediaEndpoint.5 \
+		doc/org.bluez.MediaTransport.5
+manual_pages += doc/org.bluez.GattManager.5 doc/org.bluez.GattProfile.5 \
+		doc/org.bluez.GattService.5 \
+		doc/org.bluez.GattCharacteristic.5 \
+		doc/org.bluez.GattDescriptor.5 \
+		doc/org.bluez.LEAdvertisingManager.5 \
+		doc/org.bluez.LEAdvertisement.5 \
+		doc/org.bluez.AdvertisementMonitorManager.5 \
+		doc/org.bluez.AdvertisementMonitor.5
+manual_pages += doc/org.bluez.obex.Client.5 doc/org.bluez.obex.Session.5 \
+		doc/org.bluez.obex.Transfer.5 \
+		doc/org.bluez.obex.ObjectPush.5 \
+		doc/org.bluez.obex.FileTransfer.5 \
+		doc/org.bluez.obex.Synchronization.5 \
+		doc/org.bluez.obex.PhonebookAccess.5 \
+		doc/org.bluez.obex.MessageAccess.5 \
+		doc/org.bluez.obex.Message.5 \
+		doc/org.bluez.obex.AgentManager.5 doc/org.bluez.obex.Agent.5
 
 EXTRA_DIST += src/genbuiltin src/bluetooth.conf \
 			src/main.conf profiles/network/network.conf \
@@ -405,19 +467,46 @@ EXTRA_DIST += $(test_scripts)
 
 EXTRA_DIST += doc/assigned-numbers.txt doc/supported-features.txt \
 				doc/test-coverage.txt \
-				doc/test-runner.txt \
+				doc/test-runner.rst \
 				doc/settings-storage.txt
 
 EXTRA_DIST += doc/mgmt-api.txt \
-		doc/adapter-api.txt doc/device-api.txt \
-		doc/agent-api.txt doc/profile-api.txt \
-		doc/network-api.txt doc/media-api.txt \
-		doc/health-api.txt doc/sap-api.txt \
-		doc/input-api.txt
+		doc/health-api.txt \
+		doc/sap-api.txt
 
-EXTRA_DIST += doc/gatt-api.txt doc/advertising-api.txt
+EXTRA_DIST += doc/org.bluez.Adapter.rst doc/org.bluez.Device.rst \
+		doc/org.bluez.DeviceSet.rst doc/org.bluez.AgentManager.rst \
+		doc/org.bluez.Agent.rst doc/org.bluez.ProfileManager.rst \
+		doc/org.bluez.Profile.rst doc/org.bluez.NetworkServer.rst \
+		doc/org.bluez.Network.rst doc/org.bluez.Input.rst \
+		doc/org.bluez.BatteryProviderManager.rst \
+		doc/org.bluez.BatteryProvider.rst doc/org.bluez.Battery.rst \
+		doc/org.bluez.AdminPolicySet.rst \
+		doc/org.bluez.AdminPolicyStatus.rst
 
-EXTRA_DIST += doc/obex-api.txt doc/obex-agent-api.txt
+EXTRA_DIST += doc/org.bluez.Media.rst doc/org.bluez.MediaControl.rst \
+		doc/org.bluez.MediaPlayer.rst doc/org.bluez.MediaFolder.rst \
+		doc/org.bluez.MediaItem.rst doc/org.bluez.MediaEndpoint.rst \
+		doc/org.bluez.MediaTransport.rst
+
+EXTRA_DIST += doc/org.bluez.GattManager.rst doc/org.bluez.GattProfile.rst\
+		doc/org.bluez.GattService.rst \
+		doc/org.bluez.GattCharacteristic.rst \
+		doc/org.bluez.GattDescriptor.rst \
+		doc/org.bluez.LEAdvertisingManager.rst \
+		doc/org.bluez.LEAdvertisement.rst \
+		doc/org.bluez.AdvertisementMonitorManager.rst \
+		doc/org.bluez.AdvertisementMonitor.rst
+
+EXTRA_DIST += doc/org.bluez.obex.Client.rst doc/org.bluez.obex.Session.rst \
+		doc/org.bluez.obex.Transfer.rst \
+		doc/org.bluez.obex.ObjectPush.rst \
+		doc/org.bluez.obex.FileTransfer.rst \
+		doc/org.bluez.obex.Synchronization.rst \
+		doc/org.bluez.obex.PhonebookAccess.rst \
+		doc/org.bluez.obex.MessageAccess.rst \
+		doc/org.bluez.obex.Message.rst \
+		doc/org.bluez.obex.AgentManager.rst doc/org.bluez.obex.Agent.rst
 
 EXTRA_DIST += doc/pics-opp.txt doc/pixit-opp.txt \
 		doc/pts-opp.txt
@@ -593,10 +682,22 @@ unit_test_bap_SOURCES = unit/test-bap.c
 unit_test_bap_LDADD = src/libshared-glib.la \
 				lib/libbluetooth-internal.la $(GLIB_LIBS)
 
+unit_tests += unit/test-micp
+
+unit_test_micp_SOURCES = unit/test-micp.c
+unit_test_micp_LDADD = src/libshared-glib.la \
+				lib/libbluetooth-internal.la $(GLIB_LIBS)
+
 unit_tests += unit/test-bass
 
-unit_test_bass_SOURCES = unit/test-bass.c
+unit_test_bass_SOURCES = unit/test-bass.c $(btio_sources)
 unit_test_bass_LDADD = src/libshared-glib.la \
+				lib/libbluetooth-internal.la $(GLIB_LIBS)
+
+unit_tests += unit/test-vcp
+
+unit_test_vcp_SOURCES = unit/test-vcp.c $(btio_sources)
+unit_test_vcp_LDADD = src/libshared-glib.la \
 				lib/libbluetooth-internal.la $(GLIB_LIBS)
 
 unit_tests += unit/test-jolla-blacklist
@@ -685,6 +786,9 @@ endif
 	$(SED_PROCESS)
 
 %.1: %.rst Makefile
+	$(RST2MAN_PROCESS)
+
+%.5: %.rst Makefile
 	$(RST2MAN_PROCESS)
 
 %.8: %.rst Makefile

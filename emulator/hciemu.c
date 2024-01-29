@@ -21,6 +21,7 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 
 #include <glib.h>
 
@@ -41,6 +42,7 @@ struct hciemu_client {
 	guint start_source;
 	guint host_source;
 	guint source;
+	int sock[2];
 };
 
 struct hciemu {
@@ -54,6 +56,8 @@ struct hciemu {
 	hciemu_debug_func_t debug_callback;
 	hciemu_destroy_func_t debug_destroy;
 	void *debug_data;
+
+	unsigned int flush_id;
 };
 
 struct hciemu_command_hook {
@@ -186,14 +190,7 @@ static gboolean receive_btdev(GIOChannel *channel, GIOCondition condition,
 	if (len < 1)
 		return FALSE;
 
-	switch (buf[0]) {
-	case BT_H4_CMD_PKT:
-	case BT_H4_ACL_PKT:
-	case BT_H4_SCO_PKT:
-	case BT_H4_ISO_PKT:
-		btdev_receive_h4(btdev, buf, len);
-		break;
-	}
+	btdev_receive_h4(btdev, buf, len);
 
 	return TRUE;
 }
@@ -338,6 +335,9 @@ static struct hciemu_client *hciemu_client_new(struct hciemu *hciemu,
 		return NULL;
 	}
 
+	client->sock[0] = sv[0];
+	client->sock[1] = sv[1];
+
 	client->source = create_source_btdev(sv[0], client->dev);
 	client->host_source = create_source_bthost(sv[1], client->host);
 	client->start_source = g_idle_add(start_host, client);
@@ -434,6 +434,9 @@ void hciemu_unref(struct hciemu *hciemu)
 
 	queue_destroy(hciemu->post_command_hooks, destroy_command_hook);
 	queue_destroy(hciemu->clients, hciemu_client_destroy);
+
+	if (hciemu->flush_id)
+		g_source_remove(hciemu->flush_id);
 
 	vhci_close(hciemu->vhci);
 
@@ -545,6 +548,15 @@ const uint8_t *hciemu_client_bdaddr(struct hciemu_client *client)
 		return NULL;
 
 	return btdev_get_bdaddr(client->dev);
+}
+
+bool hciemu_set_client_bdaddr(struct hciemu_client *client,
+				const uint8_t *bdaddr)
+{
+	if (!client)
+		return NULL;
+
+	return btdev_set_bdaddr(client->dev, bdaddr);
 }
 
 const uint8_t *hciemu_get_client_bdaddr(struct hciemu *hciemu)
@@ -743,4 +755,48 @@ bool hciemu_del_hook(struct hciemu *hciemu, enum hciemu_hook_type type,
 	}
 
 	return btdev_del_hook(dev, hook_type, opcode);
+}
+
+static bool client_is_pending(const void *data, const void *match_data)
+{
+	struct hciemu_client *client = (struct hciemu_client *)data;
+	int used, i;
+
+	if (!client->source || !client->host_source)
+		return false;
+
+	for (i = 0; i < 2; ++i) {
+		if (!ioctl(client->sock[i], TIOCOUTQ, &used) && used > 0)
+			return true;
+		if (!ioctl(client->sock[i], TIOCINQ, &used) && used > 0)
+			return true;
+	}
+
+	return false;
+}
+
+static gboolean flush_client_events(gpointer user_data)
+{
+	struct hciemu *hciemu = user_data;
+
+	if (queue_find(hciemu->clients, client_is_pending, NULL))
+		return TRUE;
+
+	hciemu->flush_id = 0;
+
+	util_debug(hciemu->debug_callback, hciemu->debug_data, "vhci: resume");
+	if (hciemu->vhci)
+		vhci_pause_input(hciemu->vhci, false);
+
+	return FALSE;
+}
+
+void hciemu_flush_client_events(struct hciemu *hciemu)
+{
+	if (hciemu->flush_id || !hciemu->vhci)
+		return;
+
+	util_debug(hciemu->debug_callback, hciemu->debug_data, "vhci: pause");
+	vhci_pause_input(hciemu->vhci, true);
+	hciemu->flush_id = g_idle_add(flush_client_events, hciemu);
 }

@@ -321,16 +321,9 @@ static struct bearer_state *get_state(struct btd_device *dev,
 
 bool btd_device_is_initiator(struct btd_device *dev)
 {
-	if (dev->le_state.connected) {
-		/* Mark as initiator if not set yet and auto-connect flag is
-		 * set and LTK key is for a peripheral.
-		 */
-		if (!dev->le_state.initiator && dev->auto_connect &&
-					dev->ltk && !dev->ltk->central)
-			dev->le_state.initiator = true;
-
+	if (dev->le_state.connected)
 		return dev->le_state.initiator;
-	} else if (dev->bredr_state.connected)
+	else if (dev->bredr_state.connected)
 		return dev->bredr_state.initiator;
 
 	return dev->att_io ? true : false;
@@ -1954,6 +1947,23 @@ void device_set_ltk(struct btd_device *device, const uint8_t val[16],
 	queue_foreach(device->sirks, add_set, device);
 }
 
+bool btd_device_get_ltk(struct btd_device *device, uint8_t key[16],
+				bool *central, uint8_t *enc_size)
+{
+	if (!device || !device->ltk || !key)
+		return false;
+
+	memcpy(key, device->ltk->key, sizeof(device->ltk->key));
+
+	if (central)
+		*central = device->ltk->central;
+
+	if (enc_size)
+		*enc_size = device->ltk->enc_size;
+
+	return true;
+}
+
 static bool match_sirk(const void *data, const void *match_data)
 {
 	const struct sirk_info *sirk = data;
@@ -2015,7 +2025,7 @@ static void device_set_auto_connect(struct btd_device *device, gboolean enable)
 {
 	char addr[18];
 
-	if (!device || !device->le)
+	if (!device || !device->le || device_address_is_private(device))
 		return;
 
 	ba2str(&device->bdaddr, addr);
@@ -2165,7 +2175,7 @@ done:
 void device_add_eir_uuids(struct btd_device *dev, GSList *uuids)
 {
 	GSList *l;
-	bool added = false;
+	GSList *added = NULL;
 
 	if (dev->bredr_state.svc_resolved || dev->le_state.svc_resolved)
 		return;
@@ -2174,13 +2184,11 @@ void device_add_eir_uuids(struct btd_device *dev, GSList *uuids)
 		const char *str = l->data;
 		if (g_slist_find_custom(dev->eir_uuids, str, bt_uuid_strcmp))
 			continue;
-		added = true;
+		added = g_slist_append(added, (void *)str);
 		dev->eir_uuids = g_slist_append(dev->eir_uuids, g_strdup(str));
 	}
 
-	if (added)
-		g_dbus_emit_property_changed(dbus_conn, dev->path,
-						DEVICE_INTERFACE, "UUIDs");
+	device_probe_profiles(dev, added);
 }
 
 static void add_manufacturer_data(void *data, void *user_data)
@@ -2210,12 +2218,17 @@ static void add_service_data(void *data, void *user_data)
 	struct eir_sd *sd = data;
 	struct btd_device *dev = user_data;
 	bt_uuid_t uuid;
+	GSList *l;
 
 	if (bt_string_to_uuid(&uuid, sd->uuid) < 0)
 		return;
 
 	if (!bt_ad_add_service_data(dev->ad, &uuid, sd->data, sd->data_len))
 		return;
+
+	l = g_slist_append(NULL, sd->uuid);
+	device_add_eir_uuids(dev, l);
+	g_slist_free(l);
 
 	g_dbus_emit_property_changed(dbus_conn, dev->path,
 					DEVICE_INTERFACE, "ServiceData");
@@ -3234,7 +3247,8 @@ static void clear_temporary_timer(struct btd_device *dev)
 	}
 }
 
-void device_add_connection(struct btd_device *dev, uint8_t bdaddr_type)
+void device_add_connection(struct btd_device *dev, uint8_t bdaddr_type,
+							uint32_t flags)
 {
 	struct bearer_state *state = get_state(dev, bdaddr_type);
 
@@ -3257,6 +3271,7 @@ void device_add_connection(struct btd_device *dev, uint8_t bdaddr_type)
 		device_set_le_support(dev, bdaddr_type);
 
 	state->connected = true;
+	state->initiator = flags & BIT(3);
 
 	if (dev->le_state.connected && dev->bredr_state.connected)
 		return;
@@ -3938,11 +3953,13 @@ static bool device_match_profile(struct btd_device *device,
 					struct btd_profile *profile,
 					GSList *uuids)
 {
+	GSList *l;
+
 	if (profile->remote_uuid == NULL)
 		return false;
 
-	if (g_slist_find_custom(uuids, profile->remote_uuid,
-							bt_uuid_strcmp) == NULL)
+	l = g_slist_find_custom(uuids, profile->remote_uuid, bt_uuid_strcmp);
+	if (!l)
 		return false;
 
 	return true;
@@ -4467,6 +4484,9 @@ void device_set_le_support(struct btd_device *device, uint8_t bdaddr_type)
 	device->le = true;
 	device->bdaddr_type = bdaddr_type;
 
+	g_dbus_emit_property_changed(dbus_conn, device->path,
+					DEVICE_INTERFACE, "AddressType");
+
 	store_device_info(device);
 }
 
@@ -4826,6 +4846,7 @@ static struct btd_service *get_service(struct btd_device *device,
 		return NULL;
 
 	service = service_create(device, profile);
+
 	DBG("create new service (profile %s) for device %s", profile->name, device->name);
 
 	return service;
@@ -4916,8 +4937,15 @@ static void probe_services(struct btd_device *device, GSList *services)
 		/* Only set auto connect if profile has set the flag and can really
 		 * accept connections.
 		 */
-		if (profile->auto_connect && profile->accept)
-			device_set_auto_connect(device, TRUE);
+		if (profile->auto_connect && profile->accept) {
+			/* If temporary mark auto_connect as disabled so when the
+			 * device is connected it attempts to enable it.
+			 */
+			if (device->temporary)
+				device->disable_auto_connect = TRUE;
+			else
+				device_set_auto_connect(device, TRUE);
+		}
 
 		device->services = g_slist_append(device->services, service);
 	}
@@ -4967,6 +4995,9 @@ void device_probe_profiles(struct btd_device *device, GSList *uuids)
 {
 	struct probe_data probe = { device, uuids, NULL };
 	char addr[18];
+
+	if (!uuids)
+		return;
 
 	ba2str(&device->bdaddr, addr);
 
@@ -5829,6 +5860,10 @@ int device_connect_le(struct btd_device *dev)
 
 	/* Keep this, so we can cancel the connection */
 	dev->att_io = io;
+
+	/* Restart temporary timer to give it time to connect/pair, etc. */
+	if (dev->temporary)
+		set_temporary_timer(dev, btd_opts.tmpto);
 
 	return 0;
 }
@@ -7011,9 +7046,6 @@ void btd_device_add_uuid(struct btd_device *device, const char *uuid)
 
 	DBG("device %s, uuid %s", device->name, uuid);
 
-	if (g_slist_find_custom(device->uuids, uuid, bt_uuid_strcmp))
-		return;
-
 	new_uuid = g_strdup(uuid);
 	uuid_list = g_slist_append(NULL, new_uuid);
 
@@ -7021,11 +7053,6 @@ void btd_device_add_uuid(struct btd_device *device, const char *uuid)
 
 	g_free(new_uuid);
 	g_slist_free(uuid_list);
-
-	store_device_info(device);
-
-	g_dbus_emit_property_changed(dbus_conn, device->path,
-						DEVICE_INTERFACE, "UUIDs");
 }
 
 static sdp_list_t *read_device_records(struct btd_device *device)

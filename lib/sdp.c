@@ -420,7 +420,7 @@ sdp_data_t *sdp_data_alloc_with_length(uint8_t dtd, const void *value,
 
 		d->unitSize += length;
 		if (length <= USHRT_MAX) {
-			d->val.str = malloc(length);
+			d->val.str = bt_malloc0(length + 1);
 			if (!d->val.str) {
 				free(d);
 				return NULL;
@@ -1505,7 +1505,7 @@ static void *sdp_data_value(sdp_data_t *data, uint32_t *len)
 	case SDP_TEXT_STR32:
 		val = data->val.str;
 		if (len)
-			*len = data->unitSize - 1;
+			*len = data->unitSize - sizeof(uint8_t);
 		break;
 	case SDP_ALT8:
 	case SDP_ALT16:
@@ -1527,10 +1527,10 @@ static sdp_data_t *sdp_copy_seq(sdp_data_t *data)
 	for (tmp = data; tmp; tmp = tmp->next) {
 		sdp_data_t *datatmp;
 		void *value;
+		uint32_t len = 0;
 
-		value = sdp_data_value(tmp, NULL);
-		datatmp = sdp_data_alloc_with_length(tmp->dtd, value,
-								tmp->unitSize);
+		value = sdp_data_value(tmp, &len);
+		datatmp = sdp_data_alloc_with_length(tmp->dtd, value, len);
 
 		if (cur)
 			cur->next = datatmp;
@@ -2180,16 +2180,21 @@ int sdp_get_int_attr(const sdp_record_t *rec, uint16_t attrid, int *value)
 }
 
 int sdp_get_string_attr(const sdp_record_t *rec, uint16_t attrid, char *value,
-								int valuelen)
+								size_t valuelen)
 {
 	sdp_data_t *sdpdata = sdp_data_get(rec, attrid);
-	if (sdpdata)
-		/* Verify that it is what the caller expects */
-		if (SDP_IS_TEXT_STR(sdpdata->dtd))
-			if ((int) strlen(sdpdata->val.str) < valuelen) {
-				strcpy(value, sdpdata->val.str);
-				return 0;
-			}
+
+	/* Verify that it is what the caller expects */
+	if (!sdpdata || !SDP_IS_TEXT_STR(sdpdata->dtd))
+		goto fail;
+
+	/* Have to copy the NULL terminator too, so check len < valuelen. */
+	if (strlen(sdpdata->val.str) < valuelen) {
+		strcpy(value, sdpdata->val.str);
+		return 0;
+	}
+
+fail:
 	errno = EINVAL;
 	return -1;
 }

@@ -95,8 +95,36 @@ struct bt_ll_peripheral_feature_req {
 } __attribute__ ((packed));
 
 #define BT_LL_CONN_PARAM_REQ	0x0f
+struct bt_ll_conn_param_req {
+	uint16_t interval_min;
+	uint16_t interval_max;
+	uint16_t latency;
+	uint16_t timeout;
+	uint8_t pref_period;
+	uint16_t pref_conn_evt_count;
+	uint8_t offset_0;
+	uint8_t offset_1;
+	uint8_t offset_2;
+	uint8_t offset_3;
+	uint8_t offset_4;
+	uint8_t offset_5;
+} __attribute__ ((packed));
 
 #define BT_LL_CONN_PARAM_RSP	0x10
+struct bt_ll_conn_param_rsp {
+	uint16_t interval_min;
+	uint16_t interval_max;
+	uint16_t latency;
+	uint16_t timeout;
+	uint8_t pref_period;
+	uint16_t pref_conn_evt_count;
+	uint8_t offset_0;
+	uint8_t offset_1;
+	uint8_t offset_2;
+	uint8_t offset_3;
+	uint8_t offset_4;
+	uint8_t offset_5;
+} __attribute__ ((packed));
 
 #define BT_LL_REJECT_IND_EXT	0x11
 struct bt_ll_reject_ind_ext {
@@ -560,6 +588,10 @@ struct bt_hci_cmd_add_sco_conn {
 
 #define BT_HCI_CMD_CREATE_CONN_CANCEL		0x0408
 struct bt_hci_cmd_create_conn_cancel {
+	uint8_t  bdaddr[6];
+} __attribute__ ((packed));
+struct bt_hci_rsp_create_conn_cancel {
+	uint8_t  status;
 	uint8_t  bdaddr[6];
 } __attribute__ ((packed));
 
@@ -2608,7 +2640,7 @@ struct bt_hci_cmd_periodic_sync_trans {
 struct bt_hci_cmd_pa_set_info_trans {
 	uint16_t handle;
 	uint16_t service_data;
-	uint16_t adv_handle;
+	uint8_t adv_handle;
 } __attribute__ ((packed));
 
 #define BT_HCI_CMD_PA_SYNC_TRANS_PARAMS		0x205c
@@ -2777,20 +2809,19 @@ struct bt_hci_bis_test {
 	uint16_t iso_interval;
 	uint8_t  nse;
 	uint16_t sdu;
-	uint8_t  pdu;
+	uint16_t  pdu;
 	uint8_t  phy;
 	uint8_t  packing;
 	uint8_t  framing;
 	uint8_t  bn;
 	uint8_t  irc;
 	uint8_t  pto;
-	uint8_t  adv_handle;
 	uint8_t  encryption;
 	uint8_t  bcode[16];
 } __attribute__ ((packed));
 
 struct bt_hci_cmd_le_create_big_test {
-	uint8_t  big_id;
+	uint8_t  big_handle;
 	uint8_t  adv_handle;
 	uint8_t  num_bis;
 	struct bt_hci_bis_test bis[0];
@@ -2863,6 +2894,11 @@ struct bt_hci_cmd_le_remove_iso_path {
 	uint8_t  direction;
 } __attribute__ ((packed));
 
+struct bt_hci_rsp_le_remove_iso_path {
+	uint8_t  status;
+	uint16_t handle;
+} __attribute__ ((packed));
+
 #define BT_HCI_CMD_LE_ISO_TX_TEST		0x2070
 #define BT_HCI_BIT_LE_ISO_TX_TEST		BT_HCI_CMD_BIT(43, 5)
 
@@ -2880,6 +2916,24 @@ struct bt_hci_cmd_le_remove_iso_path {
 struct bt_hci_cmd_le_set_host_feature {
 	uint8_t  bit_number;
 	uint8_t  bit_value;
+} __attribute__ ((packed));
+
+#define BT_HCI_CMD_LE_READ_ISO_LINK_QUALITY	0x2075
+#define BT_HCI_BIT_LE_READ_ISO_LINK_QUALITY	BT_HCI_CMD_BIT(45, 1)
+struct bt_hci_cmd_le_read_iso_link_quality {
+	uint16_t handle;
+} __attribute__ ((packed));
+
+struct bt_hci_rsp_le_read_iso_link_quality {
+	uint8_t  status;
+	uint16_t handle;
+	uint32_t tx_unacked_packets;
+	uint32_t tx_flushed_packets;
+	uint32_t tx_last_subevent_packets;
+	uint32_t retransmitted_packets;
+	uint32_t crc_error_packets;
+	uint32_t rx_unreceived_packets;
+	uint32_t duplicated_packets;
 } __attribute__ ((packed));
 
 #define BT_HCI_EVT_INQUIRY_COMPLETE		0x01
@@ -3677,7 +3731,7 @@ struct bt_hci_evt_le_big_sync_estabilished {
 
 #define BT_HCI_EVT_LE_BIG_SYNC_LOST		0x1e
 struct bt_hci_evt_le_big_sync_lost {
-	uint8_t  big_id;
+	uint8_t  big_handle;
 	uint8_t  reason;
 } __attribute__ ((packed));
 

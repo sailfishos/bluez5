@@ -12,9 +12,11 @@ client_bluetoothctl_SOURCES = client/main.c \
 					client/adv_monitor.c \
 					client/gatt.h client/gatt.c \
 					client/admin.h client/admin.c \
-					client/player.h client/player.c
-client_bluetoothctl_LDADD = gdbus/libgdbus-internal.la src/libshared-glib.la \
-				$(GLIB_LIBS) $(DBUS_LIBS) -lreadline
+					client/player.h client/player.c \
+					client/mgmt.h client/mgmt.c
+client_bluetoothctl_LDADD = lib/libbluetooth-internal.la \
+			gdbus/libgdbus-internal.la src/libshared-glib.la \
+			$(GLIB_LIBS) $(DBUS_LIBS) -lreadline
 endif
 
 if ZSH_COMPLETIONS
@@ -345,7 +347,14 @@ profiles_iap_iapd_SOURCES = profiles/iap/main.c
 profiles_iap_iapd_LDADD = gdbus/libgdbus-internal.la $(GLIB_LIBS) $(DBUS_LIBS)
 
 if MANPAGES
-man_MANS += tools/rctest.1 tools/l2ping.1 tools/btattach.1 tools/isotest.1
+man_MANS += tools/rctest.1 tools/l2ping.1 tools/btattach.1 tools/isotest.1 \
+		tools/btmgmt.1 client/bluetoothctl.1 \
+		client/bluetoothctl-mgmt.1 \
+		client/bluetoothctl-monitor.1 client/bluetoothctl-admin.1 \
+		client/bluetoothctl-advertise.1 client/bluetoothctl-endpoint.1 \
+		client/bluetoothctl-gatt.1 client/bluetoothctl-player.1 \
+		client/bluetoothctl-scan.1 client/bluetoothctl-transport.1
+
 endif
 
 if MESH
@@ -466,7 +475,17 @@ manual_pages += tools/hciattach.1 tools/hciconfig.1 \
 			tools/hcitool.1 tools/hcidump.1 \
 			tools/rfcomm.1 tools/sdptool.1 tools/ciptool.1 \
 			tools/rctest.1 tools/l2ping.1 tools/btattach.1 \
-			tools/bdaddr.1 tools/isotest.1
+			tools/bdaddr.1 tools/isotest.1 tools/btmgmt.1 \
+			client/bluetoothctl.1 \
+			client/bluetoothctl-mgmt.1 \
+			client/bluetoothctl-monitor.1 \
+			client/bluetoothctl-admin.1 \
+			client/bluetoothctl-advertise.1 \
+			client/bluetoothctl-endpoint.1 \
+			client/bluetoothctl-gatt.1 \
+			client/bluetoothctl-player.1 \
+			client/bluetoothctl-scan.1 \
+			client/bluetoothctl-transport.1
 
 if HID2HCI
 udevdir = $(UDEV_DIR)
@@ -505,7 +524,8 @@ tools_obexctl_SOURCES = tools/obexctl.c
 tools_obexctl_LDADD = gdbus/libgdbus-internal.la src/libshared-glib.la \
 			$(GLIB_LIBS) $(DBUS_LIBS) -lreadline
 
-tools_btmgmt_SOURCES = tools/btmgmt.c src/uuid-helper.c client/display.c
+tools_btmgmt_SOURCES = tools/btmgmt.c src/uuid-helper.c client/display.c \
+			client/mgmt.c
 tools_btmgmt_LDADD = lib/libbluetooth-internal.la src/libshared-mainloop.la \
 				-lreadline
 if DEPRECATED

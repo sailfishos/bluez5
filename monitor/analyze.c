@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
+#include <unistd.h>
 
 #include "lib/bluetooth.h"
 
@@ -27,6 +28,9 @@
 #include "monitor/display.h"
 #include "monitor/packet.h"
 #include "monitor/analyze.h"
+
+#define TIMEVAL_MSEC(_tv) \
+	(long long)((_tv)->tv_sec * 1000 + (_tv)->tv_usec / 1000)
 
 struct hci_dev {
 	uint16_t index;
@@ -55,45 +59,121 @@ struct hci_dev {
 #define CONN_LE_ACL	0x04
 #define CONN_LE_ISO	0x05
 
+struct hci_stats {
+	size_t bytes;
+	size_t num;
+	size_t num_comp;
+	struct packet_latency latency;
+	struct queue *plot;
+	uint16_t min;
+	uint16_t max;
+};
+
 struct hci_conn {
 	uint16_t handle;
+	uint16_t link;
 	uint8_t type;
 	uint8_t bdaddr[6];
 	bool setup_seen;
 	bool terminated;
-	unsigned long rx_num;
-	unsigned long tx_num;
-	unsigned long tx_num_comp;
-	size_t tx_bytes;
 	struct queue *tx_queue;
-	struct timeval tx_lat_min;
-	struct timeval tx_lat_max;
-	struct timeval tx_lat_med;
-	uint16_t tx_pkt_min;
-	uint16_t tx_pkt_max;
-	uint16_t tx_pkt_med;
+	struct timeval last_rx;
 	struct queue *chan_list;
+	struct hci_stats rx;
+	struct hci_stats tx;
+};
+
+struct hci_conn_tx {
+	struct timeval tv;
+	struct l2cap_chan *chan;
+};
+
+struct plot {
+	long long x_msec;
+	size_t y_count;
 };
 
 struct l2cap_chan {
 	uint16_t cid;
 	uint16_t psm;
 	bool out;
-	unsigned long num;
+	struct timeval last_rx;
+	struct hci_stats rx;
+	struct hci_stats tx;
 };
 
 static struct queue *dev_list;
+
+static void tmp_write(void *data, void *user_data)
+{
+	struct plot *plot = data;
+	FILE *tmp = user_data;
+
+	fprintf(tmp, "%lld %zu\n", plot->x_msec, plot->y_count);
+}
+
+static void plot_draw(struct queue *queue, const char *tittle)
+{
+	FILE *gplot;
+
+	if (queue_length(queue) < 2)
+		return;
+
+	gplot = popen("gnuplot", "w");
+	if (!gplot)
+		return;
+
+	fprintf(gplot, "$data << EOD\n");
+	queue_foreach(queue, tmp_write, gplot);
+	fprintf(gplot, "EOD\n");
+
+	fprintf(gplot, "set terminal dumb enhanced ansi\n");
+	fprintf(gplot, "set xlabel 'Latency (ms)'\n");
+	fprintf(gplot, "set tics out nomirror\n");
+	fprintf(gplot, "set log y\n");
+	fprintf(gplot, "set yrange [0.5:*]\n");
+	fprintf(gplot, "plot $data using 1:2 t '%s' w impulses\n", tittle);
+	fflush(gplot);
+
+	pclose(gplot);
+}
+
+static void print_stats(struct hci_stats *stats, const char *label)
+{
+	if (!stats->num)
+		return;
+
+	print_field("%s packets: %zu/%zu", label, stats->num, stats->num_comp);
+	print_field("%s Latency: %lld-%lld msec (~%lld msec)", label,
+			TV_MSEC(stats->latency.min),
+			TV_MSEC(stats->latency.max),
+			TV_MSEC(stats->latency.med));
+	print_field("%s size: %u-%u octets (~%zd octets)", label,
+			stats->min, stats->max, stats->bytes / stats->num);
+
+	if (TV_MSEC(stats->latency.total))
+		print_field("%s speed: ~%lld Kb/s", label,
+			stats->bytes * 8 / TV_MSEC(stats->latency.total));
+
+	plot_draw(stats->plot, label);
+}
 
 static void chan_destroy(void *data)
 {
 	struct l2cap_chan *chan = data;
 
-	printf("    Found %s L2CAP channel with CID %u\n",
+	if (!chan->rx.num && !chan->tx.num)
+		goto done;
+
+	printf("  Found %s L2CAP channel with CID %u\n",
 					chan->out ? "TX" : "RX", chan->cid);
 	if (chan->psm)
-		printf("      PSM %u\n", chan->psm);
-	printf("      %lu packets\n", chan->num);
+		print_field("PSM %u", chan->psm);
 
+	print_stats(&chan->rx, "RX");
+	print_stats(&chan->tx, "TX");
+
+done:
 	free(chan);
 }
 
@@ -106,6 +186,8 @@ static struct l2cap_chan *chan_alloc(struct hci_conn *conn, uint16_t cid,
 
 	chan->cid = cid;
 	chan->out = out;
+	chan->rx.plot = queue_new();
+	chan->tx.plot = queue_new();
 
 	return chan;
 }
@@ -161,32 +243,16 @@ static void conn_destroy(void *data)
 		break;
 	}
 
-	if (conn->tx_num > 0)
-		conn->tx_pkt_med = conn->tx_bytes / conn->tx_num;
-
 	printf("  Found %s connection with handle %u\n", str, conn->handle);
 	/* TODO: Store address type */
 	packet_print_addr("Address", conn->bdaddr, 0x00);
 	if (!conn->setup_seen)
 		print_field("Connection setup missing");
-	print_field("%lu RX packets", conn->rx_num);
-	print_field("%lu TX packets", conn->tx_num);
-	print_field("%lu TX completed packets", conn->tx_num_comp);
-	print_field("%lld msec min latency",
-			(long long)
-			(conn->tx_lat_min.tv_sec * 1000 +
-			conn->tx_lat_min.tv_usec / 1000));
-	print_field("%lld msec max latency",
-			(long long)
-			(conn->tx_lat_max.tv_sec * 1000 +
-			conn->tx_lat_max.tv_usec / 1000));
-	print_field("%lld msec median latency",
-			(long long)
-			(conn->tx_lat_med.tv_sec * 1000 +
-			conn->tx_lat_med.tv_usec / 1000));
-	print_field("%u octets TX min packet size", conn->tx_pkt_min);
-	print_field("%u octets TX max packet size", conn->tx_pkt_max);
-	print_field("%u octets TX median packet size", conn->tx_pkt_med);
+	print_stats(&conn->rx, "RX");
+	print_stats(&conn->tx, "TX");
+
+	queue_destroy(conn->rx.plot, free);
+	queue_destroy(conn->tx.plot, free);
 	queue_destroy(conn->chan_list, chan_destroy);
 
 	queue_destroy(conn->tx_queue, free);
@@ -203,6 +269,8 @@ static struct hci_conn *conn_alloc(struct hci_dev *dev, uint16_t handle,
 	conn->handle = handle;
 	conn->type = type;
 	conn->tx_queue = queue_new();
+	conn->tx.plot = queue_new();
+	conn->rx.plot = queue_new();
 
 	conn->chan_list = queue_new();
 
@@ -223,6 +291,20 @@ static struct hci_conn *conn_lookup(struct hci_dev *dev, uint16_t handle)
 						UINT_TO_PTR(handle));
 }
 
+static bool link_match_handle(const void *a, const void *b)
+{
+	const struct hci_conn *conn = a;
+	uint16_t handle = PTR_TO_UINT(b);
+
+	return (conn->link == handle && !conn->terminated);
+}
+
+static struct hci_conn *link_lookup(struct hci_dev *dev, uint16_t handle)
+{
+	return queue_find(dev->conn_list, link_match_handle,
+						UINT_TO_PTR(handle));
+}
+
 static struct hci_conn *conn_lookup_type(struct hci_dev *dev, uint16_t handle,
 								uint8_t type)
 {
@@ -230,7 +312,7 @@ static struct hci_conn *conn_lookup_type(struct hci_dev *dev, uint16_t handle,
 
 	conn = queue_find(dev->conn_list, conn_match_handle,
 						UINT_TO_PTR(handle));
-	if (!conn || conn->type != type) {
+	if (!conn || (type && conn->type != type)) {
 		conn = conn_alloc(dev, handle, type);
 		queue_push_tail(dev->conn_list, conn);
 	}
@@ -447,6 +529,70 @@ static void evt_cmd_complete(struct hci_dev *dev, struct timeval *tv,
 	}
 }
 
+static bool match_plot_latency(const void *data, const void *user_data)
+{
+	const struct plot *plot = data;
+	const struct timeval *latency = user_data;
+
+	return TIMEVAL_MSEC(latency) == plot->x_msec;
+}
+
+static void plot_add(struct queue *queue, struct timeval *latency,
+						uint16_t count)
+{
+	struct plot *plot;
+
+	/* Use LRU ordering */
+	plot = queue_remove_if(queue, match_plot_latency, latency);
+	if (plot) {
+		plot->y_count += count;
+		queue_push_head(queue, plot);
+		return;
+	}
+
+	plot = new0(struct plot, 1);
+	plot->x_msec = TIMEVAL_MSEC(latency);
+	plot->y_count = count;
+
+	queue_push_tail(queue, plot);
+}
+
+static void evt_le_conn_complete(struct hci_dev *dev, struct timeval *tv,
+					struct iovec *iov)
+{
+	const struct bt_hci_evt_le_conn_complete *evt;
+	struct hci_conn *conn;
+
+	evt = util_iov_pull_mem(iov, sizeof(*evt));
+	if (!evt || evt->status)
+		return;
+
+	conn = conn_lookup_type(dev, le16_to_cpu(evt->handle), CONN_LE_ACL);
+	if (!conn)
+		return;
+
+	memcpy(conn->bdaddr, evt->peer_addr, 6);
+	conn->setup_seen = true;
+}
+
+static void evt_le_enh_conn_complete(struct hci_dev *dev, struct timeval *tv,
+					struct iovec *iov)
+{
+	const struct bt_hci_evt_le_enhanced_conn_complete *evt;
+	struct hci_conn *conn;
+
+	evt = util_iov_pull_mem(iov, sizeof(*evt));
+	if (!evt || evt->status)
+		return;
+
+	conn = conn_lookup_type(dev, le16_to_cpu(evt->handle), CONN_LE_ACL);
+	if (!conn)
+		return;
+
+	memcpy(conn->bdaddr, evt->peer_addr, 6);
+	conn->setup_seen = true;
+}
+
 static void evt_num_completed_packets(struct hci_dev *dev, struct timeval *tv,
 					const void *data, uint16_t size)
 {
@@ -461,7 +607,8 @@ static void evt_num_completed_packets(struct hci_dev *dev, struct timeval *tv,
 		uint16_t count = get_le16(data + 2);
 		struct hci_conn *conn;
 		struct timeval res;
-		struct timeval *last_tx;
+		struct hci_conn_tx *last_tx;
+		int j;
 
 		data += 4;
 		size -= 4;
@@ -470,48 +617,165 @@ static void evt_num_completed_packets(struct hci_dev *dev, struct timeval *tv,
 		if (!conn)
 			continue;
 
-		conn->tx_num_comp += count;
+		conn->tx.num_comp += count;
 
-		last_tx = queue_pop_head(conn->tx_queue);
-		if (last_tx) {
-			timersub(tv, last_tx, &res);
+		for (j = 0; j < count; j++) {
+			last_tx = queue_pop_head(conn->tx_queue);
+			if (last_tx) {
+				struct l2cap_chan *chan = last_tx->chan;
 
-			if ((!timerisset(&conn->tx_lat_min) ||
-					timercmp(&res, &conn->tx_lat_min, <)) &&
-					res.tv_sec >= 0 && res.tv_usec >= 0)
-				conn->tx_lat_min = res;
+				timersub(tv, &last_tx->tv, &res);
 
-			if (!timerisset(&conn->tx_lat_max) ||
-					timercmp(&res, &conn->tx_lat_max, >))
-				conn->tx_lat_max = res;
+				packet_latency_add(&conn->tx.latency, &res);
+				plot_add(conn->tx.plot, &res, 1);
 
-			if (timerisset(&conn->tx_lat_med)) {
-				struct timeval tmp;
-
-				timeradd(&conn->tx_lat_med, &res, &tmp);
-
-				tmp.tv_sec /= 2;
-				tmp.tv_usec /= 2;
-				if (tmp.tv_sec % 2) {
-					tmp.tv_usec += 500000;
-					if (tmp.tv_usec >= 1000000) {
-						tmp.tv_sec++;
-						tmp.tv_usec -= 1000000;
-					}
+				if (chan) {
+					chan->tx.num_comp += count;
+					packet_latency_add(&chan->tx.latency,
+									&res);
+					plot_add(chan->tx.plot, &res, 1);
 				}
 
-				conn->tx_lat_med = tmp;
-			} else
-				conn->tx_lat_med = res;
-
-			free(last_tx);
+				free(last_tx);
+			}
 		}
+	}
+}
+
+static void evt_sync_conn_complete(struct hci_dev *dev, struct timeval *tv,
+					const void *data, uint16_t size)
+{
+	const struct bt_hci_evt_sync_conn_complete *evt = data;
+	struct hci_conn *conn;
+
+	if (evt->status)
+		return;
+
+	conn = conn_lookup_type(dev, le16_to_cpu(evt->handle), evt->link_type);
+	if (!conn)
+		return;
+
+	memcpy(conn->bdaddr, evt->bdaddr, 6);
+	conn->setup_seen = true;
+}
+
+static void evt_le_cis_established(struct hci_dev *dev, struct timeval *tv,
+					struct iovec *iov)
+{
+	const struct bt_hci_evt_le_cis_established *evt;
+	struct hci_conn *conn, *link;
+
+	evt = util_iov_pull_mem(iov, sizeof(*evt));
+	if (!evt || evt->status)
+		return;
+
+	conn = conn_lookup_type(dev, le16_to_cpu(evt->conn_handle),
+						CONN_LE_ISO);
+	if (!conn)
+		return;
+
+	conn->setup_seen = true;
+
+	link = link_lookup(dev, conn->handle);
+	if (link)
+		memcpy(conn->bdaddr, link->bdaddr, 6);
+}
+
+static void evt_le_cis_req(struct hci_dev *dev, struct timeval *tv,
+					struct iovec *iov)
+{
+	const struct bt_hci_evt_le_cis_req *evt;
+	struct hci_conn *conn;
+
+	evt = util_iov_pull_mem(iov, sizeof(*evt));
+	if (!evt)
+		return;
+
+	conn = conn_lookup(dev, le16_to_cpu(evt->acl_handle));
+	if (!conn)
+		return;
+
+	conn->link = le16_to_cpu(evt->cis_handle);
+}
+
+static void evt_le_big_complete(struct hci_dev *dev, struct timeval *tv,
+					struct iovec *iov)
+{
+	const struct bt_hci_evt_le_big_complete *evt;
+	int i;
+
+	evt = util_iov_pull_mem(iov, sizeof(*evt));
+	if (!evt || evt->status)
+		return;
+
+	for (i = 0; i < evt->num_bis; i++) {
+		struct hci_conn *conn;
+		uint16_t handle;
+
+		if (!util_iov_pull_le16(iov, &handle))
+			return;
+
+		conn = conn_lookup_type(dev, handle, CONN_LE_ISO);
+		if (conn)
+			conn->setup_seen = true;
+	}
+}
+
+static void evt_le_big_sync_established(struct hci_dev *dev, struct timeval *tv,
+					struct iovec *iov)
+{
+	const struct bt_hci_evt_le_big_sync_estabilished *evt;
+	int i;
+
+	evt = util_iov_pull_mem(iov, sizeof(*evt));
+	if (!evt || evt->status)
+		return;
+
+	for (i = 0; i < evt->num_bis; i++) {
+		struct hci_conn *conn;
+		uint16_t handle;
+
+		if (!util_iov_pull_le16(iov, &handle))
+			return;
+
+		conn = conn_lookup_type(dev, handle, CONN_LE_ISO);
+		if (conn)
+			conn->setup_seen = true;
 	}
 }
 
 static void evt_le_meta_event(struct hci_dev *dev, struct timeval *tv,
 					const void *data, uint16_t size)
 {
+	struct iovec iov = {
+		.iov_base = (void *)data,
+		.iov_len = size,
+	};
+	uint8_t subevt;
+
+	if (!util_iov_pull_u8(&iov, &subevt))
+		return;
+
+	switch (subevt) {
+	case BT_HCI_EVT_LE_CONN_COMPLETE:
+		evt_le_conn_complete(dev, tv, &iov);
+		break;
+	case BT_HCI_EVT_LE_ENHANCED_CONN_COMPLETE:
+		evt_le_enh_conn_complete(dev, tv, &iov);
+		break;
+	case BT_HCI_EVT_LE_CIS_ESTABLISHED:
+		evt_le_cis_established(dev, tv, &iov);
+		break;
+	case BT_HCI_EVT_LE_CIS_REQ:
+		evt_le_cis_req(dev, tv, &iov);
+		break;
+	case BT_HCI_EVT_LE_BIG_COMPLETE:
+		evt_le_big_complete(dev, tv, &iov);
+		break;
+	case BT_HCI_EVT_LE_BIG_SYNC_ESTABILISHED:
+		evt_le_big_sync_established(dev, tv, &iov);
+		break;
+	}
 }
 
 static void event_pkt(struct timeval *tv, uint16_t index,
@@ -543,9 +807,69 @@ static void event_pkt(struct timeval *tv, uint16_t index,
 	case BT_HCI_EVT_NUM_COMPLETED_PACKETS:
 		evt_num_completed_packets(dev, tv, data, size);
 		break;
+	case BT_HCI_EVT_SYNC_CONN_COMPLETE:
+		evt_sync_conn_complete(dev, tv, data, size);
+		break;
 	case BT_HCI_EVT_LE_META_EVENT:
 		evt_le_meta_event(dev, tv, data, size);
 		break;
+	}
+}
+
+static void stats_add(struct hci_stats *stats, uint16_t size)
+{
+	stats->num++;
+	stats->bytes += size;
+
+	if (!stats->min || size < stats->min)
+		stats->min = size;
+	if (!stats->max || size > stats->max)
+		stats->max = size;
+}
+
+static void conn_pkt_tx(struct hci_conn *conn, struct timeval *tv,
+				uint16_t size, struct l2cap_chan *chan)
+{
+	struct hci_conn_tx *last_tx;
+
+	last_tx = new0(struct hci_conn_tx, 1);
+	memcpy(last_tx, tv, sizeof(*tv));
+	last_tx->chan = chan;
+	queue_push_tail(conn->tx_queue, last_tx);
+
+	stats_add(&conn->tx, size);
+
+	if (chan)
+		stats_add(&chan->tx, size);
+}
+
+static void conn_pkt_rx(struct hci_conn *conn, struct timeval *tv,
+				uint16_t size, struct l2cap_chan *chan)
+{
+	struct timeval res;
+
+	if (timerisset(&conn->last_rx)) {
+		timersub(tv, &conn->last_rx, &res);
+		packet_latency_add(&conn->rx.latency, &res);
+		plot_add(conn->rx.plot, &res, 1);
+	}
+
+	conn->last_rx = *tv;
+
+	stats_add(&conn->rx, size);
+	conn->rx.num_comp++;
+
+	if (chan) {
+		if (timerisset(&chan->last_rx)) {
+			timersub(tv, &chan->last_rx, &res);
+			packet_latency_add(&chan->rx.latency, &res);
+			plot_add(chan->rx.plot, &res, 1);
+		}
+
+		chan->last_rx = *tv;
+
+		stats_add(&chan->rx, size);
+		chan->rx.num_comp++;
 	}
 }
 
@@ -555,7 +879,7 @@ static void acl_pkt(struct timeval *tv, uint16_t index, bool out,
 	const struct bt_hci_acl_hdr *hdr = data;
 	struct hci_dev *dev;
 	struct hci_conn *conn;
-	struct l2cap_chan *chan;
+	struct l2cap_chan *chan = NULL;
 	uint16_t cid;
 
 	data += sizeof(*hdr);
@@ -568,8 +892,7 @@ static void acl_pkt(struct timeval *tv, uint16_t index, bool out,
 	dev->num_hci++;
 	dev->num_acl++;
 
-	conn = conn_lookup_type(dev, le16_to_cpu(hdr->handle) & 0x0fff,
-								CONN_BR_ACL);
+	conn = conn_lookup_type(dev, le16_to_cpu(hdr->handle) & 0x0fff, 0x00);
 	if (!conn)
 		return;
 
@@ -578,35 +901,24 @@ static void acl_pkt(struct timeval *tv, uint16_t index, bool out,
 	case 0x02:
 		cid = get_le16(data + 2);
 		chan = chan_lookup(conn, cid, out);
-		if (chan)
-			chan->num++;
 		if (cid == 1)
 			l2cap_sig(conn, out, data + 4, size - 4);
 		break;
 	}
 
 	if (out) {
-		struct timeval *last_tx;
-
-		conn->tx_num++;
-		last_tx = new0(struct timeval, 1);
-		memcpy(last_tx, tv, sizeof(*tv));
-		queue_push_tail(conn->tx_queue, last_tx);
-		conn->tx_bytes += size;
-
-		if (!conn->tx_pkt_min || size < conn->tx_pkt_min)
-			conn->tx_pkt_min = size;
-		if (!conn->tx_pkt_max || size > conn->tx_pkt_max)
-			conn->tx_pkt_max = size;
+		conn_pkt_tx(conn, tv, size, chan);
 	} else {
-		conn->rx_num++;
+		conn_pkt_rx(conn, tv, size, chan);
 	}
 }
 
-static void sco_pkt(struct timeval *tv, uint16_t index,
+static void sco_pkt(struct timeval *tv, uint16_t index, bool out,
 					const void *data, uint16_t size)
 {
+	const struct bt_hci_acl_hdr *hdr = data;
 	struct hci_dev *dev;
+	struct hci_conn *conn;
 
 	dev = dev_lookup(index);
 	if (!dev)
@@ -614,6 +926,17 @@ static void sco_pkt(struct timeval *tv, uint16_t index,
 
 	dev->num_hci++;
 	dev->num_sco++;
+
+	conn = conn_lookup_type(dev, le16_to_cpu(hdr->handle) & 0x0fff,
+								CONN_BR_SCO);
+	if (!conn)
+		return;
+
+	if (out) {
+		conn_pkt_tx(conn, tv, size - sizeof(*hdr), NULL);
+	} else {
+		conn_pkt_rx(conn, tv, size - sizeof(*hdr), NULL);
+	}
 }
 
 static void info_index(struct timeval *tv, uint16_t index,
@@ -677,9 +1000,11 @@ static void ctrl_msg(struct timeval *tv, uint16_t index,
 	dev->ctrl_msg++;
 }
 
-static void iso_pkt(struct timeval *tv, uint16_t index,
+static void iso_pkt(struct timeval *tv, uint16_t index, bool out,
 					const void *data, uint16_t size)
 {
+	const struct bt_hci_iso_hdr *hdr = data;
+	struct hci_conn *conn;
 	struct hci_dev *dev;
 
 	dev = dev_lookup(index);
@@ -688,6 +1013,17 @@ static void iso_pkt(struct timeval *tv, uint16_t index,
 
 	dev->num_hci++;
 	dev->num_iso++;
+
+	conn = conn_lookup_type(dev, le16_to_cpu(hdr->handle) & 0x0fff,
+								CONN_LE_ISO);
+	if (!conn)
+		return;
+
+	if (out) {
+		conn_pkt_tx(conn, tv, size - sizeof(*hdr), NULL);
+	} else {
+		conn_pkt_rx(conn, tv, size - sizeof(*hdr), NULL);
+	}
 }
 
 static void unknown_opcode(struct timeval *tv, uint16_t index,
@@ -755,8 +1091,10 @@ void analyze_trace(const char *path)
 			acl_pkt(&tv, index, false, buf, pktlen);
 			break;
 		case BTSNOOP_OPCODE_SCO_TX_PKT:
+			sco_pkt(&tv, index, true, buf, pktlen);
+			break;
 		case BTSNOOP_OPCODE_SCO_RX_PKT:
-			sco_pkt(&tv, index, buf, pktlen);
+			sco_pkt(&tv, index, false, buf, pktlen);
 			break;
 		case BTSNOOP_OPCODE_OPEN_INDEX:
 		case BTSNOOP_OPCODE_CLOSE_INDEX:
@@ -780,8 +1118,10 @@ void analyze_trace(const char *path)
 			ctrl_msg(&tv, index, buf, pktlen);
 			break;
 		case BTSNOOP_OPCODE_ISO_TX_PKT:
+			iso_pkt(&tv, index, true, buf, pktlen);
+			break;
 		case BTSNOOP_OPCODE_ISO_RX_PKT:
-			iso_pkt(&tv, index, buf, pktlen);
+			iso_pkt(&tv, index, false, buf, pktlen);
 			break;
 		default:
 			unknown_opcode(&tv, index, buf, pktlen);

@@ -1,3 +1,29 @@
+ver 5.72:
+	Fix issue with BAP and handling stream IO linking.
+	Fix issue with BAP and setup of multiple streams per endpoint.
+	Fix issue with AVDTP and potential incorrect transaction label.
+	Fix issue with A2DP and handling crash on suspend.
+	Fix issue with GATT database and an invalid pointer.
+	Add support for AICS service.
+
+ver 5.71:
+	Fix issue with not registering CSIS service.
+	Fix issue with registering pairing callbacks.
+	Fix issue with corruption during discovery filter parsing.
+
+ver 5.70:
+	Fix issue with not sending GATT confirmations.
+	Fix issue with not handling initiator properly.
+	Fix issue with not checking PBAP counter length.
+	Add support for MICP profile and MICS service.
+
+ver 5.69:
+	Fix issue with BAP enabling state correctly when resuming.
+	Fix issue with detaching source ASEs only after Stop Ready.
+	Fix issue with handling VCP audio location and descriptor.
+	Fix issue with generating IRK for adapter with privacy enabled.
+	Add support for BAP broadcast sink.
+
 ver 5.68:
 	Fix issue with A2DP and handling of Transport.Acquire.
 

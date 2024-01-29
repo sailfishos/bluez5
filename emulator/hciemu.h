@@ -39,6 +39,8 @@ void hciemu_unref(struct hciemu *hciemu);
 struct hciemu_client *hciemu_get_client(struct hciemu *hciemu, int num);
 struct bthost *hciemu_client_host(struct hciemu_client *client);
 const uint8_t *hciemu_client_bdaddr(struct hciemu_client *client);
+bool hciemu_set_client_bdaddr(struct hciemu_client *client,
+				const uint8_t *bdaddr);
 
 typedef void (*hciemu_debug_func_t)(const char *str, void *user_data);
 typedef void (*hciemu_destroy_func_t)(void *user_data);
@@ -47,6 +49,9 @@ bool hciemu_set_debug(struct hciemu *hciemu, hciemu_debug_func_t callback,
 
 struct vhci *hciemu_get_vhci(struct hciemu *hciemu);
 struct bthost *hciemu_client_get_host(struct hciemu *hciemu);
+
+/* Process pending client events before new VHCI events */
+void hciemu_flush_client_events(struct hciemu *hciemu);
 
 const char *hciemu_get_address(struct hciemu *hciemu);
 uint8_t *hciemu_get_features(struct hciemu *hciemu);

@@ -675,8 +675,15 @@ static bool print_ase_codec(const struct l2cap_frame *frame)
 	return true;
 }
 
+static void print_ltv(const char *str, void *user_data)
+{
+	const char *label = user_data;
+
+	print_field("%s: %s", label, str);
+}
+
 static bool print_ase_lv(const struct l2cap_frame *frame, const char *label,
-			struct packet_ltv_decoder *decoder, size_t decoder_len)
+			struct util_ltv_debugger *decoder, size_t decoder_len)
 {
 	struct bt_hci_lv_data *lv;
 
@@ -691,13 +698,14 @@ static bool print_ase_lv(const struct l2cap_frame *frame, const char *label,
 		return false;
 	}
 
-	packet_print_ltv(label, lv->data, lv->len, decoder, decoder_len);
+	util_debug_ltv(lv->data, lv->len, decoder, decoder_len, print_ltv,
+			(void *) label);
 
 	return true;
 }
 
 static bool print_ase_cc(const struct l2cap_frame *frame, const char *label,
-			struct packet_ltv_decoder *decoder, size_t decoder_len)
+			struct util_ltv_debugger *decoder, size_t decoder_len)
 {
 	return print_ase_lv(frame, label, decoder, decoder_len);
 }
@@ -744,7 +752,8 @@ done:
 		print_hex_field("    Data", frame->data, frame->size);
 }
 
-static void ase_decode_preferred_context(const uint8_t *data, uint8_t len)
+static void ase_debug_preferred_context(const uint8_t *data, uint8_t len,
+				util_debug_func_t func, void *user_data)
 {
 	struct l2cap_frame frame;
 
@@ -753,7 +762,8 @@ static void ase_decode_preferred_context(const uint8_t *data, uint8_t len)
 	print_context(&frame, "      Preferred Context");
 }
 
-static void ase_decode_context(const uint8_t *data, uint8_t len)
+static void ase_debug_context(const uint8_t *data, uint8_t len,
+				util_debug_func_t func, void *user_data)
 {
 	struct l2cap_frame frame;
 
@@ -762,7 +772,8 @@ static void ase_decode_context(const uint8_t *data, uint8_t len)
 	print_context(&frame, "      Context");
 }
 
-static void ase_decode_program_info(const uint8_t *data, uint8_t len)
+static void ase_debug_program_info(const uint8_t *data, uint8_t len,
+				util_debug_func_t func, void *user_data)
 {
 	struct l2cap_frame frame;
 	const char *str;
@@ -782,7 +793,8 @@ done:
 		print_hex_field("    Data", frame.data, frame.size);
 }
 
-static void ase_decode_language(const uint8_t *data, uint8_t len)
+static void ase_debug_language(const uint8_t *data, uint8_t len,
+				util_debug_func_t func, void *user_data)
 {
 	struct l2cap_frame frame;
 	uint32_t value;
@@ -801,16 +813,17 @@ done:
 		print_hex_field("    Data", frame.data, frame.size);
 }
 
-struct packet_ltv_decoder ase_metadata_table[] = {
-	LTV_DEC(0x01, ase_decode_preferred_context),
-	LTV_DEC(0x02, ase_decode_context),
-	LTV_DEC(0x03, ase_decode_program_info),
-	LTV_DEC(0x04, ase_decode_language)
+struct util_ltv_debugger ase_metadata_table[] = {
+	UTIL_LTV_DEBUG(0x01, ase_debug_preferred_context),
+	UTIL_LTV_DEBUG(0x02, ase_debug_context),
+	UTIL_LTV_DEBUG(0x03, ase_debug_program_info),
+	UTIL_LTV_DEBUG(0x04, ase_debug_language)
 };
 
 static bool print_ase_metadata(const struct l2cap_frame *frame)
 {
-	return print_ase_lv(frame, "    Metadata", NULL, 0);
+	return print_ase_lv(frame, "    Metadata", ase_metadata_table,
+					ARRAY_SIZE(ase_metadata_table));
 }
 
 static const struct bitfield_data pac_freq_table[] = {
@@ -833,7 +846,8 @@ static const struct bitfield_data pac_freq_table[] = {
 	{ }
 };
 
-static void pac_decode_freq(const uint8_t *data, uint8_t len)
+static void pac_decode_freq(const uint8_t *data, uint8_t len,
+				util_debug_func_t func, void *user_data)
 {
 	struct l2cap_frame frame;
 	uint16_t value;
@@ -870,7 +884,8 @@ static const struct bitfield_data pac_duration_table[] = {
 	{ }
 };
 
-static void pac_decode_duration(const uint8_t *data, uint8_t len)
+static void pac_decode_duration(const uint8_t *data, uint8_t len,
+				util_debug_func_t func, void *user_data)
 {
 	struct l2cap_frame frame;
 	uint8_t value;
@@ -907,7 +922,8 @@ static const struct bitfield_data pac_channel_table[] = {
 	{ }
 };
 
-static void pac_decode_channels(const uint8_t *data, uint8_t len)
+static void pac_decode_channels(const uint8_t *data, uint8_t len,
+				util_debug_func_t func, void *user_data)
 {
 	struct l2cap_frame frame;
 	uint8_t value;
@@ -932,7 +948,8 @@ done:
 		print_hex_field("    Data", frame.data, frame.size);
 }
 
-static void pac_decode_frame_length(const uint8_t *data, uint8_t len)
+static void pac_decode_frame_length(const uint8_t *data, uint8_t len,
+				util_debug_func_t func, void *user_data)
 {
 	struct l2cap_frame frame;
 	uint16_t min, max;
@@ -957,7 +974,8 @@ done:
 		print_hex_field("    Data", frame.data, frame.size);
 }
 
-static void pac_decode_sdu(const uint8_t *data, uint8_t len)
+static void pac_decode_sdu(const uint8_t *data, uint8_t len,
+				util_debug_func_t func, void *user_data)
 {
 	struct l2cap_frame frame;
 	uint8_t value;
@@ -976,12 +994,12 @@ done:
 		print_hex_field("    Data", frame.data, frame.size);
 }
 
-struct packet_ltv_decoder pac_cap_table[] = {
-	LTV_DEC(0x01, pac_decode_freq),
-	LTV_DEC(0x02, pac_decode_duration),
-	LTV_DEC(0x03, pac_decode_channels),
-	LTV_DEC(0x04, pac_decode_frame_length),
-	LTV_DEC(0x05, pac_decode_sdu)
+struct util_ltv_debugger pac_cap_table[] = {
+	UTIL_LTV_DEBUG(0x01, pac_decode_freq),
+	UTIL_LTV_DEBUG(0x02, pac_decode_duration),
+	UTIL_LTV_DEBUG(0x03, pac_decode_channels),
+	UTIL_LTV_DEBUG(0x04, pac_decode_frame_length),
+	UTIL_LTV_DEBUG(0x05, pac_decode_sdu)
 };
 
 static void print_pac(const struct l2cap_frame *frame)
@@ -1117,7 +1135,8 @@ static bool print_ase_pd(const struct l2cap_frame *frame, const char *label)
 	return true;
 }
 
-static void ase_decode_freq(const uint8_t *data, uint8_t len)
+static void ase_debug_freq(const uint8_t *data, uint8_t len,
+				util_debug_func_t func, void *user_data)
 {
 	struct l2cap_frame frame;
 	uint8_t value;
@@ -1179,7 +1198,8 @@ done:
 		print_hex_field("    Data", frame.data, frame.size);
 }
 
-static void ase_decode_duration(const uint8_t *data, uint8_t len)
+static void ase_debug_duration(const uint8_t *data, uint8_t len,
+				util_debug_func_t func, void *user_data)
 {
 	struct l2cap_frame frame;
 	uint8_t value;
@@ -1266,7 +1286,8 @@ done:
 		print_hex_field("  Data", frame->data, frame->size);
 }
 
-static void ase_decode_location(const uint8_t *data, uint8_t len)
+static void ase_debug_location(const uint8_t *data, uint8_t len,
+				util_debug_func_t func, void *user_data)
 {
 	struct l2cap_frame frame;
 
@@ -1275,7 +1296,8 @@ static void ase_decode_location(const uint8_t *data, uint8_t len)
 	print_location(&frame);
 }
 
-static void ase_decode_frame_length(const uint8_t *data, uint8_t len)
+static void ase_debug_frame_length(const uint8_t *data, uint8_t len,
+				util_debug_func_t func, void *user_data)
 {
 	struct l2cap_frame frame;
 	uint16_t value;
@@ -1294,7 +1316,8 @@ done:
 		print_hex_field("    Data", frame.data, frame.size);
 }
 
-static void ase_decode_blocks(const uint8_t *data, uint8_t len)
+static void ase_debug_blocks(const uint8_t *data, uint8_t len,
+				util_debug_func_t func, void *user_data)
 {
 	struct l2cap_frame frame;
 	uint8_t value;
@@ -1313,12 +1336,12 @@ done:
 		print_hex_field("    Data", frame.data, frame.size);
 }
 
-struct packet_ltv_decoder ase_cc_table[] = {
-	LTV_DEC(0x01, ase_decode_freq),
-	LTV_DEC(0x02, ase_decode_duration),
-	LTV_DEC(0x03, ase_decode_location),
-	LTV_DEC(0x04, ase_decode_frame_length),
-	LTV_DEC(0x05, ase_decode_blocks)
+struct util_ltv_debugger ase_cc_table[] = {
+	UTIL_LTV_DEBUG(0x01, ase_debug_freq),
+	UTIL_LTV_DEBUG(0x02, ase_debug_duration),
+	UTIL_LTV_DEBUG(0x03, ase_debug_location),
+	UTIL_LTV_DEBUG(0x04, ase_debug_frame_length),
+	UTIL_LTV_DEBUG(0x05, ase_debug_blocks)
 };
 
 static void print_ase_config(const struct l2cap_frame *frame)
@@ -2745,8 +2768,9 @@ static const struct big_enc_decoder {
 };
 
 static bool print_subgroup_lv(const struct l2cap_frame *frame,
-		const char *label, struct packet_ltv_decoder *decoder,
-		size_t decoder_len)
+				const char *label,
+				struct util_ltv_debugger *debugger,
+				size_t debugger_len)
 {
 	struct bt_hci_lv_data *lv;
 
@@ -2761,7 +2785,8 @@ static bool print_subgroup_lv(const struct l2cap_frame *frame,
 		return false;
 	}
 
-	packet_print_ltv(label, lv->data, lv->len, decoder, decoder_len);
+	util_debug_ltv(lv->data, lv->len, debugger, debugger_len,
+			       print_ltv, (void *)label);
 
 	return true;
 }
@@ -3170,6 +3195,140 @@ static void bcast_audio_scan_cp_write(const struct l2cap_frame *frame)
 	print_bcast_audio_scan_cp_cmd(frame);
 }
 
+static const struct bitfield_data gmap_role_table[] = {
+	{  0, "Unicast Game Gateway (UGG) (0x0001)"	},
+	{  1, "Unicast Game Terminal (UGT) (0x0002)"	},
+	{  2, "Broadcast Game Sender (BGS) (0x0004)"	},
+	{  3, "Broadcast Game Receiver (BGR) (0x0008)"	},
+	{ }
+};
+
+static void gmap_role_read(const struct l2cap_frame *frame)
+{
+	uint8_t role;
+	uint8_t mask;
+
+	if (!l2cap_frame_get_u8((void *)frame, &role)) {
+		print_text(COLOR_ERROR, "    invalid size");
+		return;
+	}
+
+	print_field("    Role: 0x%2.2x", role);
+
+	mask = print_bitfield(6, role, gmap_role_table);
+	if (mask)
+		print_text(COLOR_WHITE_BG, "    Unknown fields (0x%2.2x)",
+								mask);
+}
+
+static const struct bitfield_data ugg_features_table[] = {
+	{  0, "UGG Multiplex (0x0001)"	},
+	{  1, "UGG 96 kbps Source (0x0002)"	},
+	{  2, "UGG Multilink (0x0004)"	},
+	{ }
+};
+
+static void ugg_features_read(const struct l2cap_frame *frame)
+{
+	uint8_t value;
+	uint8_t mask;
+
+	if (!l2cap_frame_get_u8((void *)frame, &value)) {
+		print_text(COLOR_ERROR, "    invalid size");
+		return;
+	}
+
+	print_field("    Value: 0x%2.2x", value);
+
+	mask = print_bitfield(6, value, ugg_features_table);
+	if (mask)
+		print_text(COLOR_WHITE_BG, "    Unknown fields (0x%2.2x)",
+								mask);
+}
+
+static const struct bitfield_data ugt_features_table[] = {
+	{  0, "UGT Source (0x0001)"		},
+	{  1, "UGT 80 kbps Source (0x0002)"	},
+	{  2, "UGT Sink (0x0004)"		},
+	{  3, "UGT 64 kbps Sink (0x0008)"	},
+	{  4, "UGT Multiplex (0x0010)"		},
+	{  5, "UGT Multisink (0x0020)"		},
+	{  6, "UGT Multisource (0x0040)"	},
+	{ }
+};
+
+static void ugt_features_read(const struct l2cap_frame *frame)
+{
+	uint8_t value;
+	uint8_t mask;
+
+	if (!l2cap_frame_get_u8((void *)frame, &value)) {
+		print_text(COLOR_ERROR, "    invalid size");
+		return;
+	}
+
+	print_field("    Value: 0x%2.2x", value);
+
+	mask = print_bitfield(6, value, ugt_features_table);
+	if (mask)
+		print_text(COLOR_WHITE_BG, "    Unknown fields (0x%2.2x)",
+								mask);
+}
+
+static const struct bitfield_data bgs_features_table[] = {
+	{  0, "BGS 96 kbps (0x0001)"		},
+	{ }
+};
+
+static void bgs_features_read(const struct l2cap_frame *frame)
+{
+	uint8_t value;
+	uint8_t mask;
+
+	if (!l2cap_frame_get_u8((void *)frame, &value)) {
+		print_text(COLOR_ERROR, "    invalid size");
+		return;
+	}
+
+	print_field("    Value: 0x%2.2x", value);
+
+	mask = print_bitfield(6, value, bgs_features_table);
+	if (mask)
+		print_text(COLOR_WHITE_BG, "    Unknown fields (0x%2.2x)",
+								mask);
+}
+
+static const struct bitfield_data bgr_features_table[] = {
+	{  0, "BGR Multisink (0x0001)"		},
+	{  1, "BGR Multiplex (0x0002)"		},
+	{ }
+};
+
+static void bgr_features_read(const struct l2cap_frame *frame)
+{
+	uint8_t value;
+	uint8_t mask;
+
+	if (!l2cap_frame_get_u8((void *)frame, &value)) {
+		print_text(COLOR_ERROR, "    invalid size");
+		return;
+	}
+
+	print_field("    Value: 0x%2.2x", value);
+
+	mask = print_bitfield(6, value, bgr_features_table);
+	if (mask)
+		print_text(COLOR_WHITE_BG, "    Unknown fields (0x%2.2x)",
+								mask);
+}
+
+#define GMAS \
+	GATT_HANDLER(0x2c00, gmap_role_read, NULL, NULL), \
+	GATT_HANDLER(0x2c01, ugg_features_read, NULL, NULL), \
+	GATT_HANDLER(0x2c02, ugt_features_read, NULL, NULL), \
+	GATT_HANDLER(0x2c02, bgs_features_read, NULL, NULL), \
+	GATT_HANDLER(0x2c03, bgr_features_read, NULL, NULL)
+
 #define GATT_HANDLER(_uuid, _read, _write, _notify) \
 { \
 	.uuid = { \
@@ -3230,6 +3389,7 @@ struct gatt_handler {
 	GATT_HANDLER(0x2bc7, NULL, bcast_audio_scan_cp_write, NULL),
 	GATT_HANDLER(0x2bc8, bcast_recv_state_read, NULL,
 					bcast_recv_state_notify),
+	GMAS
 };
 
 static struct gatt_handler *get_handler_uuid(const bt_uuid_t *uuid)

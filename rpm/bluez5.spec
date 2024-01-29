@@ -249,7 +249,7 @@ systemctl-user daemon-reload ||:
 %{_bindir}/mpris-proxy
 /%{_userunitdir}/mpris-proxy.service
 /%{_userunitdir}/post-user-session.target.wants/mpris-proxy.service
-%config %{_sysconfdir}/dbus-1/system.d/bluetooth.conf
+%config %{_datadir}/dbus-1/system.d/bluetooth.conf
 %dir %{_localstatedir}/lib/bluetooth
 
 %files configs-mer

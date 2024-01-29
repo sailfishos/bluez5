@@ -61,9 +61,6 @@
 #define DEFAULT_TEMPORARY_TIMEOUT         30 /* 30 seconds */
 #define DEFAULT_NAME_REQUEST_RETRY_DELAY 300 /* 5 minutes */
 
-/*CSIP Profile - Server */
-#define DEFAULT_SIRK "761FAE703ED681F0C50B34155B6434FB"
-
 #define SHUTDOWN_GRACE_SECONDS 10
 
 struct btd_opts btd_opts;
@@ -81,13 +78,14 @@ static const char *supported_options[] = {
 	"NameResolving",
 	"DebugKeys",
 	"ControllerMode",
-	"MaxControllers"
+	"MaxControllers",
 	"MultiProfile",
 	"FastConnectable",
 	"SecureConnections",
 	"Privacy",
 	"JustWorksRepairing",
 	"TemporaryTimeout",
+	"RefreshDiscovery",
 	"Experimental",
 	"KernelExperimental",
 	"RemoteNameRequestRetryDelay",
@@ -152,6 +150,7 @@ static const char *gatt_options[] = {
 
 static const char *csip_options[] = {
 	"SIRK",
+	"Encryption",
 	"Size",
 	"Rank",
 	NULL
@@ -441,9 +440,9 @@ static bool parse_config_string(GKeyFile *config, const char *group,
 
 static bool parse_config_int(GKeyFile *config, const char *group,
 					const char *key, int *val,
-					int min, int max)
+					size_t min, size_t max)
 {
-	int tmp;
+	size_t tmp;
 	char *str = NULL;
 	char *endptr = NULL;
 
@@ -457,12 +456,14 @@ static bool parse_config_int(GKeyFile *config, const char *group,
 	}
 
 	if (tmp < min) {
-		warn("%s.%s = %d is out of range (< %d)", group, key, tmp, min);
+		warn("%s.%s = %zu is out of range (< %zu)", group, key, tmp,
+									min);
 		return false;
 	}
 
-	if (tmp < max) {
-		warn("%s.%s = %d is out of range (> %d)", group, key, tmp, max);
+	if (tmp > max) {
+		warn("%s.%s = %zu is out of range (> %zu)", group, key, tmp,
+									max);
 		return false;
 	}
 
@@ -775,7 +776,7 @@ static bool parse_config_u32(GKeyFile *config, const char *group,
 {
 	int tmp;
 
-	if (!parse_config_int(config, group, key, &tmp, 0, UINT32_MAX))
+	if (!parse_config_int(config, group, key, &tmp, min, max))
 		return false;
 
 	if (val)
@@ -1081,7 +1082,7 @@ static void parse_csis(GKeyFile *config)
 					&btd_opts.csis.encrypt);
 	parse_config_u8(config, "CSIS", "Size", &btd_opts.csis.size,
 					0, UINT8_MAX);
-	parse_config_u8(config, "CSIS", "Rank", &btd_opts.csis.size,
+	parse_config_u8(config, "CSIS", "Rank", &btd_opts.csis.rank,
 					0, UINT8_MAX);
 }
 
@@ -1194,6 +1195,7 @@ static void init_defaults(void)
 	btd_opts.avdtp.stream_mode = BT_IO_MODE_BASIC;
 
 	btd_opts.advmon.rssi_sampling_period = 0xFF;
+	btd_opts.csis.encrypt = true;
 }
 
 static void log_handler(const gchar *log_domain, GLogLevelFlags log_level,

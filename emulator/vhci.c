@@ -74,14 +74,7 @@ static bool vhci_read_callback(struct io *io, void *user_data)
 	if (len < 1)
 		return false;
 
-	switch (buf[0]) {
-	case BT_H4_CMD_PKT:
-	case BT_H4_ACL_PKT:
-	case BT_H4_SCO_PKT:
-	case BT_H4_ISO_PKT:
-		btdev_receive_h4(vhci->btdev, buf, len);
-		break;
-	}
+	btdev_receive_h4(vhci->btdev, buf, len);
 
 	return true;
 }
@@ -129,14 +122,16 @@ struct vhci *vhci_open(uint8_t type)
 		break;
 	}
 
-	if (write(fd, &req, sizeof(req)) < 0) {
+	if (write(fd, &req, sizeof(req)) != sizeof(req)) {
 		close(fd);
 		return NULL;
 	}
 
 	memset(&rsp, 0, sizeof(rsp));
 
-	if (read(fd, &rsp, sizeof(rsp)) < 0) {
+	if (read(fd, &rsp, sizeof(rsp)) != sizeof(rsp) ||
+			rsp.pkt_type != HCI_VENDOR_PKT ||
+			rsp.opcode != req.opcode) {
 		close(fd);
 		return NULL;
 	}
@@ -176,6 +171,15 @@ void vhci_close(struct vhci *vhci)
 		return;
 
 	vhci_destroy(vhci);
+}
+
+bool vhci_pause_input(struct vhci *vhci, bool paused)
+{
+	if (paused)
+		return io_set_read_handler(vhci->io, NULL, NULL, NULL);
+	else
+		return io_set_read_handler(vhci->io, vhci_read_callback, vhci,
+									NULL);
 }
 
 struct btdev *vhci_get_btdev(struct vhci *vhci)

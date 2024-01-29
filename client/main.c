@@ -33,6 +33,7 @@
 #include "adv_monitor.h"
 #include "admin.h"
 #include "player.h"
+#include "mgmt.h"
 
 /* String display constants */
 #define COLORED_NEW	COLOR_GREEN "NEW" COLOR_OFF
@@ -65,6 +66,7 @@ static GList *battery_proxies;
 static const char *agent_arguments[] = {
 	"on",
 	"off",
+	"auto",
 	"DisplayOnly",
 	"DisplayYesNo",
 	"KeyboardDisplay",
@@ -906,6 +908,8 @@ static void cmd_show(int argc, char *argv[])
 		bt_shell_printf("Controller %s\n", address);
 	}
 
+	print_property(adapter->proxy, "Manufacturer");
+	print_property(adapter->proxy, "Version");
 	print_property(adapter->proxy, "Name");
 	print_property(adapter->proxy, "Alias");
 	print_property(adapter->proxy, "Class");
@@ -1321,9 +1325,14 @@ static void cmd_scan(int argc, char *argv[])
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 
 	if (enable == TRUE) {
-		if (strcmp(mode, "")) {
+		if (!g_strcmp0(mode, "")) {
+			g_free(filter.transport);
+			filter.transport = NULL;
+			filter.set = false;
+		} else {
 			g_free(filter.transport);
 			filter.transport = g_strdup(mode);
+			filter.set = false;
 		}
 
 		set_discovery_filter(false);
@@ -3095,7 +3104,7 @@ static const struct bt_shell_menu main_menu = {
 							NULL },
 	{ "discoverable-timeout", "[value]", cmd_discoverable_timeout,
 					"Set discoverable timeout", NULL },
-	{ "agent",        "<on/off/capability>", cmd_agent,
+	{ "agent",        "<on/off/auto/capability>", cmd_agent,
 				"Enable/disable agent with given capability",
 							capability_generator},
 	{ "default-agent",NULL,       cmd_default_agent,
@@ -3190,6 +3199,7 @@ int main(int argc, char *argv[])
 
 	admin_add_submenu();
 	player_add_submenu();
+	mgmt_add_submenu();
 
 	client = g_dbus_client_new(dbus_conn, "org.bluez", "/org/bluez");
 
@@ -3206,6 +3216,7 @@ int main(int argc, char *argv[])
 
 	admin_remove_submenu();
 	player_remove_submenu();
+	mgmt_remove_submenu();
 
 	g_dbus_client_unref(client);
 
