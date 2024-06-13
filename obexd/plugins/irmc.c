@@ -427,7 +427,7 @@ static const struct obex_mime_type_driver irmc_driver = {
 	.read = irmc_read,
 };
 
-static const struct obex_service_driver irmc = {
+static struct obex_service_driver irmc = {
 	.name = "IRMC Sync server",
 	.service = OBEX_IRMC,
 	.target = IRMC_TARGET,
