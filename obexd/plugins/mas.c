@@ -812,7 +812,7 @@ static void *message_notification_filter_open(const char *name, int oflag,
 	return mas;
 }
 
-static const struct obex_service_driver mas = {
+static struct obex_service_driver mas = {
 	.name = "Message Access server",
 	.service = OBEX_MAS,
 	.target = MAS_TARGET,
