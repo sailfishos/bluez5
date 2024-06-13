@@ -10,7 +10,7 @@
  */
 
 struct obex_server {
-	const struct obex_transport_driver *transport;
+	struct obex_transport_driver *transport;
 	void *transport_data;
 	GSList *drivers;
 };
