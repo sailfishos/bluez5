@@ -642,7 +642,7 @@ static void dump_mode(int fd, int sk, char *peer)
 	}
 
 	syslog(LOG_INFO, "Receiving ...");
-	while ((len = read(sk, buf, data_size)) > 0) {
+	while ((len = read(sk, buf, data_size)) >= 0) {
 		if (fd >= 0) {
 			len = write(fd, buf, len);
 			if (len < 0) {
@@ -680,7 +680,7 @@ static void recv_mode(int fd, int sk, char *peer)
 			int r;
 
 			r = recv(sk, buf, data_size, 0);
-			if (r <= 0) {
+			if (r < 0) {
 				if (r < 0)
 					syslog(LOG_ERR, "Read failed: %s (%d)",
 							strerror(errno), errno);
@@ -720,7 +720,7 @@ static int open_file(const char *filename)
 	syslog(LOG_INFO, "Opening %s ...", filename);
 
 	fd = open(filename, O_RDONLY);
-	if (fd <= 0) {
+	if (fd < 0) {
 		syslog(LOG_ERR, "Can't open file %s: %s\n",
 						filename, strerror(errno));
 	}
@@ -922,7 +922,7 @@ static void send_mode(char *filename, char *peer, int i, bool repeat)
 		if (!err)
 			fd = open_file(altername);
 
-		if (fd <= 0)
+		if (fd < 0)
 			fd = open_file(filename);
 	}
 
@@ -950,6 +950,8 @@ static void send_mode(char *filename, char *peer, int i, bool repeat)
 			close(sk_arr[i]);
 
 		free(sk_arr);
+		if (fd >= 0)
+			close(fd);
 		return;
 	}
 
@@ -1454,9 +1456,18 @@ int main(int argc, char *argv[])
 
 		switch (mode) {
 		case SEND:
-			send_mode(filename, argv[optind + i], i, repeat);
-			if (filename && strchr(filename, ','))
-				filename = strchr(filename, ',') + 1;
+			peer = argv[optind + i];
+			if (bachk(peer) < 0) {
+				fprintf(stderr, "Invalid peer address '%s'\n",
+						peer);
+				exit(1);
+			}
+			send_mode(filename, peer, i, repeat);
+			if (filename && strchr(filename, ',')) {
+				char *tmp = filename;
+				filename = strdup(strchr(filename, ',') + 1);
+				free(tmp);
+			}
 			break;
 
 		case RECONNECT:
@@ -1469,6 +1480,11 @@ int main(int argc, char *argv[])
 
 		case CONNECT:
 			peer = argv[optind + i];
+			if (bachk(peer) < 0) {
+				fprintf(stderr, "Invalid peer address '%s'\n",
+						peer);
+				exit(1);
+			}
 
 			mgmt_set_experimental();
 
@@ -1506,7 +1522,7 @@ int main(int argc, char *argv[])
 
 				free(sk_arr);
 			} else {
-				sk = do_connect(argv[optind + i]);
+				sk = do_connect(peer);
 				if (sk < 0)
 					exit(1);
 

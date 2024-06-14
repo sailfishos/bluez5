@@ -148,9 +148,9 @@ static void print_boolean(uint8_t indent, const uint8_t *data, uint32_t size)
 
 #define SIZES(args...) ((uint8_t[]) { args, 0xff } )
 
-static struct {
+static const struct {
 	uint8_t value;
-	uint8_t *sizes;
+	const uint8_t *sizes;
 	bool recurse;
 	const char *str;
 	void (*print) (uint8_t indent, const uint8_t *data, uint32_t size);
@@ -167,7 +167,7 @@ static struct {
 	{ }
 };
 
-static struct {
+static const struct {
 	uint8_t index;
 	uint8_t bits;
 	uint8_t size;
@@ -184,7 +184,7 @@ static struct {
 	{ }
 };
 
-static bool valid_size(uint8_t size, uint8_t *sizes)
+static bool valid_size(uint8_t size, const uint8_t *sizes)
 {
 	int i;
 
@@ -322,7 +322,7 @@ static uint32_t get_bytes(const uint8_t *data, uint32_t size)
 	return 0;
 }
 
-static struct {
+static const struct {
 	uint16_t id;
 	const char *str;
 } attribute_table[] = {

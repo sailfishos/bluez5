@@ -112,6 +112,7 @@ struct external_profile {
 
 struct client_io {
 	struct bt_att *att;
+	struct external_chrc *chrc;
 	unsigned int disconn_id;
 	struct io *io;
 };
@@ -2247,6 +2248,9 @@ static uint8_t dbus_error_to_att_ecode(const char *name, const char *msg,
 	if (strcmp(name, ERROR_INTERFACE ".InProgress") == 0)
 		return BT_ERROR_ALREADY_IN_PROGRESS;
 
+	if (!strcmp(name, ERROR_INTERFACE ".ImproperlyConfigured"))
+		return BT_ERROR_CCC_IMPROPERLY_CONFIGURED;
+
 	if (strcmp(name, ERROR_INTERFACE ".NotPermitted") == 0)
 		return perm_err;
 
@@ -2588,7 +2592,8 @@ static bool sock_hup(struct io *io, void *user_data)
 
 static bool sock_io_read(struct io *io, void *user_data)
 {
-	struct external_chrc *chrc = user_data;
+	struct client_io *client = user_data;
+	struct external_chrc *chrc = client->chrc;
 	uint8_t buf[512];
 	int fd = io_get_fd(io);
 	ssize_t bytes_read;
@@ -2597,12 +2602,8 @@ static bool sock_io_read(struct io *io, void *user_data)
 	if (bytes_read <= 0)
 		return false;
 
-	send_notification_to_devices(chrc->service->app->database,
-				gatt_db_attribute_get_handle(chrc->attrib),
-				buf, bytes_read,
-				gatt_db_attribute_get_handle(chrc->ccc),
-				conf_cb,
-				chrc->proxy);
+	gatt_notify_cb(chrc->attrib, chrc->ccc, buf, bytes_read, client->att,
+				client->chrc->service->app->database);
 
 	return true;
 }
@@ -2652,6 +2653,7 @@ client_io_new(struct external_chrc *chrc, int fd, struct bt_att *att)
 
 	client = new0(struct client_io, 1);
 	client->att = bt_att_ref(att);
+	client->chrc = chrc;
 	client->disconn_id = bt_att_register_disconnect(att, att_disconnect_cb,
 							client, NULL);
 	client->io = sock_io_new(fd, chrc);
@@ -2721,6 +2723,7 @@ static void acquire_write_reply(DBusMessage *message, void *user_data)
 		if (ecode != BT_ATT_ERROR_UNLIKELY) {
 			gatt_db_attribute_write_result(op->attrib, op->id,
 								ecode);
+			pending_op_free(op);
 			return;
 		}
 
@@ -2809,7 +2812,7 @@ client_notify_io_get(struct external_chrc *chrc, int fd, struct bt_att *att)
 
 	client = client_io_new(chrc, fd, att);
 
-	io_set_read_handler(client->io, sock_io_read, chrc, NULL);
+	io_set_read_handler(client->io, sock_io_read, client, NULL);
 
 	if (!chrc->notify_ios)
 		chrc->notify_ios = queue_new();
@@ -3331,12 +3334,12 @@ static void database_add_includes(struct external_service *service)
 static bool database_add_chrc(struct external_service *service,
 						struct external_chrc *chrc)
 {
-	uint16_t handle;
+	uint16_t handle = 0, value_handle;
 	bt_uuid_t uuid;
 	char str[MAX_LEN_UUID_STR];
 	const struct queue_entry *entry;
 
-	if (!parse_handle(chrc->proxy, &handle)) {
+	if (!parse_handle(chrc->proxy, &value_handle)) {
 		error("Failed to read \"Handle\" property of characteristic");
 		return false;
 	}
@@ -3351,10 +3354,14 @@ static bool database_add_chrc(struct external_service *service,
 		return false;
 	}
 
+	if (value_handle)
+		handle = value_handle - 1;
+
 	chrc->attrib = gatt_db_service_insert_characteristic(service->attrib,
-						handle, &uuid, chrc->perm,
-						chrc->props, chrc_read_cb,
-						chrc_write_cb, chrc);
+						handle, value_handle, &uuid,
+						chrc->perm, chrc->props,
+						chrc_read_cb, chrc_write_cb,
+						chrc);
 	if (!chrc->attrib) {
 		error("Failed to create characteristic entry in database");
 		return false;

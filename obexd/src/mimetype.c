@@ -73,7 +73,7 @@ static struct io_watch *find_io_watch(void *object)
 	return NULL;
 }
 
-static void reset_io_watch(void *object)
+void obex_object_reset_io_watch(void *object)
 {
 	struct io_watch *watch;
 
@@ -85,15 +85,10 @@ static void reset_io_watch(void *object)
 	g_free(watch);
 }
 
-static int set_io_watch(void *object, obex_object_io_func func,
+int obex_object_set_io_watch(void *object, obex_object_io_func func,
 				void *user_data)
 {
 	struct io_watch *watch;
-
-	if (func == NULL) {
-		reset_io_watch(object);
-		return 0;
-	}
 
 	watch = find_io_watch(object);
 	if (watch)
@@ -109,7 +104,7 @@ static int set_io_watch(void *object, obex_object_io_func func,
 	return 0;
 }
 
-static struct obex_mime_type_driver *find_driver(const uint8_t *target,
+static const struct obex_mime_type_driver *find_driver(const uint8_t *target,
 				unsigned int target_size,
 				const char *mimetype, const uint8_t *who,
 				unsigned int who_size)
@@ -117,7 +112,7 @@ static struct obex_mime_type_driver *find_driver(const uint8_t *target,
 	GSList *l;
 
 	for (l = drivers; l; l = l->next) {
-		struct obex_mime_type_driver *driver = l->data;
+		const struct obex_mime_type_driver *driver = l->data;
 
 		if (memncmp0(target, target_size, driver->target, driver->target_size))
 			continue;
@@ -139,12 +134,12 @@ static struct obex_mime_type_driver *find_driver(const uint8_t *target,
 	return NULL;
 }
 
-struct obex_mime_type_driver *obex_mime_type_driver_find(const uint8_t *target,
-				unsigned int target_size,
+const struct obex_mime_type_driver *
+obex_mime_type_driver_find(const uint8_t *target, unsigned int target_size,
 				const char *mimetype, const uint8_t *who,
 				unsigned int who_size)
 {
-	struct obex_mime_type_driver *driver;
+	const struct obex_mime_type_driver *driver;
 
 	driver = find_driver(target, target_size, mimetype, who, who_size);
 	if (driver == NULL) {
@@ -167,7 +162,7 @@ struct obex_mime_type_driver *obex_mime_type_driver_find(const uint8_t *target,
 	return driver;
 }
 
-int obex_mime_type_driver_register(struct obex_mime_type_driver *driver)
+int obex_mime_type_driver_register(const struct obex_mime_type_driver *driver)
 {
 	if (!driver) {
 		error("Invalid driver");
@@ -181,17 +176,15 @@ int obex_mime_type_driver_register(struct obex_mime_type_driver *driver)
 		return -EPERM;
 	}
 
-	if (driver->set_io_watch == NULL)
-		driver->set_io_watch = set_io_watch;
-
 	DBG("driver %p mimetype %s registered", driver, driver->mimetype);
 
-	drivers = g_slist_append(drivers, driver);
+	drivers = g_slist_append(drivers, (gpointer)driver);
 
 	return 0;
 }
 
-void obex_mime_type_driver_unregister(struct obex_mime_type_driver *driver)
+void
+obex_mime_type_driver_unregister(const struct obex_mime_type_driver *driver)
 {
 	if (!g_slist_find(drivers, driver)) {
 		error("Unable to unregister: No such driver %p", driver);

@@ -128,6 +128,7 @@ struct btd_opts {
 	bool		fast_conn;
 	bool		refresh_discovery;
 	bool		experimental;
+	bool		testing;
 	struct queue	*kernel;
 
 	uint16_t	did_source;
@@ -140,6 +141,7 @@ struct btd_opts {
 	bt_gatt_cache_t gatt_cache;
 	uint16_t	gatt_mtu;
 	uint8_t		gatt_channels;
+	bool		gatt_client;
 	enum mps_mode_t	mps;
 
 	struct btd_avdtp_opts avdtp;
@@ -155,7 +157,7 @@ struct btd_opts {
 
 extern struct btd_opts btd_opts;
 
-gboolean plugin_init(const char *enable, const char *disable);
+void plugin_init(const char *enable, const char *disable);
 void plugin_cleanup(void);
 
 void rfkill_init(void);

@@ -87,6 +87,7 @@ static const char *supported_options[] = {
 	"TemporaryTimeout",
 	"RefreshDiscovery",
 	"Experimental",
+	"Testing",
 	"KernelExperimental",
 	"RemoteNameRequestRetryDelay",
 	NULL
@@ -145,6 +146,7 @@ static const char *gatt_options[] = {
 	"KeySize",
 	"ExchangeMTU",
 	"Channels",
+	"Client",
 	NULL
 };
 
@@ -452,21 +454,25 @@ static bool parse_config_int(GKeyFile *config, const char *group,
 	tmp = strtol(str, &endptr, 0);
 	if (!endptr || *endptr != '\0') {
 		error("%s.%s = %s is not integer", group, key, str);
+		g_free(str);
 		return false;
 	}
 
 	if (tmp < min) {
+		g_free(str);
 		warn("%s.%s = %zu is out of range (< %zu)", group, key, tmp,
 									min);
 		return false;
 	}
 
 	if (tmp > max) {
+		g_free(str);
 		warn("%s.%s = %zu is out of range (> %zu)", group, key, tmp,
 									max);
 		return false;
 	}
 
+	g_free(str);
 	if (val)
 		*val = tmp;
 
@@ -706,6 +712,7 @@ static const char *valid_uuids[] = {
 	"330859bc-7506-492d-9370-9a6f0614037f",
 	"a6695ace-ee7f-4fb9-881a-5fac66c629af",
 	"6fbaf188-05e0-496a-9885-d6ddfdb4e03e",
+	"69518c4c-b69f-4679-8bc1-c021b47b5733",
 	"*"
 };
 
@@ -1032,6 +1039,8 @@ static void parse_general(GKeyFile *config)
 	parse_secure_conns(config);
 	parse_config_bool(config, "General", "Experimental",
 						&btd_opts.experimental);
+	parse_config_bool(config, "General", "Testing",
+						&btd_opts.testing);
 	parse_kernel_exp(config);
 	parse_config_u32(config, "General", "RemoteNameRequestRetryDelay",
 					&btd_opts.name_request_retry_delay,
@@ -1058,6 +1067,7 @@ static void parse_gatt(GKeyFile *config)
 				BT_ATT_DEFAULT_LE_MTU, BT_ATT_MAX_LE_MTU);
 	parse_config_u8(config, "GATT", "Channels", &btd_opts.gatt_channels,
 				1, 5);
+	parse_config_bool(config, "GATT", "Client", &btd_opts.gatt_client);
 }
 
 static void parse_csis_sirk(GKeyFile *config)
@@ -1190,6 +1200,7 @@ static void init_defaults(void)
 	btd_opts.gatt_cache = BT_GATT_CACHE_ALWAYS;
 	btd_opts.gatt_mtu = BT_ATT_MAX_LE_MTU;
 	btd_opts.gatt_channels = 1;
+	btd_opts.gatt_client = true;
 
 	btd_opts.avdtp.session_mode = BT_IO_MODE_BASIC;
 	btd_opts.avdtp.stream_mode = BT_IO_MODE_BASIC;
@@ -1340,6 +1351,8 @@ static GOptionEntry options[] = {
 				"Provide deprecated command line interfaces" },
 	{ "experimental", 'E', 0, G_OPTION_ARG_NONE, &btd_opts.experimental,
 				"Enable experimental D-Bus interfaces" },
+	{ "testing", 'T', 0, G_OPTION_ARG_NONE, &btd_opts.testing,
+				"Enable testing D-Bus interfaces" },
 	{ "kernel", 'K', G_OPTION_FLAG_OPTIONAL_ARG, G_OPTION_ARG_CALLBACK,
 				parse_kernel_experimental,
 				"Enable kernel experimental features" },
@@ -1405,6 +1418,9 @@ int main(int argc, char *argv[])
 
 	if (btd_opts.experimental)
 		gdbus_flags = G_DBUS_FLAG_ENABLE_EXPERIMENTAL;
+
+	if (btd_opts.testing)
+		gdbus_flags |= G_DBUS_FLAG_ENABLE_TESTING;
 
 	g_dbus_set_flags(gdbus_flags);
 

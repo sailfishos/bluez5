@@ -290,7 +290,7 @@ struct control_pdu_handler {
 							uint8_t transaction);
 };
 
-static struct {
+static const struct {
 	uint8_t feature_bit;
 	uint8_t avc;
 } passthrough_map[] = {
@@ -361,7 +361,7 @@ static unsigned int avctp_id = 0;
 static uint8_t default_features[16];
 
 /* Company IDs supported by this device */
-static uint32_t company_ids[] = {
+static const uint32_t company_ids[] = {
 	IEEEID_BTSIG,
 };
 
@@ -1209,6 +1209,10 @@ static GList *player_list_metadata(struct avrcp_player *player)
 		attrs = g_list_append(attrs,
 					GUINT_TO_POINTER(str_to_metadata(key)));
 	}
+
+	if (attrs == NULL)
+		return g_list_prepend(NULL,
+				GUINT_TO_POINTER(AVRCP_MEDIA_ATTRIBUTE_TITLE));
 
 	return attrs;
 }
@@ -2140,7 +2144,7 @@ failed:
 	pdu->param_len = cpu_to_be16(1);
 }
 
-static struct browsing_pdu_handler {
+static const struct browsing_pdu_handler {
 	uint8_t pdu_id;
 	void (*func) (struct avrcp *session, struct avrcp_browsing_header *pdu,
 							uint8_t transaction);
@@ -2169,7 +2173,7 @@ static size_t handle_browsing_pdu(struct avctp *conn,
 					size_t operand_count, void *user_data)
 {
 	struct avrcp *session = user_data;
-	struct browsing_pdu_handler *handler;
+	const struct browsing_pdu_handler *handler;
 	struct avrcp_browsing_header *pdu = (void *) operands;
 
 	DBG("AVRCP Browsing PDU 0x%02X, len 0x%04X", pdu->pdu_id,
@@ -2573,11 +2577,10 @@ static struct media_item *parse_media_element(struct avrcp *session,
 
 	uid = get_be64(&operands[0]);
 
+	memset(name, 0, sizeof(name));
 	namelen = MIN(get_be16(&operands[11]), sizeof(name) - 1);
-	if (namelen > 0) {
+	if (namelen > 0)
 		memcpy(name, &operands[13], namelen);
-		name[namelen] = '\0';
-	}
 
 	player = session->controller->player;
 	mp = player->user_data;
@@ -2610,11 +2613,10 @@ static struct media_item *parse_media_folder(struct avrcp *session,
 	type = operands[8];
 	playable = operands[9];
 
+	memset(name, 0, sizeof(name));
 	namelen = MIN(get_be16(&operands[12]), sizeof(name) - 1);
-	if (namelen > 0) {
+	if (namelen > 0)
 		memcpy(name, &operands[14], namelen);
-		name[namelen] = '\0';
-	}
 
 	item = media_player_create_folder(mp, name, type, uid);
 	if (!item)

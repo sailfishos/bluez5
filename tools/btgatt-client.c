@@ -33,6 +33,7 @@
 #include "src/shared/queue.h"
 #include "src/shared/gatt-db.h"
 #include "src/shared/gatt-client.h"
+#include "src/shared/gatt-helpers.h"
 
 #define ATT_CID 4
 
@@ -57,6 +58,7 @@ struct client {
 	struct bt_gatt_client *gatt;
 
 	unsigned int reliable_session_id;
+	bool sec_retry;
 };
 
 static void print_prompt(void)
@@ -172,6 +174,7 @@ static struct client *client_create(int fd, uint16_t mtu)
 		fprintf(stderr, "Failed to allocate memory for client\n");
 		return NULL;
 	}
+	cli->sec_retry = true;
 
 	cli->att = bt_att_new(fd, false);
 	if (!cli->att) {
@@ -488,6 +491,7 @@ static void cmd_read_multiple(struct client *cli, char *cmd_str)
 	char *argv[512];
 	int i;
 	char *endptr = NULL;
+	unsigned int id;
 
 	if (!bt_gatt_client_is_ready(cli->gatt)) {
 		printf("GATT client not initialized\n");
@@ -514,9 +518,12 @@ static void cmd_read_multiple(struct client *cli, char *cmd_str)
 		}
 	}
 
-	if (!bt_gatt_client_read_multiple(cli->gatt, value, argc,
-						read_multiple_cb, NULL, NULL))
+	id = bt_gatt_client_read_multiple(cli->gatt, value, argc,
+						read_multiple_cb, NULL, NULL);
+	if (!id)
 		printf("Failed to initiate read multiple procedure\n");
+	else if (!cli->sec_retry)
+		bt_gatt_client_set_retry(cli->gatt, id, false);
 
 	free(value);
 }
@@ -558,6 +565,7 @@ static void cmd_read_value(struct client *cli, char *cmd_str)
 	int argc = 0;
 	uint16_t handle;
 	char *endptr = NULL;
+	unsigned int id;
 
 	if (!bt_gatt_client_is_ready(cli->gatt)) {
 		printf("GATT client not initialized\n");
@@ -575,9 +583,12 @@ static void cmd_read_value(struct client *cli, char *cmd_str)
 		return;
 	}
 
-	if (!bt_gatt_client_read_value(cli->gatt, handle, read_cb,
-								NULL, NULL))
+	id = bt_gatt_client_read_value(cli->gatt, handle, read_cb,
+					NULL, NULL);
+	if (!id)
 		printf("Failed to initiate read value procedure\n");
+	else if (!cli->sec_retry)
+		bt_gatt_client_set_retry(cli->gatt, id, false);
 }
 
 static void read_long_value_usage(void)
@@ -592,6 +603,7 @@ static void cmd_read_long_value(struct client *cli, char *cmd_str)
 	uint16_t handle;
 	uint16_t offset;
 	char *endptr = NULL;
+	unsigned int id;
 
 	if (!bt_gatt_client_is_ready(cli->gatt)) {
 		printf("GATT client not initialized\n");
@@ -616,9 +628,12 @@ static void cmd_read_long_value(struct client *cli, char *cmd_str)
 		return;
 	}
 
-	if (!bt_gatt_client_read_long_value(cli->gatt, handle, offset, read_cb,
-								NULL, NULL))
+	id = bt_gatt_client_read_long_value(cli->gatt, handle, offset, read_cb,
+								NULL, NULL);
+	if (!id)
 		printf("Failed to initiate read long value procedure\n");
+	else if (!cli->sec_retry)
+		bt_gatt_client_set_retry(cli->gatt, id, false);
 }
 
 static void write_value_usage(void)
@@ -659,6 +674,7 @@ static void cmd_write_value(struct client *cli, char *cmd_str)
 	uint8_t *value = NULL;
 	bool without_response = false;
 	bool signed_write = false;
+	unsigned int id;
 
 	if (!bt_gatt_client_is_ready(cli->gatt)) {
 		printf("GATT client not initialized\n");
@@ -740,10 +756,13 @@ static void cmd_write_value(struct client *cli, char *cmd_str)
 		goto done;
 	}
 
-	if (!bt_gatt_client_write_value(cli->gatt, handle, value, length,
+	id = bt_gatt_client_write_value(cli->gatt, handle, value, length,
 								write_cb,
-								NULL, NULL))
+								NULL, NULL);
+	if (!id)
 		printf("Failed to initiate write procedure\n");
+	else if (!cli->sec_retry)
+		bt_gatt_client_set_retry(cli->gatt, id, false);
 
 done:
 	free(value);
@@ -789,6 +808,7 @@ static void cmd_write_long_value(struct client *cli, char *cmd_str)
 	int length;
 	uint8_t *value = NULL;
 	bool reliable_writes = false;
+	unsigned int id;
 
 	if (!bt_gatt_client_is_ready(cli->gatt)) {
 		printf("GATT client not initialized\n");
@@ -863,11 +883,14 @@ static void cmd_write_long_value(struct client *cli, char *cmd_str)
 		}
 	}
 
-	if (!bt_gatt_client_write_long_value(cli->gatt, reliable_writes, handle,
+	id = bt_gatt_client_write_long_value(cli->gatt, reliable_writes, handle,
 							offset, value, length,
 							write_long_cb,
-							NULL, NULL))
+							NULL, NULL);
+	if (!id)
 		printf("Failed to initiate long write procedure\n");
+	else if (!cli->sec_retry)
+		bt_gatt_client_set_retry(cli->gatt, id, false);
 
 	free(value);
 }
@@ -999,12 +1022,18 @@ done:
 							value, length,
 							write_long_cb, NULL,
 							NULL);
-	if (!cli->reliable_session_id)
+	if (!cli->reliable_session_id) {
 		printf("Failed to proceed prepare write\n");
-	else
+	} else {
+		if (!cli->sec_retry)
+			bt_gatt_client_set_retry(cli->gatt,
+						cli->reliable_session_id,
+						false);
+
 		printf("Prepare write success.\n"
 				"Session id: %d to be used on next write\n",
 						cli->reliable_session_id);
+	}
 
 	free(value);
 }
@@ -1236,6 +1265,36 @@ static void cmd_get_security(struct client *cli, char *cmd_str)
 		printf("Security level: %u\n", level);
 }
 
+static void set_security_retry_usage(void)
+{
+	printf("Usage: set-security-retry <y/n>\n"
+		"e.g.:\n"
+		"\tset-security-retry n\n");
+}
+
+static void cmd_set_security_retry(struct client *cli, char *cmd_str)
+{
+	char *argv[2];
+	int argc = 0;
+
+	if (!bt_gatt_client_is_ready(cli->gatt)) {
+		printf("GATT client not initialized\n");
+		return;
+	}
+
+	if (!parse_args(cmd_str, 1, argv, &argc) || argc != 1) {
+		set_security_retry_usage();
+		return;
+	}
+
+	if (argv[0][0] == 'y')
+		cli->sec_retry = true;
+	else if (argv[0][0] == 'n')
+		cli->sec_retry = false;
+	else
+		printf("Invalid argument: %s\n", argv[0]);
+}
+
 static bool convert_sign_key(char *optarg, uint8_t key[16])
 {
 	int i;
@@ -1295,6 +1354,166 @@ static void cmd_set_sign_key(struct client *cli, char *cmd_str)
 		set_sign_key_usage();
 }
 
+static void search_service_cb(bool success, uint8_t att_ecode,
+					struct bt_gatt_result *result,
+					void *user_data)
+{
+	struct bt_gatt_iter iter;
+	uint16_t start_handle, end_handle;
+	uint128_t u128;
+	bt_uuid_t uuid;
+	char uuid_str[MAX_LEN_UUID_STR];
+
+	if (!success) {
+		PRLOG("\nService discovery failed: %s (0x%02x)\n",
+				ecode_to_string(att_ecode), att_ecode);
+		return;
+	}
+
+	if (!result || !bt_gatt_iter_init(&iter, result))
+		return;
+
+	printf("\n");
+	while (bt_gatt_iter_next_service(&iter, &start_handle, &end_handle,
+						u128.data)) {
+		bt_uuid128_create(&uuid, u128);
+		bt_uuid_to_string(&uuid, uuid_str, sizeof(uuid_str));
+		printf("Found start handle: 0x%04x, end handle: 0x%04x, "
+			"UUID: %s\n",
+			start_handle, end_handle, uuid_str);
+	}
+	PRLOG("\n");
+}
+
+static void cmd_search_all_primary_services(struct client *cli, char *cmd_str)
+{
+	if (!bt_gatt_client_is_ready(cli->gatt)) {
+		printf("GATT client not initialized\n");
+		return;
+	}
+
+	bt_gatt_discover_all_primary_services(bt_gatt_client_get_att(cli->gatt),
+						NULL,
+						search_service_cb,
+						NULL,
+						NULL);
+}
+
+static void search_service_usage(void)
+{
+	printf("Usage: search-service <uuid>\n"
+		"e.g.:\n"
+		"\tsearch-service 1800\n");
+}
+
+static void cmd_search_service(struct client *cli, char *cmd_str)
+{
+	char *argv[2];
+	int argc = 0;
+	bt_uuid_t uuid;
+
+	if (!bt_gatt_client_is_ready(cli->gatt)) {
+		printf("GATT client not initialized\n");
+		return;
+	}
+
+	if (!parse_args(cmd_str, 1, argv, &argc) || argc != 1) {
+		search_service_usage();
+		return;
+	}
+
+	if (bt_string_to_uuid(&uuid, argv[0]) < 0) {
+		printf("Invalid UUID: %s\n", argv[0]);
+		return;
+	}
+
+	bt_gatt_discover_primary_services(bt_gatt_client_get_att(cli->gatt),
+						&uuid, 0x0001, 0xFFFF,
+						search_service_cb,
+						NULL,
+						NULL);
+}
+
+static void search_characteristics_usage(void)
+{
+	printf("Usage: search-characteristics <start_hanlde> <end_handle> "
+		"<uuid>\n"
+		"e.g.:\n"
+		"\tsearch-characteristics 0x0001 0xFFFF 1800\n");
+}
+
+static void search_characteristics_cb(bool success, uint8_t att_ecode,
+					struct bt_gatt_result *result,
+					void *user_data)
+{
+	struct bt_gatt_iter iter;
+	uint16_t handle, length;
+	const uint8_t *value;
+	int i;
+
+	if (!success) {
+		PRLOG("\nCharacteristics discovery failed: %s (0x%02x)\n",
+				ecode_to_string(att_ecode), att_ecode);
+		return;
+	}
+
+	if (!result || !bt_gatt_iter_init(&iter, result))
+		return;
+
+	printf("\n");
+	while (bt_gatt_iter_next_read_by_type(&iter, &handle, &length,
+						&value)) {
+		printf("Found handle: 0x%04x value: ", handle);
+		for (i = 0; i < length; i++)
+			printf("%02x ", value[i]);
+		printf("\n");
+	}
+	PRLOG("\n");
+}
+
+static void cmd_search_characteristics(struct client *cli, char *cmd_str)
+{
+	char *argv[4];
+	int argc = 0;
+	uint16_t start_handle, end_handle;
+	char *endptr = NULL;
+	bt_uuid_t uuid;
+
+	if (!bt_gatt_client_is_ready(cli->gatt)) {
+		printf("GATT client not initialized\n");
+		return;
+	}
+
+	if (!parse_args(cmd_str, 3, argv, &argc) || argc != 3) {
+		search_characteristics_usage();
+		return;
+	}
+
+	start_handle = strtol(argv[0], &endptr, 0);
+	if (!endptr || *endptr != '\0') {
+		printf("Invalid start handle: %s\n", argv[0]);
+		return;
+	}
+
+	end_handle = strtol(argv[1], &endptr, 0);
+	if (!endptr || *endptr != '\0') {
+		printf("Invalid end handle: %s\n", argv[1]);
+		return;
+	}
+
+	if (bt_string_to_uuid(&uuid, argv[2]) < 0) {
+		printf("Invalid UUID: %s\n", argv[2]);
+		return;
+	}
+
+	bt_gatt_read_by_type(bt_gatt_client_get_att(cli->gatt), start_handle,
+						end_handle,
+						&uuid,
+						search_characteristics_cb,
+						NULL,
+						NULL);
+}
+
 static void cmd_help(struct client *cli, char *cmd_str);
 
 typedef void (*command_func_t)(struct client *cli, char *cmd_str);
@@ -1327,8 +1546,16 @@ static struct {
 				"\tSet security level on le connection"},
 	{ "get-security", cmd_get_security,
 				"\tGet security level on le connection"},
+	{ "set-security-retry", cmd_set_security_retry,
+			"\tSet retry on security error by elevating security"},
 	{ "set-sign-key", cmd_set_sign_key,
 				"\tSet signing key for signed write command"},
+	{ "search-all-primary-services", cmd_search_all_primary_services,
+				"\tSearch all primary services"},
+	{ "search-service", cmd_search_service,
+				"\tSearch service"},
+	{ "search-characteristics", cmd_search_characteristics,
+				"\tSearch characteristics"},
 	{ }
 };
 

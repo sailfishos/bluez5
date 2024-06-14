@@ -268,6 +268,7 @@ enum experimental_features {
 	EXP_FEAT_RPA_RESOLUTION		= 1 << 3,
 	EXP_FEAT_CODEC_OFFLOAD		= 1 << 4,
 	EXP_FEAT_ISO_SOCKET		= 1 << 5,
+	EXP_FEAT_POLL_ERRQUEUE		= 1 << 6,
 };
 
 bool btd_adapter_has_exp_feature(struct btd_adapter *adapter, uint32_t feature);
@@ -288,5 +289,16 @@ bool btd_adapter_set_allowed_uuids(struct btd_adapter *adapter,
 							struct queue *uuids);
 bool btd_adapter_is_uuid_allowed(struct btd_adapter *adapter,
 							const char *uuid_str);
+
+void btd_adapter_load_conn_param(struct btd_adapter *adapter,
+				const bdaddr_t *peer, uint8_t bdaddr_type,
+				uint16_t min_interval, uint16_t max_interval,
+				uint16_t latency, uint16_t timeout);
+
+void btd_adapter_store_conn_param(struct btd_adapter *adapter,
+				const bdaddr_t *peer, uint8_t bdaddr_type,
+				uint16_t min_interval, uint16_t max_interval,
+				uint16_t latency, uint16_t timeout);
+
 int btd_adapter_set_did(struct btd_adapter *adapter, uint16_t vendor,
 			uint16_t product, uint16_t version, uint16_t source);

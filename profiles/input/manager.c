@@ -90,11 +90,9 @@ static int input_init(void)
 							"IdleTimeout", &err);
 		if (!err) {
 			DBG("input.conf: IdleTimeout=%d", idle_timeout);
-			input_set_idle_timeout(idle_timeout * 60);
-		} else {
+			input_set_idle_timeout(idle_timeout);
+		} else
 			g_clear_error(&err);
-			err = NULL;
-		}
 
 		if (g_key_file_has_key(config, "General",
 					"AutodetectUserspaceHID", &err)) {

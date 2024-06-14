@@ -148,6 +148,13 @@ static const struct mgmt_exp_uuid iso_socket_uuid = {
 	.str = "6fbaf188-05e0-496a-9885-d6ddfdb4e03e"
 };
 
+/* 69518c4c-b69f-4679-8bc1-c021b47b5733 */
+static const struct mgmt_exp_uuid poll_errqueue_uuid = {
+	.val = { 0x33, 0x57, 0x7b, 0xb4, 0x21, 0xc0, 0xc1, 0x8b,
+		0x79, 0x46, 0x9f, 0xb6, 0x4c, 0x8c, 0x51, 0x69 },
+	.str = "69518c4c-b69f-4679-8bc1-c021b47b5733"
+};
+
 static DBusConnection *dbus_conn = NULL;
 
 static uint32_t kernel_features = 0;
@@ -2406,7 +2413,7 @@ static int update_discovery_filter(struct btd_adapter *adapter)
 	 * starting discovery.
 	 */
 	if (filters_equal(adapter->current_discovery_filter, sd_cp) &&
-	    adapter->discovering != 0) {
+	    adapter->discovering != false) {
 		DBG("filters were equal, deciding to not restart the scan.");
 		g_free(sd_cp);
 		return 0;
@@ -3915,8 +3922,7 @@ static const GDBusPropertyTable adapter_properties[] = {
 	{ "Alias", "s", property_get_alias, property_set_alias },
 	{ "Class", "u", property_get_class },
 	{ "Powered", "b", property_get_powered, property_set_powered },
-	{ "PowerState", "s", property_get_power_state, NULL, NULL,
-			     G_DBUS_PROPERTY_FLAG_EXPERIMENTAL },
+	{ "PowerState", "s", property_get_power_state },
 	{ "Discoverable", "b", property_get_discoverable,
 					property_set_discoverable },
 	{ "DiscoverableTimeout", "u", property_get_discoverable_timeout,
@@ -4628,6 +4634,30 @@ static void load_conn_params(struct btd_adapter *adapter, GSList *params)
 
 	if (id == 0)
 		btd_error(adapter->dev_id, "Load connection parameters failed");
+}
+
+void btd_adapter_load_conn_param(struct btd_adapter *adapter,
+				const bdaddr_t *peer, uint8_t bdaddr_type,
+				uint16_t min_interval, uint16_t max_interval,
+				uint16_t latency, uint16_t timeout)
+{
+	GSList *params = NULL;
+	struct conn_param param;
+
+	/* Only versions >= 1.23 support updating connection parameters */
+	if (MGMT_VERSION(mgmt_version, mgmt_revision) < MGMT_VERSION(1, 23))
+		return;
+
+	bacpy(&param.bdaddr, peer);
+	param.bdaddr_type = bdaddr_type;
+	param.max_interval = max_interval;
+	param.min_interval = min_interval;
+	param.latency = latency;
+	param.timeout = timeout;
+
+	params = g_slist_append(params, &param);
+	load_conn_params(adapter, params);
+	g_slist_free(params);
 }
 
 static uint8_t get_addr_type(GKeyFile *keyfile)
@@ -7488,7 +7518,7 @@ static void adapter_remove_connection(struct btd_adapter *adapter,
 		device_cancel_authentication(device, TRUE);
 
 	/* If another bearer is still connected */
-	if (btd_device_is_connected(device))
+	if (btd_device_bearer_is_connected(device))
 		return;
 
 	adapter->connections = g_slist_remove(adapter->connections, device);
@@ -8801,75 +8831,6 @@ static void new_long_term_key_callback(uint16_t index, uint16_t length,
 	bonding_complete(adapter, &addr->bdaddr, addr->type, 0);
 }
 
-static void store_csrk(struct btd_adapter *adapter, const bdaddr_t *peer,
-				uint8_t bdaddr_type, const unsigned char *key,
-				uint32_t counter, uint8_t type)
-{
-	const char *group;
-	char device_addr[18];
-	char filename[PATH_MAX];
-	GKeyFile *key_file;
-	GError *gerr = NULL;
-	char key_str[33];
-	gsize length = 0;
-	gboolean auth;
-	char *str;
-	int i;
-
-	switch (type) {
-	case 0x00:
-		group = "LocalSignatureKey";
-		auth = FALSE;
-		break;
-	case 0x01:
-		group = "RemoteSignatureKey";
-		auth = FALSE;
-		break;
-	case 0x02:
-		group = "LocalSignatureKey";
-		auth = TRUE;
-		break;
-	case 0x03:
-		group = "RemoteSignatureKey";
-		auth = TRUE;
-		break;
-	default:
-		warn("Unsupported CSRK type %u", type);
-		return;
-	}
-
-	ba2str(peer, device_addr);
-
-	create_filename(filename, PATH_MAX, "/%s/%s/info",
-			btd_adapter_get_storage_dir(adapter), device_addr);
-
-	key_file = g_key_file_new();
-	if (!g_key_file_load_from_file(key_file, filename, 0, &gerr)) {
-		error("Unable to load key file from %s: (%s)", filename,
-								gerr->message);
-		g_clear_error(&gerr);
-	}
-
-	for (i = 0; i < 16; i++)
-		sprintf(key_str + (i * 2), "%2.2X", key[i]);
-
-	g_key_file_set_string(key_file, group, "Key", key_str);
-	g_key_file_set_integer(key_file, group, "Counter", counter);
-	g_key_file_set_boolean(key_file, group, "Authenticated", auth);
-
-	create_file(filename, 0600);
-
-	str = g_key_file_to_data(key_file, &length, NULL);
-	if (!g_file_set_contents(filename, str, length, &gerr)) {
-		error("Unable set contents for %s: (%s)", filename,
-								gerr->message);
-		g_error_free(gerr);
-	}
-	g_free(str);
-
-	g_key_file_free(key_file);
-}
-
 static void new_csrk_callback(uint16_t index, uint16_t length,
 					const void *param, void *user_data)
 {
@@ -8897,13 +8858,7 @@ static void new_csrk_callback(uint16_t index, uint16_t length,
 		return;
 	}
 
-	if (!ev->store_hint)
-		return;
-
-	store_csrk(adapter, &key->addr.bdaddr, key->addr.type, key->val, 0,
-								key->type);
-
-	btd_device_set_temporary(device, false);
+	device_set_csrk(device, key->val, 0, key->type, ev->store_hint);
 }
 
 static void store_irk(struct btd_adapter *adapter, const bdaddr_t *peer,
@@ -9003,10 +8958,10 @@ static void new_irk_callback(uint16_t index, uint16_t length,
 	btd_device_set_temporary(device, false);
 }
 
-static void store_conn_param(struct btd_adapter *adapter, const bdaddr_t *peer,
-				uint8_t bdaddr_type, uint16_t min_interval,
-				uint16_t max_interval, uint16_t latency,
-				uint16_t timeout)
+void btd_adapter_store_conn_param(struct btd_adapter *adapter,
+				const bdaddr_t *peer, uint8_t bdaddr_type,
+				uint16_t min_interval, uint16_t max_interval,
+				uint16_t latency, uint16_t timeout)
 {
 	char device_addr[18];
 	char filename[PATH_MAX];
@@ -9086,7 +9041,7 @@ static void new_conn_param(uint16_t index, uint16_t length,
 	if (!ev->store_hint)
 		return;
 
-	store_conn_param(adapter, &ev->addr.bdaddr, ev->addr.type,
+	btd_adapter_store_conn_param(adapter, &ev->addr.bdaddr, ev->addr.type,
 					ev->min_interval, ev->max_interval,
 					ev->latency, ev->timeout);
 }
@@ -10119,6 +10074,44 @@ static void iso_socket_func(struct btd_adapter *adapter, uint8_t action)
 	btd_error(adapter->dev_id, "Failed to set ISO Socket");
 }
 
+static void poll_errqueue_complete(uint8_t status, uint16_t len,
+				const void *param, void *user_data)
+{
+	struct exp_pending *pending = user_data;
+	struct btd_adapter *adapter = pending->adapter;
+	uint8_t action;
+
+	if (status != 0) {
+		error("Set Poll Errqueue failed with status 0x%02x (%s)",
+						status, mgmt_errstr(status));
+		return;
+	}
+
+	action = btd_kernel_experimental_enabled(poll_errqueue_uuid.str);
+
+	DBG("Poll Errqueue successfully %s", action ? "set" : "reset");
+
+	if (action)
+		queue_push_tail(adapter->exps,
+					(void *)poll_errqueue_uuid.val);
+}
+
+static void poll_errqueue_func(struct btd_adapter *adapter, uint8_t action)
+{
+	struct mgmt_cp_set_exp_feature cp;
+
+	memset(&cp, 0, sizeof(cp));
+	memcpy(cp.uuid, poll_errqueue_uuid.val, 16);
+	cp.action = action;
+
+	if (exp_mgmt_send(adapter, MGMT_OP_SET_EXP_FEATURE,
+			MGMT_INDEX_NONE, sizeof(cp), &cp,
+			poll_errqueue_complete))
+		return;
+
+	btd_error(adapter->dev_id, "Failed to set Poll Errqueue");
+}
+
 static const struct exp_feat {
 	uint32_t flag;
 	const struct mgmt_exp_uuid *uuid;
@@ -10133,6 +10126,8 @@ static const struct exp_feat {
 	EXP_FEAT(EXP_FEAT_CODEC_OFFLOAD, &codec_offload_uuid,
 		codec_offload_func),
 	EXP_FEAT(EXP_FEAT_ISO_SOCKET, &iso_socket_uuid, iso_socket_func),
+	EXP_FEAT(EXP_FEAT_POLL_ERRQUEUE, &poll_errqueue_uuid,
+							poll_errqueue_func),
 };
 
 static void read_exp_features_complete(uint8_t status, uint16_t length,
@@ -10143,8 +10138,6 @@ static void read_exp_features_complete(uint8_t status, uint16_t length,
 	const struct mgmt_rp_read_exp_features_info *rp = param;
 	size_t feature_count = 0;
 	size_t i = 0;
-
-	DBG("index %u status 0x%02x", adapter->dev_id, status);
 
 	if (status != MGMT_STATUS_SUCCESS) {
 		btd_error(adapter->dev_id,
@@ -10197,10 +10190,31 @@ static void read_exp_features_complete(uint8_t status, uint16_t length,
 	}
 }
 
+static void read_exp_features_adapter_complete(uint8_t status, uint16_t length,
+					const void *param, void *user_data)
+{
+	struct exp_pending *pending = user_data;
+	struct btd_adapter *adapter = pending->adapter;
+
+	DBG("index %u status 0x%02x", adapter->dev_id, status);
+	return read_exp_features_complete(status, length, param, user_data);
+}
+
+static void read_exp_features_none_complete(uint8_t status, uint16_t length,
+					const void *param, void *user_data)
+{
+	DBG("index NONE status 0x%02x", status);
+	return read_exp_features_complete(status, length, param, user_data);
+}
+
 static void read_exp_features(struct btd_adapter *adapter)
 {
 	if (exp_mgmt_send(adapter, MGMT_OP_READ_EXP_FEATURES_INFO,
-			adapter->dev_id, 0, NULL, read_exp_features_complete))
+			adapter->dev_id, 0, NULL,
+			read_exp_features_adapter_complete) &&
+	    exp_mgmt_send(adapter, MGMT_OP_READ_EXP_FEATURES_INFO,
+			MGMT_INDEX_NONE, 0, NULL,
+			read_exp_features_none_complete))
 		return;
 
 	btd_error(adapter->dev_id, "Failed to read exp features info");
@@ -10320,6 +10334,9 @@ static void read_info_complete(uint8_t status, uint16_t length,
 	if (missing_settings & MGMT_SETTING_SECURE_CONN)
 		set_mode(adapter, MGMT_OP_SET_SECURE_CONN,
 					btd_opts.secure_conn);
+
+	if (missing_settings & MGMT_SETTING_WIDEBAND_SPEECH)
+		set_mode(adapter, MGMT_OP_SET_WIDEBAND_SPEECH, 0x01);
 
 	if (adapter->supported_settings & MGMT_SETTING_PRIVACY)
 		set_privacy(adapter, btd_opts.privacy);

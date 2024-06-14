@@ -4,6 +4,7 @@
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2022  Intel Corporation.
+ *  Copyright 2024 NXP
  *
  *
  */
@@ -35,6 +36,7 @@
 struct test_config {
 	struct bt_bap_pac_qos pqos;
 	struct iovec cc;
+	struct iovec base;
 	struct bt_bap_qos qos;
 	bool snk;
 	bool src;
@@ -49,6 +51,8 @@ struct test_data {
 	struct bt_bap *bap;
 	struct bt_bap_pac *snk;
 	struct bt_bap_pac *src;
+	struct bt_bap_pac *bsrc;
+	struct iovec *base;
 	struct iovec *caps;
 	struct test_config *cfg;
 	struct bt_bap_stream *stream;
@@ -67,7 +71,7 @@ static struct iovec lc3_caps = LC3_CAPABILITIES(LC3_FREQ_ANY, LC3_DURATION_ANY,
 
 #define iov_data(args...) ((const struct iovec[]) { args })
 
-#define define_test(name, function, _cfg, args...)		\
+#define define_test(name, setup, function, _cfg, args...)		\
 	do {							\
 		const struct iovec iov[] = { args };		\
 		static struct test_data data;			\
@@ -75,7 +79,7 @@ static struct iovec lc3_caps = LC3_CAPABILITIES(LC3_FREQ_ANY, LC3_DURATION_ANY,
 		data.cfg = _cfg;				\
 		data.iovcnt = ARRAY_SIZE(iov_data(args));	\
 		data.iov = util_iov_dup(iov, ARRAY_SIZE(iov_data(args))); \
-		tester_add(name, &data, test_setup, function,	\
+		tester_add(name, &data, setup, function,	\
 				test_teardown);			\
 	} while (0)
 
@@ -372,6 +376,8 @@ static void bap_enable(struct bt_bap_stream *stream,
 						data);
 		break;
 	case BT_BAP_STREAM_STATE_STREAMING:
+		if (data->cfg->snk)
+			return;
 		id = bt_bap_stream_start(data->stream, bap_start, data);
 		break;
 	}
@@ -506,6 +512,93 @@ static void test_client(const void *user_data)
 	bt_bap_attach(data->bap, data->client);
 }
 
+static int pac_config(struct bt_bap_stream *stream, struct iovec *cfg,
+			struct bt_bap_qos *qos, bt_bap_pac_config_t cb,
+			void *user_data)
+{
+	cb(stream, 0);
+
+	return 0;
+}
+
+static struct bt_bap_pac_ops bcast_pac_ops = {
+	.config = pac_config,
+};
+
+static void bsrc_pac_added(struct bt_bap_pac *pac, void *user_data)
+{
+	struct test_data *data = user_data;
+
+	bt_bap_pac_set_ops(pac, &bcast_pac_ops, NULL);
+
+	data->stream = bt_bap_stream_new(data->bap, pac, NULL,
+						&data->cfg->qos,
+						&data->cfg->cc);
+	g_assert(data->stream);
+
+	bt_bap_stream_config(data->stream, &data->cfg->qos,
+					&data->cfg->cc, NULL, data);
+}
+
+static void bsrc_state(struct bt_bap_stream *stream, uint8_t old_state,
+				uint8_t new_state, void *user_data)
+{
+	struct test_data *data = user_data;
+
+	switch (new_state) {
+	case BT_BAP_STREAM_STATE_QOS:
+		bt_bap_stream_enable(stream, true, NULL, NULL, NULL);
+		break;
+	case BT_BAP_STREAM_STATE_CONFIG:
+		data->base = bt_bap_stream_get_base(stream);
+
+		g_assert(data->base);
+		g_assert(data->base->iov_len == data->cfg->base.iov_len);
+		g_assert(memcmp(data->base->iov_base, data->cfg->base.iov_base,
+				data->base->iov_len) == 0);
+
+		bt_bap_stream_start(stream, NULL, NULL);
+		break;
+	case BT_BAP_STREAM_STATE_STREAMING:
+		tester_test_passed();
+		break;
+	}
+}
+
+static void test_bsrc(const void *user_data)
+{
+	struct test_data *data = (void *)user_data;
+
+	data->db = gatt_db_new();
+	g_assert(data->db);
+
+	data->bap = bt_bap_new(data->db, data->db);
+	g_assert(data->bap);
+
+	bt_bap_set_debug(data->bap, print_debug, "bt_bap:", NULL);
+
+	bt_bap_attach_broadcast(data->bap);
+
+	bt_bap_state_register(data->bap, bsrc_state,
+					NULL, data, NULL);
+
+	bt_bap_pac_register(data->bap, bsrc_pac_added,
+					NULL, data, NULL);
+
+	if (data->cfg->vs)
+		data->bsrc = bt_bap_add_vendor_pac(data->db,
+						"test-bap-bsrc",
+						BT_BAP_BCAST_SOURCE, 0x0ff,
+						0x0000, 0x0000,
+						NULL, data->caps, NULL);
+	else
+		data->bsrc = bt_bap_add_pac(data->db, "test-bap-bsrc",
+						BT_BAP_BCAST_SOURCE, LC3_ID,
+						NULL, data->caps, NULL);
+
+	g_assert(data->bsrc);
+}
+
 static void test_teardown(const void *user_data)
 {
 	struct test_data *data = (void *)user_data;
@@ -514,8 +607,11 @@ static void test_teardown(const void *user_data)
 	bt_gatt_client_unref(data->client);
 	util_iov_free(data->iov, data->iovcnt);
 
+	util_iov_free(data->base, 1);
+
 	bt_bap_remove_pac(data->snk);
 	bt_bap_remove_pac(data->src);
+	bt_bap_remove_pac(data->bsrc);
 	gatt_db_unref(data->db);
 
 	tester_teardown_complete();
@@ -738,22 +834,25 @@ static void test_disc(void)
 	 * The IUT reads the values of the characteristics specified in the PAC
 	 * Characteristic and Location Characteristic columns.
 	 */
-	define_test("BAP/UCL/DISC/BV-01-C", test_client, NULL, DISC_SNK_LC3);
-	define_test("BAP/UCL/DISC/BV-02-C", test_client, NULL, DISC_SRC_LC3);
+	define_test("BAP/UCL/DISC/BV-01-C", test_setup, test_client, NULL,
+						DISC_SNK_LC3);
+	define_test("BAP/UCL/DISC/BV-02-C", test_setup, test_client, NULL,
+						DISC_SRC_LC3);
 
 	/* BAP/UCL/DISC/BV-06-C [Discover Available Audio Contexts]
 	 *
 	 * The IUT successfully reads the value of the Available Audio Contexts
 	 * characteristic on the LowerTester.
 	 */
-	define_test("BAP/UCL/DISC/BV-06-C", test_client, NULL, DISC_CTX_LC3);
+	define_test("BAP/UCL/DISC/BV-06-C", test_setup, test_client, NULL,
+						DISC_CTX_LC3);
 
 	/* BAP/UCL/DISC/BV-05-C [Discover Supported Audio Contexts]
 	 *
 	 * The IUT successfully reads the value of the Supported Audio Contexts
 	 * characteristic on the Lower Tester.
 	 */
-	define_test("BAP/UCL/DISC/BV-05-C", test_client, NULL,
+	define_test("BAP/UCL/DISC/BV-05-C", test_setup, test_client, NULL,
 						DISC_SUP_CTX_LC3);
 
 	/* BAP/UCL/DISC/BV-03-C [Discover Sink ASE_ID]
@@ -762,9 +861,9 @@ static void test_disc(void)
 	 * The IUT successfully reads the ASE_ID values of each discovered ASE
 	 * characteristic on the LowerTester.
 	 */
-	define_test("BAP/UCL/DISC/BV-03-C", test_client, NULL,
+	define_test("BAP/UCL/DISC/BV-03-C", test_setup, test_client, NULL,
 						DISC_SNK_ASE_LC3);
-	define_test("BAP/UCL/DISC/BV-04-C", test_client, NULL,
+	define_test("BAP/UCL/DISC/BV-04-C", test_setup, test_client, NULL,
 						DISC_SRC_ASE_LC3);
 }
 
@@ -1158,69 +1257,69 @@ static struct test_config cfg_src_48_6 = {
 static void test_scc_cc_lc3(void)
 {
 	define_test("BAP/UCL/SCC/BV-001-C [UCL SRC Config Codec, LC3 8_1]",
-			test_client, &cfg_snk_8_1, SCC_SNK_8_1);
+			test_setup, test_client, &cfg_snk_8_1, SCC_SNK_8_1);
 	define_test("BAP/UCL/SCC/BV-002-C [UCL SRC Config Codec, LC3 8_2]",
-			test_client, &cfg_snk_8_2, SCC_SNK_8_2);
+			test_setup, test_client, &cfg_snk_8_2, SCC_SNK_8_2);
 	define_test("BAP/UCL/SCC/BV-003-C [UCL SRC Config Codec, LC3 16_1]",
-			test_client, &cfg_snk_16_1, SCC_SNK_16_1);
+			test_setup, test_client, &cfg_snk_16_1, SCC_SNK_16_1);
 	define_test("BAP/UCL/SCC/BV-004-C [UCL SRC Config Codec, LC3 16_2]",
-			test_client, &cfg_snk_16_2, SCC_SNK_16_2);
+			test_setup, test_client, &cfg_snk_16_2, SCC_SNK_16_2);
 	define_test("BAP/UCL/SCC/BV-005-C [UCL SRC Config Codec, LC3 24_1]",
-			test_client, &cfg_snk_24_1, SCC_SNK_24_1);
+			test_setup, test_client, &cfg_snk_24_1, SCC_SNK_24_1);
 	define_test("BAP/UCL/SCC/BV-006-C [UCL SRC Config Codec, LC3 24_2]",
-			test_client, &cfg_snk_24_2, SCC_SNK_24_2);
+			test_setup, test_client, &cfg_snk_24_2, SCC_SNK_24_2);
 	define_test("BAP/UCL/SCC/BV-007-C [UCL SRC Config Codec, LC3 32_1]",
-			test_client, &cfg_snk_32_1, SCC_SNK_32_1);
+			test_setup, test_client, &cfg_snk_32_1, SCC_SNK_32_1);
 	define_test("BAP/UCL/SCC/BV-008-C [UCL SRC Config Codec, LC3 32_2]",
-			test_client, &cfg_snk_32_2, SCC_SNK_32_2);
+			test_setup, test_client, &cfg_snk_32_2, SCC_SNK_32_2);
 	define_test("BAP/UCL/SCC/BV-009-C [UCL SRC Config Codec, LC3 44.1_1]",
-			test_client, &cfg_snk_44_1, SCC_SNK_44_1);
+			test_setup, test_client, &cfg_snk_44_1, SCC_SNK_44_1);
 	define_test("BAP/UCL/SCC/BV-010-C [UCL SRC Config Codec, LC3 44.1_2]",
-			test_client, &cfg_snk_44_2, SCC_SNK_44_2);
+			test_setup, test_client, &cfg_snk_44_2, SCC_SNK_44_2);
 	define_test("BAP/UCL/SCC/BV-011-C [UCL SRC Config Codec, LC3 48_1]",
-			test_client, &cfg_snk_48_1, SCC_SNK_48_1);
+			test_setup, test_client, &cfg_snk_48_1, SCC_SNK_48_1);
 	define_test("BAP/UCL/SCC/BV-012-C [UCL SRC Config Codec, LC3 48_2]",
-			test_client, &cfg_snk_48_2, SCC_SNK_48_2);
+			test_setup, test_client, &cfg_snk_48_2, SCC_SNK_48_2);
 	define_test("BAP/UCL/SCC/BV-013-C [UCL SRC Config Codec, LC3 48_3]",
-			test_client, &cfg_snk_48_3, SCC_SNK_48_3);
+			test_setup, test_client, &cfg_snk_48_3, SCC_SNK_48_3);
 	define_test("BAP/UCL/SCC/BV-014-C [UCL SRC Config Codec, LC3 48_4]",
-			test_client, &cfg_snk_48_4, SCC_SNK_48_4);
+			test_setup, test_client, &cfg_snk_48_4, SCC_SNK_48_4);
 	define_test("BAP/UCL/SCC/BV-015-C [UCL SRC Config Codec, LC3 48_5]",
-			test_client, &cfg_snk_48_5, SCC_SNK_48_5);
+			test_setup, test_client, &cfg_snk_48_5, SCC_SNK_48_5);
 	define_test("BAP/UCL/SCC/BV-016-C [UCL SRC Config Codec, LC3 48_6]",
-			test_client, &cfg_snk_48_6, SCC_SNK_48_6);
+			test_setup, test_client, &cfg_snk_48_6, SCC_SNK_48_6);
 	define_test("BAP/UCL/SCC/BV-017-C [UCL SNK Config Codec, LC3 8_1]",
-			test_client, &cfg_src_8_1, SCC_SRC_8_1);
+			test_setup, test_client, &cfg_src_8_1, SCC_SRC_8_1);
 	define_test("BAP/UCL/SCC/BV-018-C [UCL SNK Config Codec, LC3 8_2]",
-			test_client, &cfg_src_8_2, SCC_SRC_8_2);
+			test_setup, test_client, &cfg_src_8_2, SCC_SRC_8_2);
 	define_test("BAP/UCL/SCC/BV-019-C [UCL SNK Config Codec, LC3 16_1]",
-			test_client, &cfg_src_16_1, SCC_SRC_16_1);
+			test_setup, test_client, &cfg_src_16_1, SCC_SRC_16_1);
 	define_test("BAP/UCL/SCC/BV-020-C [UCL SNK Config Codec, LC3 16_2]",
-			test_client, &cfg_src_16_2, SCC_SRC_16_2);
+			test_setup, test_client, &cfg_src_16_2, SCC_SRC_16_2);
 	define_test("BAP/UCL/SCC/BV-021-C [UCL SNK Config Codec, LC3 24_1]",
-			test_client, &cfg_src_24_1, SCC_SRC_24_1);
+			test_setup, test_client, &cfg_src_24_1, SCC_SRC_24_1);
 	define_test("BAP/UCL/SCC/BV-022-C [UCL SNK Config Codec, LC3 24_2]",
-			test_client, &cfg_src_24_2, SCC_SRC_24_2);
+			test_setup, test_client, &cfg_src_24_2, SCC_SRC_24_2);
 	define_test("BAP/UCL/SCC/BV-023-C [UCL SNK Config Codec, LC3 32_1]",
-			test_client, &cfg_src_32_1, SCC_SRC_32_1);
+			test_setup, test_client, &cfg_src_32_1, SCC_SRC_32_1);
 	define_test("BAP/UCL/SCC/BV-024-C [UCL SNK Config Codec, LC3 32_2]",
-			test_client, &cfg_src_32_2, SCC_SRC_32_2);
+			test_setup, test_client, &cfg_src_32_2, SCC_SRC_32_2);
 	define_test("BAP/UCL/SCC/BV-025-C [UCL SNK Config Codec, LC3 44.1_1]",
-			test_client, &cfg_src_44_1, SCC_SRC_44_1);
+			test_setup, test_client, &cfg_src_44_1, SCC_SRC_44_1);
 	define_test("BAP/UCL/SCC/BV-026-C [UCL SNK Config Codec, LC3 44.1_2]",
-			test_client, &cfg_src_44_2, SCC_SRC_44_2);
+			test_setup, test_client, &cfg_src_44_2, SCC_SRC_44_2);
 	define_test("BAP/UCL/SCC/BV-027-C [UCL SNK Config Codec, LC3 48_1]",
-			test_client, &cfg_src_48_1, SCC_SRC_48_1);
+			test_setup, test_client, &cfg_src_48_1, SCC_SRC_48_1);
 	define_test("BAP/UCL/SCC/BV-028-C [UCL SNK Config Codec, LC3 48_2]",
-			test_client, &cfg_src_48_2, SCC_SRC_48_2);
+			test_setup, test_client, &cfg_src_48_2, SCC_SRC_48_2);
 	define_test("BAP/UCL/SCC/BV-029-C [UCL SNK Config Codec, LC3 48_3]",
-			test_client, &cfg_src_48_3, SCC_SRC_48_3);
+			test_setup, test_client, &cfg_src_48_3, SCC_SRC_48_3);
 	define_test("BAP/UCL/SCC/BV-030-C [UCL SNK Config Codec, LC3 48_4]",
-			test_client, &cfg_src_48_4, SCC_SRC_48_4);
+			test_setup, test_client, &cfg_src_48_4, SCC_SRC_48_4);
 	define_test("BAP/UCL/SCC/BV-031-C [UCL SNK Config Codec, LC3 48_5]",
-			test_client, &cfg_src_48_5, SCC_SRC_48_5);
+			test_setup, test_client, &cfg_src_48_5, SCC_SRC_48_5);
 	define_test("BAP/UCL/SCC/BV-032-C [UCL SNK Config Codec, LC3 48_6]",
-			test_client, &cfg_src_48_6, SCC_SRC_48_6);
+			test_setup, test_client, &cfg_src_48_6, SCC_SRC_48_6);
 }
 
 static struct test_config cfg_snk_vs = {
@@ -1261,9 +1360,9 @@ static struct test_config cfg_src_vs = {
 static void test_scc_cc_vs(void)
 {
 	define_test("BAP/UCL/SCC/BV-033-C [UCL SRC Config Codec, VS]",
-			test_client, &cfg_snk_vs, SCC_SNK_VS);
+			test_setup, test_client, &cfg_snk_vs, SCC_SNK_VS);
 	define_test("BAP/UCL/SCC/BV-034-C [UCL SNK Config Codec, VS]",
-			test_client, &cfg_src_vs, SCC_SRC_VS);
+			test_setup, test_client, &cfg_src_vs, SCC_SRC_VS);
 }
 
 static struct test_config cfg_snk_8_1_1 = {
@@ -1436,12 +1535,12 @@ static struct test_config cfg_snk_48_6_1 = {
 
 #define SCC_SNK_44_1_1 \
 	SCC_SNK_44_1, \
-	QOS_SNK(0xe3, 0x1f, 0x00, 0x00, 0x02, 0x62, 0x00, 0x05, 0x18, 0x00, \
+	QOS_SNK(0xe3, 0x1f, 0x00, 0x01, 0x02, 0x62, 0x00, 0x05, 0x18, 0x00, \
 		0x40, 0x9c, 0x00)
 
 #define SCC_SNK_44_2_1 \
 	SCC_SNK_44_2, \
-	QOS_SNK(0x84, 0x2a, 0x00, 0x00, 0x02, 0x82, 0x00, 0x05, 0x1f, 0x00, \
+	QOS_SNK(0x84, 0x2a, 0x00, 0x01, 0x02, 0x82, 0x00, 0x05, 0x1f, 0x00, \
 		0x40, 0x9c, 0x00)
 
 #define SCC_SNK_48_1_1 \
@@ -1644,12 +1743,12 @@ static struct test_config cfg_src_48_6_1 = {
 
 #define SCC_SRC_44_1_1 \
 	SCC_SRC_44_1, \
-	QOS_SRC(0xe3, 0x1f, 0x00, 0x00, 0x02, 0x62, 0x00, 0x05, 0x18, 0x00, \
+	QOS_SRC(0xe3, 0x1f, 0x00, 0x01, 0x02, 0x62, 0x00, 0x05, 0x18, 0x00, \
 		0x40, 0x9c, 0x00)
 
 #define SCC_SRC_44_2_1 \
 	SCC_SRC_44_2, \
-	QOS_SRC(0x84, 0x2a, 0x00, 0x00, 0x02, 0x82, 0x00, 0x05, 0x1f, 0x00, \
+	QOS_SRC(0x84, 0x2a, 0x00, 0x01, 0x02, 0x82, 0x00, 0x05, 0x1f, 0x00, \
 		0x40, 0x9c, 0x00)
 
 #define SCC_SRC_48_1_1 \
@@ -1836,12 +1935,12 @@ static struct test_config cfg_snk_48_6_2 = {
 
 #define SCC_SNK_44_1_2 \
 	SCC_SNK_44_1, \
-	QOS_SNK(0xe3, 0x1f, 0x00, 0x00, 0x02, 0x62, 0x00, 0x0d, 0x50, 0x00, \
+	QOS_SNK(0xe3, 0x1f, 0x00, 0x01, 0x02, 0x62, 0x00, 0x0d, 0x50, 0x00, \
 		0x40, 0x9c, 0x00)
 
 #define SCC_SNK_44_2_2 \
 	SCC_SNK_44_2, \
-	QOS_SNK(0x84, 0x2a, 0x00, 0x00, 0x02, 0x82, 0x00, 0x0d, 0x55, 0x00, \
+	QOS_SNK(0x84, 0x2a, 0x00, 0x01, 0x02, 0x82, 0x00, 0x0d, 0x55, 0x00, \
 		0x40, 0x9c, 0x00)
 
 #define SCC_SNK_48_1_2 \
@@ -2028,12 +2127,12 @@ static struct test_config cfg_src_48_6_2 = {
 
 #define SCC_SRC_44_1_2 \
 	SCC_SRC_44_1, \
-	QOS_SRC(0xe3, 0x1f, 0x00, 0x00, 0x02, 0x62, 0x00, 0x0d, 0x50, 0x00, \
+	QOS_SRC(0xe3, 0x1f, 0x00, 0x01, 0x02, 0x62, 0x00, 0x0d, 0x50, 0x00, \
 		0x40, 0x9c, 0x00)
 
 #define SCC_SRC_44_2_2 \
 	SCC_SRC_44_2, \
-	QOS_SRC(0x84, 0x2a, 0x00, 0x00, 0x02, 0x82, 0x00, 0x0d, 0x55, 0x00, \
+	QOS_SRC(0x84, 0x2a, 0x00, 0x01, 0x02, 0x82, 0x00, 0x0d, 0x55, 0x00, \
 		0x40, 0x9c, 0x00)
 
 #define SCC_SRC_48_1_2 \
@@ -2077,133 +2176,197 @@ static struct test_config cfg_src_48_6_2 = {
 static void test_scc_qos_lc3(void)
 {
 	define_test("BAP/UCL/SCC/BV-035-C [UCL SRC Config QoS, LC3 8_1_1]",
-			test_client, &cfg_snk_8_1_1, SCC_SNK_8_1_1);
+			test_setup, test_client, &cfg_snk_8_1_1,
+			SCC_SNK_8_1_1);
 	define_test("BAP/UCL/SCC/BV-036-C [UCL SRC Config QoS, LC3 8_2_1]",
-			test_client, &cfg_snk_8_2_1, SCC_SNK_8_2_1);
+			test_setup, test_client, &cfg_snk_8_2_1,
+			SCC_SNK_8_2_1);
 	define_test("BAP/UCL/SCC/BV-037-C [UCL SRC Config QoS, LC3 16_1_1]",
-			test_client, &cfg_snk_16_1_1, SCC_SNK_16_1_1);
+			test_setup, test_client, &cfg_snk_16_1_1,
+			SCC_SNK_16_1_1);
 	define_test("BAP/UCL/SCC/BV-038-C [UCL SRC Config QoS, LC3 16_2_1]",
-			test_client, &cfg_snk_16_2_1, SCC_SNK_16_2_1);
+			test_setup, test_client, &cfg_snk_16_2_1,
+			SCC_SNK_16_2_1);
 	define_test("BAP/UCL/SCC/BV-039-C [UCL SRC Config QoS, LC3 24_1_1]",
-			test_client, &cfg_snk_24_1_1, SCC_SNK_24_1_1);
+			test_setup, test_client, &cfg_snk_24_1_1,
+			SCC_SNK_24_1_1);
 	define_test("BAP/UCL/SCC/BV-040-C [UCL SRC Config QoS, LC3 24_2_1]",
-			test_client, &cfg_snk_24_2_1, SCC_SNK_24_2_1);
+			test_setup, test_client, &cfg_snk_24_2_1,
+			SCC_SNK_24_2_1);
 	define_test("BAP/UCL/SCC/BV-041-C [UCL SRC Config QoS, LC3 32_1_1]",
-			test_client, &cfg_snk_32_1_1, SCC_SNK_32_1_1);
+			test_setup, test_client, &cfg_snk_32_1_1,
+			SCC_SNK_32_1_1);
 	define_test("BAP/UCL/SCC/BV-042-C [UCL SRC Config QoS, LC3 32_2_1]",
-			test_client, &cfg_snk_32_2_1, SCC_SNK_32_2_1);
+			test_setup, test_client, &cfg_snk_32_2_1,
+			SCC_SNK_32_2_1);
 	define_test("BAP/UCL/SCC/BV-043-C [UCL SRC Config QoS, LC3 44.1_1_1]",
-			test_client, &cfg_snk_44_1_1, SCC_SNK_44_1_1);
+			test_setup, test_client, &cfg_snk_44_1_1,
+			SCC_SNK_44_1_1);
 	define_test("BAP/UCL/SCC/BV-044-C [UCL SRC Config QoS, LC3 44.1_2_1]",
-			test_client, &cfg_snk_44_2_1, SCC_SNK_44_2_1);
+			test_setup, test_client, &cfg_snk_44_2_1,
+			SCC_SNK_44_2_1);
 	define_test("BAP/UCL/SCC/BV-045-C [UCL SRC Config QoS, LC3 48_1_1]",
-			test_client, &cfg_snk_48_1_1, SCC_SNK_48_1_1);
+			test_setup, test_client, &cfg_snk_48_1_1,
+			SCC_SNK_48_1_1);
 	define_test("BAP/UCL/SCC/BV-046-C [UCL SRC Config QoS, LC3 48_2_1]",
-			test_client, &cfg_snk_48_2_1, SCC_SNK_48_2_1);
+			test_setup, test_client, &cfg_snk_48_2_1,
+			SCC_SNK_48_2_1);
 	define_test("BAP/UCL/SCC/BV-047-C [UCL SRC Config QoS, LC3 48_3_1]",
-			test_client, &cfg_snk_48_3_1, SCC_SNK_48_3_1);
+			test_setup, test_client, &cfg_snk_48_3_1,
+			SCC_SNK_48_3_1);
 	define_test("BAP/UCL/SCC/BV-048-C [UCL SRC Config QoS, LC3 48_4_1]",
-			test_client, &cfg_snk_48_4_1, SCC_SNK_48_4_1);
+			test_setup, test_client, &cfg_snk_48_4_1,
+			SCC_SNK_48_4_1);
 	define_test("BAP/UCL/SCC/BV-049-C [UCL SRC Config QoS, LC3 48_5_1]",
-			test_client, &cfg_snk_48_5_1, SCC_SNK_48_5_1);
+			test_setup, test_client, &cfg_snk_48_5_1,
+			SCC_SNK_48_5_1);
 	define_test("BAP/UCL/SCC/BV-050-C [UCL SRC Config QoS, LC3 48_6_1]",
-			test_client, &cfg_snk_48_6_1, SCC_SNK_48_6_1);
+			test_setup, test_client, &cfg_snk_48_6_1,
+			SCC_SNK_48_6_1);
 	define_test("BAP/UCL/SCC/BV-051-C [UCL SNK Config QoS, LC3 8_1_1]",
-			test_client, &cfg_src_8_1_1, SCC_SRC_8_1_1);
+			test_setup, test_client, &cfg_src_8_1_1,
+			SCC_SRC_8_1_1);
 	define_test("BAP/UCL/SCC/BV-052-C [UCL SNK Config QoS, LC3 8_2_1]",
-			test_client, &cfg_src_8_2_1, SCC_SRC_8_2_1);
+			test_setup, test_client, &cfg_src_8_2_1,
+			SCC_SRC_8_2_1);
 	define_test("BAP/UCL/SCC/BV-053-C [UCL SNK Config QoS, LC3 16_1_1]",
-			test_client, &cfg_src_16_1_1, SCC_SRC_16_1_1);
+			test_setup, test_client, &cfg_src_16_1_1,
+			SCC_SRC_16_1_1);
 	define_test("BAP/UCL/SCC/BV-054-C [UCL SNK Config QoS, LC3 16_2_1]",
-			test_client, &cfg_src_16_2_1, SCC_SRC_16_2_1);
+			test_setup, test_client, &cfg_src_16_2_1,
+			SCC_SRC_16_2_1);
 	define_test("BAP/UCL/SCC/BV-055-C [UCL SNK Config QoS, LC3 24_1_1]",
-			test_client, &cfg_src_24_1_1, SCC_SRC_24_1_1);
+			test_setup, test_client, &cfg_src_24_1_1,
+			SCC_SRC_24_1_1);
 	define_test("BAP/UCL/SCC/BV-056-C [UCL SNK Config QoS, LC3 24_2_1]",
-			test_client, &cfg_src_24_2_1, SCC_SRC_24_2_1);
+			test_setup, test_client, &cfg_src_24_2_1,
+			SCC_SRC_24_2_1);
 	define_test("BAP/UCL/SCC/BV-057-C [UCL SNK Config QoS, LC3 32_1_1]",
-			test_client, &cfg_src_32_1_1, SCC_SRC_32_1_1);
+			test_setup, test_client, &cfg_src_32_1_1,
+			SCC_SRC_32_1_1);
 	define_test("BAP/UCL/SCC/BV-058-C [UCL SNK Config QoS, LC3 32_2_1]",
-			test_client, &cfg_src_32_2_1, SCC_SRC_32_2_1);
+			test_setup, test_client, &cfg_src_32_2_1,
+			SCC_SRC_32_2_1);
 	define_test("BAP/UCL/SCC/BV-059-C [UCL SNK Config QoS, LC3 44.1_1_1]",
-			test_client, &cfg_src_44_1_1, SCC_SRC_44_1_1);
+			test_setup, test_client, &cfg_src_44_1_1,
+			SCC_SRC_44_1_1);
 	define_test("BAP/UCL/SCC/BV-060-C [UCL SNK Config QoS, LC3 44.1_2_1]",
-			test_client, &cfg_src_44_2_1, SCC_SRC_44_2_1);
+			test_setup, test_client, &cfg_src_44_2_1,
+			SCC_SRC_44_2_1);
 	define_test("BAP/UCL/SCC/BV-061-C [UCL SNK Config QoS, LC3 48_1_1]",
-			test_client, &cfg_src_48_1_1, SCC_SRC_48_1_1);
+			test_setup, test_client, &cfg_src_48_1_1,
+			SCC_SRC_48_1_1);
 	define_test("BAP/UCL/SCC/BV-062-C [UCL SNK Config QoS, LC3 48_2_1]",
-			test_client, &cfg_src_48_2_1, SCC_SRC_48_2_1);
+			test_setup, test_client, &cfg_src_48_2_1,
+			SCC_SRC_48_2_1);
 	define_test("BAP/UCL/SCC/BV-063-C [UCL SNK Config QoS, LC3 48_3_1]",
-			test_client, &cfg_src_48_3_1, SCC_SRC_48_3_1);
+			test_setup, test_client, &cfg_src_48_3_1,
+			SCC_SRC_48_3_1);
 	define_test("BAP/UCL/SCC/BV-064-C [UCL SNK Config QoS, LC3 48_4_1]",
-			test_client, &cfg_src_48_4_1, SCC_SRC_48_4_1);
+			test_setup, test_client, &cfg_src_48_4_1,
+			SCC_SRC_48_4_1);
 	define_test("BAP/UCL/SCC/BV-065-C [UCL SNK Config QoS, LC3 48_5_1]",
-			test_client, &cfg_src_48_5_1, SCC_SRC_48_5_1);
+			test_setup, test_client, &cfg_src_48_5_1,
+			SCC_SRC_48_5_1);
 	define_test("BAP/UCL/SCC/BV-066-C [UCL SNK Config QoS, LC3 48_6_1]",
-			test_client, &cfg_src_48_6_1, SCC_SRC_48_6_1);
+			test_setup, test_client, &cfg_src_48_6_1,
+			SCC_SRC_48_6_1);
 	define_test("BAP/UCL/SCC/BV-067-C [UCL SRC Config QoS, LC3 8_1_2]",
-			test_client, &cfg_snk_8_1_2, SCC_SNK_8_1_2);
+			test_setup, test_client, &cfg_snk_8_1_2,
+			SCC_SNK_8_1_2);
 	define_test("BAP/UCL/SCC/BV-068-C [UCL SRC Config QoS, LC3 8_2_2]",
-			test_client, &cfg_snk_8_2_2, SCC_SNK_8_2_2);
+			test_setup, test_client, &cfg_snk_8_2_2,
+			SCC_SNK_8_2_2);
 	define_test("BAP/UCL/SCC/BV-069-C [UCL SRC Config QoS, LC3 16_1_2]",
-			test_client, &cfg_snk_16_1_2, SCC_SNK_16_1_2);
+			test_setup, test_client, &cfg_snk_16_1_2,
+			SCC_SNK_16_1_2);
 	define_test("BAP/UCL/SCC/BV-070-C [UCL SRC Config QoS, LC3 16_2_2]",
-			test_client, &cfg_snk_16_2_2, SCC_SNK_16_2_2);
+			test_setup, test_client, &cfg_snk_16_2_2,
+			SCC_SNK_16_2_2);
 	define_test("BAP/UCL/SCC/BV-071-C [UCL SRC Config QoS, LC3 24_1_2]",
-			test_client, &cfg_snk_24_1_2, SCC_SNK_24_1_2);
+			test_setup, test_client, &cfg_snk_24_1_2,
+			SCC_SNK_24_1_2);
 	define_test("BAP/UCL/SCC/BV-072-C [UCL SRC Config QoS, LC3 24_2_2]",
-			test_client, &cfg_snk_24_2_2, SCC_SNK_24_2_2);
+			test_setup, test_client, &cfg_snk_24_2_2,
+			SCC_SNK_24_2_2);
 	define_test("BAP/UCL/SCC/BV-073-C [UCL SRC Config QoS, LC3 32_1_2]",
-			test_client, &cfg_snk_32_1_2, SCC_SNK_32_1_2);
+			test_setup, test_client, &cfg_snk_32_1_2,
+			SCC_SNK_32_1_2);
 	define_test("BAP/UCL/SCC/BV-074-C [UCL SRC Config QoS, LC3 32_2_2]",
-			test_client, &cfg_snk_32_2_2, SCC_SNK_32_2_2);
+			test_setup, test_client, &cfg_snk_32_2_2,
+			SCC_SNK_32_2_2);
 	define_test("BAP/UCL/SCC/BV-075-C [UCL SRC Config QoS, LC3 44.1_1_2]",
-			test_client, &cfg_snk_44_1_2, SCC_SNK_44_1_2);
+			test_setup, test_client, &cfg_snk_44_1_2,
+			SCC_SNK_44_1_2);
 	define_test("BAP/UCL/SCC/BV-076-C [UCL SRC Config QoS, LC3 44.1_2_2]",
-			test_client, &cfg_snk_44_2_2, SCC_SNK_44_2_2);
+			test_setup, test_client, &cfg_snk_44_2_2,
+			SCC_SNK_44_2_2);
 	define_test("BAP/UCL/SCC/BV-077-C [UCL SRC Config QoS, LC3 48_1_2]",
-			test_client, &cfg_snk_48_1_2, SCC_SNK_48_1_2);
+			test_setup, test_client, &cfg_snk_48_1_2,
+			SCC_SNK_48_1_2);
 	define_test("BAP/UCL/SCC/BV-078-C [UCL SRC Config QoS, LC3 48_2_2]",
-			test_client, &cfg_snk_48_2_2, SCC_SNK_48_2_2);
+			test_setup, test_client, &cfg_snk_48_2_2,
+			SCC_SNK_48_2_2);
 	define_test("BAP/UCL/SCC/BV-079-C [UCL SRC Config QoS, LC3 48_3_2]",
-			test_client, &cfg_snk_48_3_2, SCC_SNK_48_3_2);
+			test_setup, test_client, &cfg_snk_48_3_2,
+			SCC_SNK_48_3_2);
 	define_test("BAP/UCL/SCC/BV-080-C [UCL SRC Config QoS, LC3 48_4_2]",
-			test_client, &cfg_snk_48_4_2, SCC_SNK_48_4_2);
+			test_setup, test_client, &cfg_snk_48_4_2,
+			SCC_SNK_48_4_2);
 	define_test("BAP/UCL/SCC/BV-081-C [UCL SRC Config QoS, LC3 48_5_2]",
-			test_client, &cfg_snk_48_5_2, SCC_SNK_48_5_2);
+			test_setup, test_client, &cfg_snk_48_5_2,
+			SCC_SNK_48_5_2);
 	define_test("BAP/UCL/SCC/BV-082-C [UCL SRC Config QoS, LC3 48_6_2]",
-			test_client, &cfg_snk_48_6_2, SCC_SNK_48_6_2);
+			test_setup, test_client, &cfg_snk_48_6_2,
+			SCC_SNK_48_6_2);
 	define_test("BAP/UCL/SCC/BV-083-C [UCL SNK Config QoS, LC3 8_1_2]",
-			test_client, &cfg_src_8_1_2, SCC_SRC_8_1_2);
+			test_setup, test_client, &cfg_src_8_1_2,
+			SCC_SRC_8_1_2);
 	define_test("BAP/UCL/SCC/BV-084-C [UCL SNK Config QoS, LC3 8_2_2]",
-			test_client, &cfg_src_8_2_2, SCC_SRC_8_2_2);
+			test_setup, test_client, &cfg_src_8_2_2,
+			SCC_SRC_8_2_2);
 	define_test("BAP/UCL/SCC/BV-085-C [UCL SNK Config QoS, LC3 16_1_2]",
-			test_client, &cfg_src_16_1_2, SCC_SRC_16_1_2);
+			test_setup, test_client, &cfg_src_16_1_2,
+			SCC_SRC_16_1_2);
 	define_test("BAP/UCL/SCC/BV-086-C [UCL SNK Config QoS, LC3 16_2_2]",
-			test_client, &cfg_src_16_2_2, SCC_SRC_16_2_2);
+			test_setup, test_client, &cfg_src_16_2_2,
+			SCC_SRC_16_2_2);
 	define_test("BAP/UCL/SCC/BV-087-C [UCL SNK Config QoS, LC3 24_1_2]",
-			test_client, &cfg_src_24_1_2, SCC_SRC_24_1_2);
+			test_setup, test_client, &cfg_src_24_1_2,
+			SCC_SRC_24_1_2);
 	define_test("BAP/UCL/SCC/BV-088-C [UCL SNK Config QoS, LC3 24_2_2]",
-			test_client, &cfg_src_24_2_2, SCC_SRC_24_2_2);
+			test_setup, test_client, &cfg_src_24_2_2,
+			SCC_SRC_24_2_2);
 	define_test("BAP/UCL/SCC/BV-089-C [UCL SNK Config QoS, LC3 32_1_2]",
-			test_client, &cfg_src_32_1_2, SCC_SRC_32_1_2);
+			test_setup, test_client, &cfg_src_32_1_2,
+			SCC_SRC_32_1_2);
 	define_test("BAP/UCL/SCC/BV-090-C [UCL SNK Config QoS, LC3 32_2_2]",
-			test_client, &cfg_src_32_2_2, SCC_SRC_32_2_2);
+			test_setup, test_client, &cfg_src_32_2_2,
+			SCC_SRC_32_2_2);
 	define_test("BAP/UCL/SCC/BV-091-C [UCL SNK Config QoS, LC3 44.1_1_2]",
-			test_client, &cfg_src_44_1_2, SCC_SRC_44_1_2);
+			test_setup, test_client, &cfg_src_44_1_2,
+			SCC_SRC_44_1_2);
 	define_test("BAP/UCL/SCC/BV-092-C [UCL SNK Config QoS, LC3 44.1_2_2]",
-			test_client, &cfg_src_44_2_2, SCC_SRC_44_2_2);
+			test_setup, test_client, &cfg_src_44_2_2,
+			SCC_SRC_44_2_2);
 	define_test("BAP/UCL/SCC/BV-093-C [UCL SNK Config QoS, LC3 48_1_2]",
-			test_client, &cfg_src_48_1_2, SCC_SRC_48_1_2);
+			test_setup, test_client, &cfg_src_48_1_2,
+			SCC_SRC_48_1_2);
 	define_test("BAP/UCL/SCC/BV-094-C [UCL SNK Config QoS, LC3 48_2_2]",
-			test_client, &cfg_src_48_2_2, SCC_SRC_48_2_2);
+			test_setup, test_client, &cfg_src_48_2_2,
+			SCC_SRC_48_2_2);
 	define_test("BAP/UCL/SCC/BV-095-C [UCL SNK Config QoS, LC3 48_3_2]",
-			test_client, &cfg_src_48_3_2, SCC_SRC_48_3_2);
+			test_setup, test_client, &cfg_src_48_3_2,
+			SCC_SRC_48_3_2);
 	define_test("BAP/UCL/SCC/BV-096-C [UCL SNK Config QoS, LC3 48_4_2]",
-			test_client, &cfg_src_48_4_2, SCC_SRC_48_4_2);
+			test_setup, test_client, &cfg_src_48_4_2,
+			SCC_SRC_48_4_2);
 	define_test("BAP/UCL/SCC/BV-097-C [UCL SNK Config QoS, LC3 48_5_2]",
-			test_client, &cfg_src_48_5_2, SCC_SRC_48_5_2);
+			test_setup, test_client, &cfg_src_48_5_2,
+			SCC_SRC_48_5_2);
 	define_test("BAP/UCL/SCC/BV-098-C [UCL SNK Config QoS, LC3 48_6_2]",
-			test_client, &cfg_src_48_6_2, SCC_SRC_48_6_2);
+			test_setup, test_client, &cfg_src_48_6_2,
+			SCC_SRC_48_6_2);
 }
 
 static struct test_config cfg_snk_qos_vs = {
@@ -2243,9 +2406,11 @@ static struct test_config cfg_src_qos_vs = {
 static void test_scc_qos_vs(void)
 {
 	define_test("BAP/UCL/SCC/BV-099-C [UCL SNK Config QoS, VS]",
-			test_client, &cfg_src_qos_vs, SCC_SRC_QOS_VS);
+			test_setup, test_client, &cfg_src_qos_vs,
+			SCC_SRC_QOS_VS);
 	define_test("BAP/UCL/SCC/BV-100-C [UCL SRC QoS Codec, VS]",
-			test_client, &cfg_snk_qos_vs, SCC_SNK_QOS_VS);
+			test_setup, test_client, &cfg_snk_qos_vs,
+			SCC_SNK_QOS_VS);
 }
 
 static struct test_config cfg_snk_enable = {
@@ -2291,14 +2456,17 @@ static struct test_config cfg_src_enable = {
  *   Handle: 0x001c
  *     Data: 030300000403020100
  */
-#define SCC_SRC_ENABLE \
-	SCC_SRC_16_2_1, \
+#define SRC_ENABLE \
 	IOV_DATA(0x52, 0x22, 0x00, 0x03, 0x01, 0x03, 0x04, 0x03, 0x02, 0x01, \
 			00), \
 	IOV_DATA(0x1b, 0x22, 0x00, 0x03, 0x01, 0x01, 0x00, 0x00), \
 	IOV_NULL, \
 	IOV_DATA(0x1b, 0x1c, 0x00, 0x03, 0x03, 0x00, 0x00, 0x04, 0x03, 0x02, \
 			0x01, 0x00)
+
+#define SCC_SRC_ENABLE \
+	SCC_SRC_16_2_1, \
+	SRC_ENABLE
 
 /* Test Purpose:
  * Verify that a Unicast Client IUT can initiate an Enable operation for an ASE
@@ -2312,9 +2480,11 @@ static struct test_config cfg_src_enable = {
 static void test_scc_enable(void)
 {
 	define_test("BAP/UCL/SCC/BV-101-C [UCL SRC Enable]",
-			test_client, &cfg_snk_enable, SCC_SNK_ENABLE);
+			test_setup, test_client, &cfg_snk_enable,
+			SCC_SNK_ENABLE);
 	define_test("BAP/UCL/SCC/BV-102-C [UCL SNK Enable]",
-			test_client, &cfg_src_enable, SCC_SRC_ENABLE);
+			test_setup, test_client, &cfg_src_enable,
+			SCC_SRC_ENABLE);
 }
 
 static struct test_config cfg_snk_disable = {
@@ -2408,7 +2578,7 @@ static struct test_config cfg_src_disable_streaming = {
  *   Handle: 0x0016
  *     Data: 0101010400403020100
  */
-#define ASE_SRC_START \
+#define SRC_START \
 	IOV_DATA(0x52, 0x22, 0x00, 0x04, 0x01, 0x03), \
 	IOV_DATA(0x1b, 0x22, 0x00, 0x04, 0x01, 0x03, 0x00, 0x00), \
 	IOV_NULL, \
@@ -2417,7 +2587,7 @@ static struct test_config cfg_src_disable_streaming = {
 
 #define SCC_SRC_DISABLE_STREAMING \
 	SCC_SRC_ENABLE, \
-	ASE_SRC_START, \
+	SRC_START, \
 	ASE_SRC_DISABLE
 
 /* Test Purpose:
@@ -2431,12 +2601,14 @@ static struct test_config cfg_src_disable_streaming = {
 static void test_scc_disable(void)
 {
 	define_test("BAP/UCL/SCC/BV-103-C [UCL SNK Disable in Enabling State]",
-			test_client, &cfg_src_disable, SCC_SRC_DISABLE);
+			test_setup, test_client, &cfg_src_disable,
+			SCC_SRC_DISABLE);
 	define_test("BAP/UCL/SCC/BV-104-C [UCL SRC Disable in Enabling or "
 			"Streaming state]",
-			test_client, &cfg_snk_disable, SCC_SNK_DISABLE);
+			test_setup, test_client, &cfg_snk_disable,
+			SCC_SNK_DISABLE);
 	define_test("BAP/UCL/SCC/BV-105-C [UCL SNK Disable in Streaming State]",
-			test_client, &cfg_src_disable_streaming,
+			test_setup, test_client, &cfg_src_disable_streaming,
 			SCC_SRC_DISABLE_STREAMING);
 }
 
@@ -2620,7 +2792,7 @@ static struct test_config cfg_src_start_release = {
 
 #define SCC_SRC_START_RELEASE \
 	SCC_SRC_ENABLE, \
-	ASE_SRC_START, \
+	SRC_START, \
 	ASE_SRC_RELEASE
 
 static void state_disable_release(struct bt_bap_stream *stream,
@@ -2662,28 +2834,32 @@ static void test_scc_release(void)
 {
 	define_test("BAP/UCL/SCC/BV-106-C [UCL SNK Release in Codec Configured"
 			" state]",
-			test_client, &cfg_src_cc_release, SCC_SRC_CC_RELEASE);
+			test_setup, test_client, &cfg_src_cc_release,
+			SCC_SRC_CC_RELEASE);
 	define_test("BAP/UCL/SCC/BV-107-C [UCL SRC Release in Codec Configured"
 			" state]",
-			test_client, &cfg_snk_cc_release, SCC_SNK_CC_RELEASE);
+			test_setup, test_client, &cfg_snk_cc_release,
+			SCC_SNK_CC_RELEASE);
 	define_test("BAP/UCL/SCC/BV-108-C [UCL SNK Release in QoS Configured"
 			" state]",
-			test_client, &cfg_src_qos_release, SCC_SRC_QOS_RELEASE);
+			test_setup, test_client, &cfg_src_qos_release,
+			SCC_SRC_QOS_RELEASE);
 	define_test("BAP/UCL/SCC/BV-109-C [UCL SRC Release in QoS Configured"
 			" state]",
-			test_client, &cfg_snk_qos_release, SCC_SNK_QOS_RELEASE);
+			test_setup, test_client, &cfg_snk_qos_release,
+			SCC_SNK_QOS_RELEASE);
 	define_test("BAP/UCL/SCC/BV-110-C [UCL SNK Release in Enabling state]",
-			test_client, &cfg_src_enable_release,
+			test_setup, test_client, &cfg_src_enable_release,
 			SCC_SRC_ENABLE_RELEASE);
 	define_test("BAP/UCL/SCC/BV-111-C [UCL SRC Release in Enabling or"
 			" Streaming state]",
-			test_client, &cfg_snk_enable_release,
+			test_setup, test_client, &cfg_snk_enable_release,
 			SCC_SNK_ENABLE_RELEASE);
 	define_test("BAP/UCL/SCC/BV-112-C [UCL SNK Release in Streaming state]",
-			test_client, &cfg_src_start_release,
+			test_setup, test_client, &cfg_src_start_release,
 			SCC_SRC_START_RELEASE);
 	define_test("BAP/UCL/SCC/BV-113-C [UCL SNK Release in Disabling state]",
-			test_client, &cfg_src_disable_release,
+			test_setup, test_client, &cfg_src_disable_release,
 			SCC_SRC_DISABLE_RELEASE);
 }
 
@@ -2798,7 +2974,7 @@ static struct test_config cfg_src_metadata_streaming = {
 
 #define SCC_SRC_METADATA_STREAMING \
 	SCC_SRC_ENABLE, \
-	ASE_SRC_START, \
+	SRC_START, \
 	ASE_SRC_METADATA
 
 /* Unicast Client Initiates Update Metadata Operation
@@ -2815,14 +2991,2474 @@ static void test_scc_metadata(void)
 {
 	define_test("BAP/UCL/SCC/BV-115-C [UCL SNK Update Metadata in Enabling "
 			"State]",
-			test_client, &cfg_src_metadata, SCC_SRC_METADATA);
+			test_setup, test_client, &cfg_src_metadata,
+			SCC_SRC_METADATA);
 	define_test("BAP/UCL/SCC/BV-116-C [UCL SRC Update Metadata in Enabling "
 			"or Streaming state]",
-			test_client, &cfg_snk_metadata, SCC_SNK_METADATA);
+			test_setup, test_client, &cfg_snk_metadata,
+			SCC_SNK_METADATA);
 	define_test("BAP/UCL/SCC/BV-117-C [UCL SNK Update Metadata in Streaming"
 			" State]",
-			test_client, &cfg_src_metadata_streaming,
+			test_setup, test_client, &cfg_src_metadata_streaming,
 			SCC_SRC_METADATA_STREAMING);
+}
+
+#define SNK_ENABLE \
+	IOV_DATA(0x52, 0x22, 0x00, 0x03, 0x01, 0x01, 0x04, 0x03, 0x02, 0x01, \
+			00), \
+	IOV_DATA(0x1b, 0x22, 0x00, 0x03, 0x01, 0x01, 0x00, 0x00), \
+	IOV_NULL, \
+	IOV_DATA(0x1b, 0x16, 0x00, 0x01, 0x03, 0x00, 0x00, 0x04, 0x03, 0x02, \
+			0x01, 0x00)
+
+#define SNK_START \
+	IOV_NULL, \
+	IOV_DATA(0x1b, 0x16, 0x00, 0x01, 0x04, 0x00, 0x00, 0x04, 0x03, 0x02, \
+			0x01, 0x00)
+
+static struct test_config str_snk_ac2_8_1_1 = {
+	.cc = LC3_CONFIG_8_1_AC(1),
+	.qos = LC3_QOS_8_1_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK(_freq, _ac, _dur, _len) \
+	SCC_SNK_LC3(0x10, 0x02, 0x01, _freq, 0x02, 0x02, _dur, 0x03, 0x04, \
+			_len, _len >> 8, 0x05, 0x03, _ac, 0x00, 0x00, 0x00)
+
+#define STR_SNK_8(_ac, _dur, _len) \
+	STR_SNK(LC3_CONFIG_FREQ_8KHZ, _ac, _dur, _len)
+
+#define STR_SNK_8_1(_ac) \
+	STR_SNK_8(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_8_1)
+
+#define STR_SNK_QOS(_interval, _frame, _sdu, _rtn, _latency) \
+	QOS_SNK(_interval & 0xff, _interval >> 8 & 0xff, \
+		_interval >> 16 & 0xff, _frame, 0x02, _sdu & 0xff, \
+		_sdu >> 8 & 0xff, _rtn, \
+		_latency, _latency >> 8, 0x40, 0x9c, 0x00)
+
+#define STR_SNK_QOS_1(_sdu, _rtn, _latency) \
+	STR_SNK_QOS(7500u, LC3_QOS_UNFRAMED, _sdu, _rtn, _latency)
+
+#define STR_SNK_8_1_1(_chans) \
+	STR_SNK_8_1((BIT(_chans) - 1)), \
+	STR_SNK_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_8_1, LC3_QOS_8_1_1_RTN, \
+			LC3_QOS_8_1_1_LATENCY)
+
+#define STR_SNK_AC2_8_1_1 \
+	STR_SNK_8_1_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_8_1_1 = {
+	.cc = LC3_CONFIG_8_1_AC(2),
+	.qos = LC3_QOS_8_1_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_8_1_1 \
+	STR_SNK_8_1_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_8_2_1 = {
+	.cc = LC3_CONFIG_8_2_AC(1),
+	.qos = LC3_QOS_8_2_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_8_2(_ac) \
+	STR_SNK_8(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_8_2)
+
+#define STR_SNK_QOS_2(_sdu, _rtn, _latency) \
+	STR_SNK_QOS(10000u, LC3_QOS_UNFRAMED, _sdu, _rtn, _latency)
+
+#define STR_SNK_8_2_1(_chans) \
+	STR_SNK_8_2((BIT(_chans) - 1)), \
+	STR_SNK_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_8_2, LC3_QOS_8_2_1_RTN, \
+			LC3_QOS_8_2_1_LATENCY)
+
+#define STR_SNK_AC2_8_2_1 \
+	STR_SNK_8_2_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_8_2_1 = {
+	.cc = LC3_CONFIG_8_2_AC(2),
+	.qos = LC3_QOS_8_2_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_8_2_1 \
+	STR_SNK_8_2_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_8_1_2 = {
+	.cc = LC3_CONFIG_8_1_AC(1),
+	.qos = LC3_QOS_8_1_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_8_1_2(_chans) \
+	STR_SNK_8_1((BIT(_chans) - 1)), \
+	STR_SNK_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_8_1, LC3_QOS_8_1_2_RTN, \
+			LC3_QOS_8_1_2_LATENCY)
+
+#define STR_SNK_AC2_8_1_2 \
+	STR_SNK_8_1_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_8_1_2 = {
+	.cc = LC3_CONFIG_8_1_AC(2),
+	.qos = LC3_QOS_8_1_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_8_1_2 \
+	STR_SNK_8_1_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_8_2_2 = {
+	.cc = LC3_CONFIG_8_2_AC(1),
+	.qos = LC3_QOS_8_2_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_8_2_2(_chans) \
+	STR_SNK_8_2((BIT(_chans) - 1)), \
+	STR_SNK_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_8_2, LC3_QOS_8_2_2_RTN, \
+			LC3_QOS_8_2_2_LATENCY)
+
+#define STR_SNK_AC2_8_2_2 \
+	STR_SNK_8_2_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_8_2_2 = {
+	.cc = LC3_CONFIG_8_2_AC(2),
+	.qos = LC3_QOS_8_2_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_8_2_2 \
+	STR_SNK_8_2_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_16_1_1 = {
+	.cc = LC3_CONFIG_16_1_AC(1),
+	.qos = LC3_QOS_16_1_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_16(_ac, _dur, _len) \
+	STR_SNK(LC3_CONFIG_FREQ_16KHZ, _ac, _dur, _len)
+
+#define STR_SNK_16_1(_ac) \
+	STR_SNK_16(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_16_1)
+
+#define STR_SNK_16_1_1(_chans) \
+	STR_SNK_16_1((BIT(_chans) - 1)), \
+	STR_SNK_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_16_1, LC3_QOS_16_1_1_RTN, \
+			LC3_QOS_16_1_1_LATENCY)
+
+#define STR_SNK_AC2_16_1_1 \
+	STR_SNK_16_1_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_16_1_1 = {
+	.cc = LC3_CONFIG_16_1_AC(2),
+	.qos = LC3_QOS_16_1_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_16_1_1 \
+	STR_SNK_16_1_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_16_2_1 = {
+	.cc = LC3_CONFIG_16_2_AC(1),
+	.qos = LC3_QOS_16_2_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_16_2(_ac) \
+	STR_SNK_16(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_16_2)
+
+#define STR_SNK_16_2_1(_chans) \
+	STR_SNK_16_2((BIT(_chans) - 1)), \
+	STR_SNK_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_16_2, LC3_QOS_16_2_1_RTN, \
+			LC3_QOS_16_2_1_LATENCY)
+
+#define STR_SNK_AC2_16_2_1 \
+	STR_SNK_16_2_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_16_2_1 = {
+	.cc = LC3_CONFIG_16_2_AC(2),
+	.qos = LC3_QOS_16_2_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_16_2_1 \
+	STR_SNK_16_2_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_16_1_2 = {
+	.cc = LC3_CONFIG_16_1_AC(1),
+	.qos = LC3_QOS_16_1_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_16(_ac, _dur, _len) \
+	STR_SNK(LC3_CONFIG_FREQ_16KHZ, _ac, _dur, _len)
+
+#define STR_SNK_16_1_2(_chans) \
+	STR_SNK_16_1((BIT(_chans) - 1)), \
+	STR_SNK_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_16_1, LC3_QOS_16_1_2_RTN, \
+			LC3_QOS_16_1_2_LATENCY)
+
+#define STR_SNK_AC2_16_1_2 \
+	STR_SNK_16_1_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_16_1_2 = {
+	.cc = LC3_CONFIG_16_1_AC(2),
+	.qos = LC3_QOS_16_1_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_16_1_2 \
+	STR_SNK_16_1_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_16_2_2 = {
+	.cc = LC3_CONFIG_16_2_AC(1),
+	.qos = LC3_QOS_16_2_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_16_2(_ac) \
+	STR_SNK_16(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_16_2)
+
+#define STR_SNK_16_2_2(_chans) \
+	STR_SNK_16_2((BIT(_chans) - 1)), \
+	STR_SNK_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_16_2, LC3_QOS_16_2_2_RTN, \
+			LC3_QOS_16_2_2_LATENCY)
+
+#define STR_SNK_AC2_16_2_2 \
+	STR_SNK_16_2_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_16_2_2 = {
+	.cc = LC3_CONFIG_16_2_AC(2),
+	.qos = LC3_QOS_16_2_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_16_2_2 \
+	STR_SNK_16_2_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_24_1_1 = {
+	.cc = LC3_CONFIG_24_1_AC(1),
+	.qos = LC3_QOS_24_1_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_24(_ac, _dur, _len) \
+	STR_SNK(LC3_CONFIG_FREQ_24KHZ, _ac, _dur, _len)
+
+#define STR_SNK_24_1(_ac) \
+	STR_SNK_24(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_24_1)
+
+#define STR_SNK_24_1_1(_chans) \
+	STR_SNK_24_1((BIT(_chans) - 1)), \
+	STR_SNK_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_24_1, LC3_QOS_24_1_1_RTN, \
+			LC3_QOS_24_1_1_LATENCY)
+
+#define STR_SNK_AC2_24_1_1 \
+	STR_SNK_24_1_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_24_1_1 = {
+	.cc = LC3_CONFIG_24_1_AC(2),
+	.qos = LC3_QOS_24_1_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_24_1_1 \
+	STR_SNK_24_1_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_24_2_1 = {
+	.cc = LC3_CONFIG_24_2_AC(1),
+	.qos = LC3_QOS_24_2_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_24_2(_ac) \
+	STR_SNK_24(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_24_2)
+
+#define STR_SNK_24_2_1(_chans) \
+	STR_SNK_24_2((BIT(_chans) - 1)), \
+	STR_SNK_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_24_2, LC3_QOS_24_2_1_RTN, \
+			LC3_QOS_24_2_1_LATENCY)
+
+#define STR_SNK_AC2_24_2_1 \
+	STR_SNK_24_2_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_24_2_1 = {
+	.cc = LC3_CONFIG_24_2_AC(2),
+	.qos = LC3_QOS_24_2_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_24_2_1 \
+	STR_SNK_24_2_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_24_1_2 = {
+	.cc = LC3_CONFIG_24_1_AC(1),
+	.qos = LC3_QOS_24_1_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_24_1_2(_chans) \
+	STR_SNK_24_1((BIT(_chans) - 1)), \
+	STR_SNK_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_24_1, LC3_QOS_24_1_2_RTN, \
+			LC3_QOS_24_1_2_LATENCY)
+
+#define STR_SNK_AC2_24_1_2 \
+	STR_SNK_24_1_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_24_1_2 = {
+	.cc = LC3_CONFIG_24_1_AC(2),
+	.qos = LC3_QOS_24_1_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_24_1_2 \
+	STR_SNK_24_1_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_24_2_2 = {
+	.cc = LC3_CONFIG_24_2_AC(1),
+	.qos = LC3_QOS_24_2_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_24_2_2(_chans) \
+	STR_SNK_24_2((BIT(_chans) - 1)), \
+	STR_SNK_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_24_2, LC3_QOS_24_2_2_RTN, \
+			LC3_QOS_24_2_2_LATENCY)
+
+#define STR_SNK_AC2_24_2_2 \
+	STR_SNK_24_2_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_24_2_2 = {
+	.cc = LC3_CONFIG_24_2_AC(2),
+	.qos = LC3_QOS_24_2_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_24_2_2 \
+	STR_SNK_24_2_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_32_1_1 = {
+	.cc = LC3_CONFIG_32_1_AC(1),
+	.qos = LC3_QOS_32_1_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_32(_ac, _dur, _len) \
+	STR_SNK(LC3_CONFIG_FREQ_32KHZ, _ac, _dur, _len)
+
+#define STR_SNK_32_1(_ac) \
+	STR_SNK_32(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_32_1)
+
+#define STR_SNK_32_1_1(_chans) \
+	STR_SNK_32_1((BIT(_chans) - 1)), \
+	STR_SNK_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_32_1, LC3_QOS_32_1_1_RTN, \
+			LC3_QOS_32_1_1_LATENCY)
+
+#define STR_SNK_AC2_32_1_1 \
+	STR_SNK_32_1_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_32_1_1 = {
+	.cc = LC3_CONFIG_32_1_AC(2),
+	.qos = LC3_QOS_32_1_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_32_1_1 \
+	STR_SNK_32_1_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_32_2_1 = {
+	.cc = LC3_CONFIG_32_2_AC(1),
+	.qos = LC3_QOS_32_2_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_32_2(_ac) \
+	STR_SNK_32(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_32_2)
+
+#define STR_SNK_32_2_1(_chans) \
+	STR_SNK_32_2((BIT(_chans) - 1)), \
+	STR_SNK_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_32_2, LC3_QOS_32_2_1_RTN, \
+			LC3_QOS_32_2_1_LATENCY)
+
+#define STR_SNK_AC2_32_2_1 \
+	STR_SNK_32_2_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_32_2_1 = {
+	.cc = LC3_CONFIG_32_2_AC(2),
+	.qos = LC3_QOS_32_2_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_32_2_1 \
+	STR_SNK_32_2_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_32_1_2 = {
+	.cc = LC3_CONFIG_32_1_AC(1),
+	.qos = LC3_QOS_32_1_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_32_1_2(_chans) \
+	STR_SNK_32_1((BIT(_chans) - 1)), \
+	STR_SNK_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_32_1, LC3_QOS_32_1_2_RTN, \
+			LC3_QOS_32_1_2_LATENCY)
+
+#define STR_SNK_AC2_32_1_2 \
+	STR_SNK_32_1_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_32_1_2 = {
+	.cc = LC3_CONFIG_32_1_AC(2),
+	.qos = LC3_QOS_32_1_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_32_1_2 \
+	STR_SNK_32_1_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_32_2_2 = {
+	.cc = LC3_CONFIG_32_2_AC(1),
+	.qos = LC3_QOS_32_2_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_32_2_2(_chans) \
+	STR_SNK_32_2((BIT(_chans) - 1)), \
+	STR_SNK_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_32_2, LC3_QOS_32_2_2_RTN, \
+			LC3_QOS_32_2_2_LATENCY)
+
+#define STR_SNK_AC2_32_2_2 \
+	STR_SNK_32_2_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_32_2_2 = {
+	.cc = LC3_CONFIG_32_2_AC(2),
+	.qos = LC3_QOS_32_2_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_32_2_2 \
+	STR_SNK_32_2_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_44_1_1 = {
+	.cc = LC3_CONFIG_44_1_AC(1),
+	.qos = LC3_QOS_44_1_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_44(_ac, _dur, _len) \
+	STR_SNK(LC3_CONFIG_FREQ_44KHZ, _ac, _dur, _len)
+
+#define STR_SNK_44_1(_ac) \
+	STR_SNK_44(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_44_1)
+
+#define STR_SNK_QOS_44_1(_sdu, _rtn, _latency) \
+	STR_SNK_QOS(LC3_QOS_44_1_INTERVAL, LC3_QOS_FRAMED, _sdu, _rtn, \
+			_latency)
+
+#define STR_SNK_44_1_1(_chans) \
+	STR_SNK_44_1((BIT(_chans) - 1)), \
+	STR_SNK_QOS_44_1(_chans * LC3_CONFIG_FRAME_LEN_44_1, \
+			LC3_QOS_44_1_1_RTN, LC3_QOS_44_1_1_LATENCY)
+
+#define STR_SNK_AC2_44_1_1 \
+	STR_SNK_44_1_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_44_1_1 = {
+	.cc = LC3_CONFIG_44_1_AC(2),
+	.qos = LC3_QOS_44_1_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_44_1_1 \
+	STR_SNK_44_1_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_44_2_1 = {
+	.cc = LC3_CONFIG_44_2_AC(1),
+	.qos = LC3_QOS_44_2_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_44_2(_ac) \
+	STR_SNK_44(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_44_2)
+
+#define STR_SNK_QOS_44_2(_sdu, _rtn, _latency) \
+	STR_SNK_QOS(LC3_QOS_44_2_INTERVAL, LC3_QOS_FRAMED, _sdu, _rtn, \
+			_latency)
+
+#define STR_SNK_44_2_1(_chans) \
+	STR_SNK_44_2((BIT(_chans) - 1)), \
+	STR_SNK_QOS_44_2(_chans * LC3_CONFIG_FRAME_LEN_44_2, \
+			LC3_QOS_44_2_1_RTN, LC3_QOS_44_2_1_LATENCY)
+
+#define STR_SNK_AC2_44_2_1 \
+	STR_SNK_44_2_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_44_2_1 = {
+	.cc = LC3_CONFIG_44_2_AC(2),
+	.qos = LC3_QOS_44_2_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_44_2_1 \
+	STR_SNK_44_2_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_44_1_2 = {
+	.cc = LC3_CONFIG_44_1_AC(1),
+	.qos = LC3_QOS_44_1_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_44_1_2(_chans) \
+	STR_SNK_44_1((BIT(_chans) - 1)), \
+	STR_SNK_QOS_44_1(_chans * LC3_CONFIG_FRAME_LEN_44_1, \
+			LC3_QOS_44_1_2_RTN, LC3_QOS_44_1_2_LATENCY)
+
+#define STR_SNK_AC2_44_1_2 \
+	STR_SNK_44_1_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_44_1_2 = {
+	.cc = LC3_CONFIG_44_1_AC(2),
+	.qos = LC3_QOS_44_1_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_44_1_2 \
+	STR_SNK_44_1_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_44_2_2 = {
+	.cc = LC3_CONFIG_44_2_AC(1),
+	.qos = LC3_QOS_44_2_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_44_2_2(_chans) \
+	STR_SNK_44_2((BIT(_chans) - 1)), \
+	STR_SNK_QOS_44_2(_chans * LC3_CONFIG_FRAME_LEN_44_2, \
+			LC3_QOS_44_2_2_RTN, LC3_QOS_44_2_2_LATENCY)
+
+#define STR_SNK_AC2_44_2_2 \
+	STR_SNK_44_2_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_44_2_2 = {
+	.cc = LC3_CONFIG_44_2_AC(2),
+	.qos = LC3_QOS_44_2_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_44_2_2 \
+	STR_SNK_44_2_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_48_1_1 = {
+	.cc = LC3_CONFIG_48_1_AC(1),
+	.qos = LC3_QOS_48_1_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_48(_ac, _dur, _len) \
+	STR_SNK(LC3_CONFIG_FREQ_48KHZ, _ac, _dur, _len)
+
+#define STR_SNK_48_1(_ac) \
+	STR_SNK_48(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_48_1)
+
+#define STR_SNK_48_1_1(_chans) \
+	STR_SNK_48_1((BIT(_chans) - 1)), \
+	STR_SNK_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_48_1, LC3_QOS_48_1_1_RTN, \
+			LC3_QOS_48_1_1_LATENCY)
+
+#define STR_SNK_AC2_48_1_1 \
+	STR_SNK_48_1_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_48_1_1 = {
+	.cc = LC3_CONFIG_48_1_AC(2),
+	.qos = LC3_QOS_48_1_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_48_1_1 \
+	STR_SNK_48_1_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_48_2_1 = {
+	.cc = LC3_CONFIG_48_2_AC(1),
+	.qos = LC3_QOS_48_2_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_48_2(_ac) \
+	STR_SNK_48(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_48_2)
+
+#define STR_SNK_48_2_1(_chans) \
+	STR_SNK_48_2((BIT(_chans) - 1)), \
+	STR_SNK_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_48_2, LC3_QOS_48_2_1_RTN, \
+			LC3_QOS_48_2_1_LATENCY)
+
+#define STR_SNK_AC2_48_2_1 \
+	STR_SNK_48_2_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_48_2_1 = {
+	.cc = LC3_CONFIG_48_2_AC(2),
+	.qos = LC3_QOS_48_2_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_48_2_1 \
+	STR_SNK_48_2_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_48_3_1 = {
+	.cc = LC3_CONFIG_48_3_AC(1),
+	.qos = LC3_QOS_48_3_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_48_3(_ac) \
+	STR_SNK_48(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_48_3)
+
+#define STR_SNK_48_3_1(_chans) \
+	STR_SNK_48_3((BIT(_chans) - 1)), \
+	STR_SNK_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_48_3, LC3_QOS_48_3_1_RTN, \
+			LC3_QOS_48_3_1_LATENCY)
+
+#define STR_SNK_AC2_48_3_1 \
+	STR_SNK_48_3_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_48_3_1 = {
+	.cc = LC3_CONFIG_48_3_AC(2),
+	.qos = LC3_QOS_48_3_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_48_3_1 \
+	STR_SNK_48_3_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_48_4_1 = {
+	.cc = LC3_CONFIG_48_4_AC(1),
+	.qos = LC3_QOS_48_4_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_48_4(_ac) \
+	STR_SNK_48(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_48_4)
+
+#define STR_SNK_48_4_1(_chans) \
+	STR_SNK_48_4((BIT(_chans) - 1)), \
+	STR_SNK_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_48_4, LC3_QOS_48_4_1_RTN, \
+			LC3_QOS_48_4_1_LATENCY)
+
+#define STR_SNK_AC2_48_4_1 \
+	STR_SNK_48_4_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_48_4_1 = {
+	.cc = LC3_CONFIG_48_4_AC(2),
+	.qos = LC3_QOS_48_4_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_48_4_1 \
+	STR_SNK_48_4_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_48_5_1 = {
+	.cc = LC3_CONFIG_48_5_AC(1),
+	.qos = LC3_QOS_48_5_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_48_5(_ac) \
+	STR_SNK_48(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_48_5)
+
+#define STR_SNK_48_5_1(_chans) \
+	STR_SNK_48_5((BIT(_chans) - 1)), \
+	STR_SNK_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_48_5, LC3_QOS_48_5_1_RTN, \
+			LC3_QOS_48_5_1_LATENCY)
+
+#define STR_SNK_AC2_48_5_1 \
+	STR_SNK_48_5_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_48_5_1 = {
+	.cc = LC3_CONFIG_48_5_AC(2),
+	.qos = LC3_QOS_48_5_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_48_5_1 \
+	STR_SNK_48_5_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_48_6_1 = {
+	.cc = LC3_CONFIG_48_6_AC(1),
+	.qos = LC3_QOS_48_6_1_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_48_6(_ac) \
+	STR_SNK_48(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_48_6)
+
+#define STR_SNK_48_6_1(_chans) \
+	STR_SNK_48_6((BIT(_chans) - 1)), \
+	STR_SNK_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_48_6, LC3_QOS_48_6_1_RTN, \
+			LC3_QOS_48_6_1_LATENCY)
+
+#define STR_SNK_AC2_48_6_1 \
+	STR_SNK_48_6_1(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_48_6_1 = {
+	.cc = LC3_CONFIG_48_6_AC(2),
+	.qos = LC3_QOS_48_6_1_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_48_6_1 \
+	STR_SNK_48_6_1(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_48_1_2 = {
+	.cc = LC3_CONFIG_48_1_AC(1),
+	.qos = LC3_QOS_48_1_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_48_1_2(_chans) \
+	STR_SNK_48_1((BIT(_chans) - 1)), \
+	STR_SNK_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_48_1, LC3_QOS_48_1_2_RTN, \
+			LC3_QOS_48_1_2_LATENCY)
+
+#define STR_SNK_AC2_48_1_2 \
+	STR_SNK_48_1_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_48_1_2 = {
+	.cc = LC3_CONFIG_48_1_AC(2),
+	.qos = LC3_QOS_48_1_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_48_1_2 \
+	STR_SNK_48_1_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_48_2_2 = {
+	.cc = LC3_CONFIG_48_2_AC(1),
+	.qos = LC3_QOS_48_2_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_48_2_2(_chans) \
+	STR_SNK_48_2((BIT(_chans) - 1)), \
+	STR_SNK_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_48_2, LC3_QOS_48_2_2_RTN, \
+			LC3_QOS_48_2_2_LATENCY)
+
+#define STR_SNK_AC2_48_2_2 \
+	STR_SNK_48_2_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_48_2_2 = {
+	.cc = LC3_CONFIG_48_2_AC(2),
+	.qos = LC3_QOS_48_2_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_48_2_2 \
+	STR_SNK_48_2_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_48_3_2 = {
+	.cc = LC3_CONFIG_48_3_AC(1),
+	.qos = LC3_QOS_48_3_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_48_3_2(_chans) \
+	STR_SNK_48_3((BIT(_chans) - 1)), \
+	STR_SNK_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_48_3, LC3_QOS_48_3_2_RTN, \
+			LC3_QOS_48_3_2_LATENCY)
+
+#define STR_SNK_AC2_48_3_2 \
+	STR_SNK_48_3_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_48_3_2 = {
+	.cc = LC3_CONFIG_48_3_AC(2),
+	.qos = LC3_QOS_48_3_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_48_3_2 \
+	STR_SNK_48_3_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_48_4_2 = {
+	.cc = LC3_CONFIG_48_4_AC(1),
+	.qos = LC3_QOS_48_4_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_48_4_2(_chans) \
+	STR_SNK_48_4((BIT(_chans) - 1)), \
+	STR_SNK_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_48_4, LC3_QOS_48_4_2_RTN, \
+			LC3_QOS_48_4_2_LATENCY)
+
+#define STR_SNK_AC2_48_4_2 \
+	STR_SNK_48_4_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_48_4_2 = {
+	.cc = LC3_CONFIG_48_4_AC(2),
+	.qos = LC3_QOS_48_4_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_48_4_2 \
+	STR_SNK_48_4_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_48_5_2 = {
+	.cc = LC3_CONFIG_48_5_AC(1),
+	.qos = LC3_QOS_48_5_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_48_5_2(_chans) \
+	STR_SNK_48_5((BIT(_chans) - 1)), \
+	STR_SNK_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_48_5, LC3_QOS_48_5_2_RTN, \
+			LC3_QOS_48_5_2_LATENCY)
+
+#define STR_SNK_AC2_48_5_2 \
+	STR_SNK_48_5_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_48_5_2 = {
+	.cc = LC3_CONFIG_48_5_AC(2),
+	.qos = LC3_QOS_48_5_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_48_5_2 \
+	STR_SNK_48_5_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac2_48_6_2 = {
+	.cc = LC3_CONFIG_48_6_AC(1),
+	.qos = LC3_QOS_48_6_2_AC(1),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_48_6_2(_chans) \
+	STR_SNK_48_6((BIT(_chans) - 1)), \
+	STR_SNK_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_48_6, LC3_QOS_48_6_2_RTN, \
+			LC3_QOS_48_6_2_LATENCY)
+
+#define STR_SNK_AC2_48_6_2 \
+	STR_SNK_48_6_2(1), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_snk_ac10_48_6_2 = {
+	.cc = LC3_CONFIG_48_6_AC(2),
+	.qos = LC3_QOS_48_6_2_AC(2),
+	.snk = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SNK_AC10_48_6_2 \
+	STR_SNK_48_6_2(2), \
+	SNK_ENABLE, \
+	SNK_START
+
+static struct test_config str_src_ac1_8_1_1 = {
+	.cc = LC3_CONFIG_8_1_AC(1),
+	.qos = LC3_QOS_8_1_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC(_freq, _ac, _dur, _len) \
+	SCC_SRC_LC3(0x10, 0x02, 0x01, _freq, 0x02, 0x02, _dur, 0x03, 0x04, \
+			_len, _len >> 8, 0x05, 0x03, _ac, 0x00, 0x00, 0x00)
+
+#define STR_SRC_8(_ac, _dur, _len) \
+	STR_SRC(LC3_CONFIG_FREQ_8KHZ, _ac, _dur, _len)
+
+#define STR_SRC_8_1(_ac) \
+	STR_SRC_8(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_8_1)
+
+#define STR_SRC_QOS(_interval, _frame, _sdu, _rtn, _latency) \
+	QOS_SRC(_interval & 0xff, _interval >> 8 & 0xff, \
+		_interval >> 16 & 0xff, _frame, 0x02, _sdu & 0xff, \
+		_sdu >> 8 & 0xff, _rtn, \
+		_latency, _latency >> 8, 0x40, 0x9c, 0x00)
+
+#define STR_SRC_QOS_1(_sdu, _rtn, _latency) \
+	STR_SRC_QOS(7500u, LC3_QOS_UNFRAMED, _sdu, _rtn, _latency)
+
+#define STR_SRC_8_1_1(_chans) \
+	STR_SRC_8_1((BIT(_chans) - 1)), \
+	STR_SRC_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_8_1, LC3_QOS_8_1_1_RTN, \
+			LC3_QOS_8_1_1_LATENCY)
+
+#define STR_SRC_AC1_8_1_1 \
+	STR_SRC_8_1_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_8_1_1 = {
+	.cc = LC3_CONFIG_8_1_AC(2),
+	.qos = LC3_QOS_8_1_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_8_1_1 \
+	STR_SRC_8_1_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_8_2_1 = {
+	.cc = LC3_CONFIG_8_2_AC(1),
+	.qos = LC3_QOS_8_2_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_8_2(_ac) \
+	STR_SRC_8(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_8_2)
+
+#define STR_SRC_QOS_2(_sdu, _rtn, _latency) \
+	STR_SRC_QOS(10000u, LC3_QOS_UNFRAMED, _sdu, _rtn, _latency)
+
+#define STR_SRC_8_2_1(_chans) \
+	STR_SRC_8_2((BIT(_chans) - 1)), \
+	STR_SRC_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_8_2, LC3_QOS_8_2_1_RTN, \
+			LC3_QOS_8_2_1_LATENCY)
+
+#define STR_SRC_AC1_8_2_1 \
+	STR_SRC_8_2_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_8_2_1 = {
+	.cc = LC3_CONFIG_8_2_AC(2),
+	.qos = LC3_QOS_8_2_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_8_2_1 \
+	STR_SRC_8_2_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_16_1_1 = {
+	.cc = LC3_CONFIG_16_1_AC(1),
+	.qos = LC3_QOS_16_1_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_16(_ac, _dur, _len) \
+	STR_SRC(LC3_CONFIG_FREQ_16KHZ, _ac, _dur, _len)
+
+#define STR_SRC_16_1(_ac) \
+	STR_SRC_16(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_16_1)
+
+#define STR_SRC_16_1_1(_chans) \
+	STR_SRC_16_1((BIT(_chans) - 1)), \
+	STR_SRC_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_16_1, LC3_QOS_16_1_1_RTN, \
+			LC3_QOS_16_1_1_LATENCY)
+
+#define STR_SRC_AC1_16_1_1 \
+	STR_SRC_16_1_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_16_1_1 = {
+	.cc = LC3_CONFIG_16_1_AC(2),
+	.qos = LC3_QOS_16_1_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_16_1_1 \
+	STR_SRC_16_1_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_16_2_1 = {
+	.cc = LC3_CONFIG_16_2_AC(1),
+	.qos = LC3_QOS_16_2_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_16_2(_ac) \
+	STR_SRC_16(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_16_2)
+
+#define STR_SRC_16_2_1(_chans) \
+	STR_SRC_16_2((BIT(_chans) - 1)), \
+	STR_SRC_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_16_2, LC3_QOS_16_2_1_RTN, \
+			LC3_QOS_16_2_1_LATENCY)
+
+#define STR_SRC_AC1_16_2_1 \
+	STR_SRC_16_2_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_16_2_1 = {
+	.cc = LC3_CONFIG_16_2_AC(2),
+	.qos = LC3_QOS_16_2_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_16_2_1 \
+	STR_SRC_16_2_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_24_1_1 = {
+	.cc = LC3_CONFIG_24_1_AC(1),
+	.qos = LC3_QOS_24_1_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_24(_ac, _dur, _len) \
+	STR_SRC(LC3_CONFIG_FREQ_24KHZ, _ac, _dur, _len)
+
+#define STR_SRC_24_1(_ac) \
+	STR_SRC_24(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_24_1)
+
+#define STR_SRC_24_1_1(_chans) \
+	STR_SRC_24_1((BIT(_chans) - 1)), \
+	STR_SRC_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_24_1, LC3_QOS_24_1_1_RTN, \
+			LC3_QOS_24_1_1_LATENCY)
+
+#define STR_SRC_AC1_24_1_1 \
+	STR_SRC_24_1_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_24_1_1 = {
+	.cc = LC3_CONFIG_24_1_AC(2),
+	.qos = LC3_QOS_24_1_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_24_1_1 \
+	STR_SRC_24_1_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_24_2_1 = {
+	.cc = LC3_CONFIG_24_2_AC(1),
+	.qos = LC3_QOS_24_2_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_24_2(_ac) \
+	STR_SRC_24(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_24_2)
+
+#define STR_SRC_24_2_1(_chans) \
+	STR_SRC_24_2((BIT(_chans) - 1)), \
+	STR_SRC_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_24_2, LC3_QOS_24_2_1_RTN, \
+			LC3_QOS_24_2_1_LATENCY)
+
+#define STR_SRC_AC1_24_2_1 \
+	STR_SRC_24_2_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_24_2_1 = {
+	.cc = LC3_CONFIG_24_2_AC(2),
+	.qos = LC3_QOS_24_2_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_24_2_1 \
+	STR_SRC_24_2_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_32_1_1 = {
+	.cc = LC3_CONFIG_32_1_AC(1),
+	.qos = LC3_QOS_32_1_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_32(_ac, _dur, _len) \
+	STR_SRC(LC3_CONFIG_FREQ_32KHZ, _ac, _dur, _len)
+
+#define STR_SRC_32_1(_ac) \
+	STR_SRC_32(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_32_1)
+
+#define STR_SRC_32_1_1(_chans) \
+	STR_SRC_32_1((BIT(_chans) - 1)), \
+	STR_SRC_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_32_1, LC3_QOS_32_1_1_RTN, \
+			LC3_QOS_32_1_1_LATENCY)
+
+#define STR_SRC_AC1_32_1_1 \
+	STR_SRC_32_1_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_32_1_1 = {
+	.cc = LC3_CONFIG_32_1_AC(2),
+	.qos = LC3_QOS_32_1_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_32_1_1 \
+	STR_SRC_32_1_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_32_2_1 = {
+	.cc = LC3_CONFIG_32_2_AC(1),
+	.qos = LC3_QOS_32_2_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_32_2(_ac) \
+	STR_SRC_32(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_32_2)
+
+#define STR_SRC_32_2_1(_chans) \
+	STR_SRC_32_2((BIT(_chans) - 1)), \
+	STR_SRC_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_32_2, LC3_QOS_32_2_1_RTN, \
+			LC3_QOS_32_2_1_LATENCY)
+
+#define STR_SRC_AC1_32_2_1 \
+	STR_SRC_32_2_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_32_2_1 = {
+	.cc = LC3_CONFIG_32_2_AC(2),
+	.qos = LC3_QOS_32_2_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_32_2_1 \
+	STR_SRC_32_2_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_44_1_1 = {
+	.cc = LC3_CONFIG_44_1_AC(1),
+	.qos = LC3_QOS_44_1_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_44(_ac, _dur, _len) \
+	STR_SRC(LC3_CONFIG_FREQ_44KHZ, _ac, _dur, _len)
+
+#define STR_SRC_44_1(_ac) \
+	STR_SRC_44(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_44_1)
+
+#define STR_SRC_QOS_44_1(_sdu, _rtn, _latency) \
+	STR_SRC_QOS(LC3_QOS_44_1_INTERVAL, LC3_QOS_FRAMED, _sdu, _rtn, \
+			_latency)
+
+#define STR_SRC_44_1_1(_chans) \
+	STR_SRC_44_1((BIT(_chans) - 1)), \
+	STR_SRC_QOS_44_1(_chans * LC3_CONFIG_FRAME_LEN_44_1, \
+			LC3_QOS_44_1_1_RTN, LC3_QOS_44_1_1_LATENCY)
+
+#define STR_SRC_AC1_44_1_1 \
+	STR_SRC_44_1_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_44_1_1 = {
+	.cc = LC3_CONFIG_44_1_AC(2),
+	.qos = LC3_QOS_44_1_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_44_1_1 \
+	STR_SRC_44_1_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_44_2_1 = {
+	.cc = LC3_CONFIG_44_2_AC(1),
+	.qos = LC3_QOS_44_2_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_44_2(_ac) \
+	STR_SRC_44(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_44_2)
+
+#define STR_SRC_QOS_44_2(_sdu, _rtn, _latency) \
+	STR_SRC_QOS(LC3_QOS_44_2_INTERVAL, LC3_QOS_FRAMED, _sdu, _rtn, \
+			_latency)
+
+#define STR_SRC_44_2_1(_chans) \
+	STR_SRC_44_2((BIT(_chans) - 1)), \
+	STR_SRC_QOS_44_2(_chans * LC3_CONFIG_FRAME_LEN_44_2, \
+			LC3_QOS_44_2_1_RTN, LC3_QOS_44_2_1_LATENCY)
+
+#define STR_SRC_AC1_44_2_1 \
+	STR_SRC_44_2_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_44_2_1 = {
+	.cc = LC3_CONFIG_44_2_AC(2),
+	.qos = LC3_QOS_44_2_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_44_2_1 \
+	STR_SRC_44_2_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_48_1_1 = {
+	.cc = LC3_CONFIG_48_1_AC(1),
+	.qos = LC3_QOS_48_1_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_48(_ac, _dur, _len) \
+	STR_SRC(LC3_CONFIG_FREQ_48KHZ, _ac, _dur, _len)
+
+#define STR_SRC_48_1(_ac) \
+	STR_SRC_48(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_48_1)
+
+#define STR_SRC_48_1_1(_chans) \
+	STR_SRC_48_1((BIT(_chans) - 1)), \
+	STR_SRC_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_48_1, LC3_QOS_48_1_1_RTN, \
+			LC3_QOS_48_1_1_LATENCY)
+
+#define STR_SRC_AC1_48_1_1 \
+	STR_SRC_48_1_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_48_1_1 = {
+	.cc = LC3_CONFIG_48_1_AC(2),
+	.qos = LC3_QOS_48_1_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_48_1_1 \
+	STR_SRC_48_1_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_48_2_1 = {
+	.cc = LC3_CONFIG_48_2_AC(1),
+	.qos = LC3_QOS_48_2_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_48_2(_ac) \
+	STR_SRC_48(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_48_2)
+
+#define STR_SRC_48_2_1(_chans) \
+	STR_SRC_48_2((BIT(_chans) - 1)), \
+	STR_SRC_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_48_2, LC3_QOS_48_2_1_RTN, \
+			LC3_QOS_48_2_1_LATENCY)
+
+#define STR_SRC_AC1_48_2_1 \
+	STR_SRC_48_2_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_48_2_1 = {
+	.cc = LC3_CONFIG_48_2_AC(2),
+	.qos = LC3_QOS_48_2_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_48_2_1 \
+	STR_SRC_48_2_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_48_3_1 = {
+	.cc = LC3_CONFIG_48_3_AC(1),
+	.qos = LC3_QOS_48_3_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_48_3(_ac) \
+	STR_SRC_48(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_48_3)
+
+#define STR_SRC_48_3_1(_chans) \
+	STR_SRC_48_3((BIT(_chans) - 1)), \
+	STR_SRC_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_48_3, LC3_QOS_48_3_1_RTN, \
+			LC3_QOS_48_3_1_LATENCY)
+
+#define STR_SRC_AC1_48_3_1 \
+	STR_SRC_48_3_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_48_3_1 = {
+	.cc = LC3_CONFIG_48_3_AC(2),
+	.qos = LC3_QOS_48_3_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_48_3_1 \
+	STR_SRC_48_3_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_48_4_1 = {
+	.cc = LC3_CONFIG_48_4_AC(1),
+	.qos = LC3_QOS_48_4_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_48_4(_ac) \
+	STR_SRC_48(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_48_4)
+
+#define STR_SRC_48_4_1(_chans) \
+	STR_SRC_48_4((BIT(_chans) - 1)), \
+	STR_SRC_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_48_4, LC3_QOS_48_4_1_RTN, \
+			LC3_QOS_48_4_1_LATENCY)
+
+#define STR_SRC_AC1_48_4_1 \
+	STR_SRC_48_4_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_48_4_1 = {
+	.cc = LC3_CONFIG_48_4_AC(2),
+	.qos = LC3_QOS_48_4_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_48_4_1 \
+	STR_SRC_48_4_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_48_5_1 = {
+	.cc = LC3_CONFIG_48_5_AC(1),
+	.qos = LC3_QOS_48_5_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_48_5(_ac) \
+	STR_SRC_48(_ac, LC3_CONFIG_DURATION_7_5, LC3_CONFIG_FRAME_LEN_48_5)
+
+#define STR_SRC_48_5_1(_chans) \
+	STR_SRC_48_5((BIT(_chans) - 1)), \
+	STR_SRC_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_48_5, LC3_QOS_48_5_1_RTN, \
+			LC3_QOS_48_5_1_LATENCY)
+
+#define STR_SRC_AC1_48_5_1 \
+	STR_SRC_48_5_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_48_5_1 = {
+	.cc = LC3_CONFIG_48_5_AC(2),
+	.qos = LC3_QOS_48_5_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_48_5_1 \
+	STR_SRC_48_5_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_48_6_1 = {
+	.cc = LC3_CONFIG_48_6_AC(1),
+	.qos = LC3_QOS_48_6_1_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_48_6(_ac) \
+	STR_SRC_48(_ac, LC3_CONFIG_DURATION_10, LC3_CONFIG_FRAME_LEN_48_6)
+
+#define STR_SRC_48_6_1(_chans) \
+	STR_SRC_48_6((BIT(_chans) - 1)), \
+	STR_SRC_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_48_6, LC3_QOS_48_6_1_RTN, \
+			LC3_QOS_48_6_1_LATENCY)
+
+#define STR_SRC_AC1_48_6_1 \
+	STR_SRC_48_6_1(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_48_6_1 = {
+	.cc = LC3_CONFIG_48_6_AC(2),
+	.qos = LC3_QOS_48_6_1_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_48_6_1 \
+	STR_SRC_48_6_1(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_8_1_2 = {
+	.cc = LC3_CONFIG_8_1_AC(1),
+	.qos = LC3_QOS_8_1_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_8_1_2(_chans) \
+	STR_SRC_8_1((BIT(_chans) - 1)), \
+	STR_SRC_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_8_1, LC3_QOS_8_1_2_RTN, \
+			LC3_QOS_8_1_2_LATENCY)
+
+#define STR_SRC_AC1_8_1_2 \
+	STR_SRC_8_1_2(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_8_1_2 = {
+	.cc = LC3_CONFIG_8_1_AC(2),
+	.qos = LC3_QOS_8_1_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_8_1_2 \
+	STR_SRC_8_1_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_8_2_2 = {
+	.cc = LC3_CONFIG_8_2_AC(1),
+	.qos = LC3_QOS_8_2_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_8_2_2(_chans) \
+	STR_SRC_8_2((BIT(_chans) - 1)), \
+	STR_SRC_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_8_2, LC3_QOS_8_2_2_RTN, \
+			LC3_QOS_8_2_2_LATENCY)
+
+#define STR_SRC_AC1_8_2_2 \
+	STR_SRC_8_2_2(1), \
+	SRC_ENABLE, \
+	SNK_START
+
+static struct test_config str_src_ac4_8_2_2 = {
+	.cc = LC3_CONFIG_8_2_AC(2),
+	.qos = LC3_QOS_8_2_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_8_2_2 \
+	STR_SRC_8_2_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_16_1_2 = {
+	.cc = LC3_CONFIG_16_1_AC(1),
+	.qos = LC3_QOS_16_1_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_16_1_2(_chans) \
+	STR_SRC_16_1((BIT(_chans) - 1)), \
+	STR_SRC_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_16_1, LC3_QOS_16_1_2_RTN, \
+			LC3_QOS_16_1_2_LATENCY)
+
+#define STR_SRC_AC1_16_1_2 \
+	STR_SRC_16_1_2(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_16_1_2 = {
+	.cc = LC3_CONFIG_16_1_AC(2),
+	.qos = LC3_QOS_16_1_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_16_1_2 \
+	STR_SRC_16_1_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_16_2_2 = {
+	.cc = LC3_CONFIG_16_2_AC(1),
+	.qos = LC3_QOS_16_2_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_16_2_2(_chans) \
+	STR_SRC_16_2((BIT(_chans) - 1)), \
+	STR_SRC_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_16_2, LC3_QOS_16_2_2_RTN, \
+			LC3_QOS_16_2_2_LATENCY)
+
+#define STR_SRC_AC1_16_2_2 \
+	STR_SRC_16_2_2(1), \
+	SRC_ENABLE, \
+	SNK_START
+
+static struct test_config str_src_ac4_16_2_2 = {
+	.cc = LC3_CONFIG_16_2_AC(2),
+	.qos = LC3_QOS_16_2_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_16_2_2 \
+	STR_SRC_16_2_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_24_1_2 = {
+	.cc = LC3_CONFIG_24_1_AC(1),
+	.qos = LC3_QOS_24_1_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_24_1_2(_chans) \
+	STR_SRC_24_1((BIT(_chans) - 1)), \
+	STR_SRC_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_24_1, LC3_QOS_24_1_2_RTN, \
+			LC3_QOS_24_1_2_LATENCY)
+
+#define STR_SRC_AC1_24_1_2 \
+	STR_SRC_24_1_2(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_24_1_2 = {
+	.cc = LC3_CONFIG_24_1_AC(2),
+	.qos = LC3_QOS_24_1_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_24_1_2 \
+	STR_SRC_24_1_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_24_2_2 = {
+	.cc = LC3_CONFIG_24_2_AC(1),
+	.qos = LC3_QOS_24_2_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_24_2_2(_chans) \
+	STR_SRC_24_2((BIT(_chans) - 1)), \
+	STR_SRC_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_24_2, LC3_QOS_24_2_2_RTN, \
+			LC3_QOS_24_2_2_LATENCY)
+
+#define STR_SRC_AC1_24_2_2 \
+	STR_SRC_24_2_2(1), \
+	SRC_ENABLE, \
+	SNK_START
+
+static struct test_config str_src_ac4_24_2_2 = {
+	.cc = LC3_CONFIG_24_2_AC(2),
+	.qos = LC3_QOS_24_2_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_24_2_2 \
+	STR_SRC_24_2_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_32_1_2 = {
+	.cc = LC3_CONFIG_32_1_AC(1),
+	.qos = LC3_QOS_32_1_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_32_1_2(_chans) \
+	STR_SRC_32_1((BIT(_chans) - 1)), \
+	STR_SRC_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_32_1, LC3_QOS_32_1_2_RTN, \
+			LC3_QOS_32_1_2_LATENCY)
+
+#define STR_SRC_AC1_32_1_2 \
+	STR_SRC_32_1_2(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_32_1_2 = {
+	.cc = LC3_CONFIG_32_1_AC(2),
+	.qos = LC3_QOS_32_1_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_32_1_2 \
+	STR_SRC_32_1_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_32_2_2 = {
+	.cc = LC3_CONFIG_32_2_AC(1),
+	.qos = LC3_QOS_32_2_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_32_2_2(_chans) \
+	STR_SRC_32_2((BIT(_chans) - 1)), \
+	STR_SRC_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_32_2, LC3_QOS_32_2_2_RTN, \
+			LC3_QOS_32_2_2_LATENCY)
+
+#define STR_SRC_AC1_32_2_2 \
+	STR_SRC_32_2_2(1), \
+	SRC_ENABLE, \
+	SNK_START
+
+static struct test_config str_src_ac4_32_2_2 = {
+	.cc = LC3_CONFIG_32_2_AC(2),
+	.qos = LC3_QOS_32_2_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_32_2_2 \
+	STR_SRC_32_2_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_44_1_2 = {
+	.cc = LC3_CONFIG_44_1_AC(1),
+	.qos = LC3_QOS_44_1_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+
+#define STR_SRC_44_1_2(_chans) \
+	STR_SRC_44_1((BIT(_chans) - 1)), \
+	STR_SRC_QOS_44_1(_chans * LC3_CONFIG_FRAME_LEN_44_1, \
+			 LC3_QOS_44_1_2_RTN, LC3_QOS_44_1_2_LATENCY)
+
+#define STR_SRC_AC1_44_1_2 \
+	STR_SRC_44_1_2(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_44_1_2 = {
+	.cc = LC3_CONFIG_44_1_AC(2),
+	.qos = LC3_QOS_44_1_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_44_1_2 \
+	STR_SRC_44_1_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_44_2_2 = {
+	.cc = LC3_CONFIG_44_2_AC(1),
+	.qos = LC3_QOS_44_2_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_44_2_2(_chans) \
+	STR_SRC_44_2((BIT(_chans) - 1)), \
+	STR_SRC_QOS_44_2(_chans * LC3_CONFIG_FRAME_LEN_44_2, \
+			LC3_QOS_44_2_2_RTN, LC3_QOS_44_2_2_LATENCY)
+
+#define STR_SRC_AC1_44_2_2 \
+	STR_SRC_44_2_2(1), \
+	SRC_ENABLE, \
+	SNK_START
+
+static struct test_config str_src_ac4_44_2_2 = {
+	.cc = LC3_CONFIG_44_2_AC(2),
+	.qos = LC3_QOS_44_2_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_44_2_2 \
+	STR_SRC_44_2_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_48_1_2 = {
+	.cc = LC3_CONFIG_48_1_AC(1),
+	.qos = LC3_QOS_48_1_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+
+#define STR_SRC_48_1_2(_chans) \
+	STR_SRC_48_1((BIT(_chans) - 1)), \
+	STR_SRC_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_48_1, LC3_QOS_48_1_2_RTN, \
+			LC3_QOS_48_1_2_LATENCY)
+
+#define STR_SRC_AC1_48_1_2 \
+	STR_SRC_48_1_2(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_48_1_2 = {
+	.cc = LC3_CONFIG_48_1_AC(2),
+	.qos = LC3_QOS_48_1_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_48_1_2 \
+	STR_SRC_48_1_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_48_2_2 = {
+	.cc = LC3_CONFIG_48_2_AC(1),
+	.qos = LC3_QOS_48_2_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_48_2_2(_chans) \
+	STR_SRC_48_2((BIT(_chans) - 1)), \
+	STR_SRC_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_48_2, LC3_QOS_48_2_2_RTN, \
+			LC3_QOS_48_2_2_LATENCY)
+
+#define STR_SRC_AC1_48_2_2 \
+	STR_SRC_48_2_2(1), \
+	SRC_ENABLE, \
+	SNK_START
+
+static struct test_config str_src_ac4_48_2_2 = {
+	.cc = LC3_CONFIG_48_2_AC(2),
+	.qos = LC3_QOS_48_2_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_48_2_2 \
+	STR_SRC_48_2_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_48_3_2 = {
+	.cc = LC3_CONFIG_48_3_AC(1),
+	.qos = LC3_QOS_48_3_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+
+#define STR_SRC_48_3_2(_chans) \
+	STR_SRC_48_3((BIT(_chans) - 1)), \
+	STR_SRC_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_48_3, LC3_QOS_48_3_2_RTN, \
+			LC3_QOS_48_3_2_LATENCY)
+
+#define STR_SRC_AC1_48_3_2 \
+	STR_SRC_48_3_2(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_48_3_2 = {
+	.cc = LC3_CONFIG_48_3_AC(2),
+	.qos = LC3_QOS_48_3_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_48_3_2 \
+	STR_SRC_48_3_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_48_4_2 = {
+	.cc = LC3_CONFIG_48_4_AC(1),
+	.qos = LC3_QOS_48_4_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_48_4_2(_chans) \
+	STR_SRC_48_4((BIT(_chans) - 1)), \
+	STR_SRC_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_48_4, LC3_QOS_48_4_2_RTN, \
+			LC3_QOS_48_4_2_LATENCY)
+
+#define STR_SRC_AC1_48_4_2 \
+	STR_SRC_48_4_2(1), \
+	SRC_ENABLE, \
+	SNK_START
+
+static struct test_config str_src_ac4_48_4_2 = {
+	.cc = LC3_CONFIG_48_4_AC(2),
+	.qos = LC3_QOS_48_4_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_48_4_2 \
+	STR_SRC_48_4_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_48_5_2 = {
+	.cc = LC3_CONFIG_48_5_AC(1),
+	.qos = LC3_QOS_48_5_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+
+#define STR_SRC_48_5_2(_chans) \
+	STR_SRC_48_5((BIT(_chans) - 1)), \
+	STR_SRC_QOS_1(_chans * LC3_CONFIG_FRAME_LEN_48_5, LC3_QOS_48_5_2_RTN, \
+			LC3_QOS_48_5_2_LATENCY)
+
+#define STR_SRC_AC1_48_5_2 \
+	STR_SRC_48_5_2(1), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac4_48_5_2 = {
+	.cc = LC3_CONFIG_48_5_AC(2),
+	.qos = LC3_QOS_48_5_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_48_5_2 \
+	STR_SRC_48_5_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+static struct test_config str_src_ac1_48_6_2 = {
+	.cc = LC3_CONFIG_48_6_AC(1),
+	.qos = LC3_QOS_48_6_2_AC(1),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_48_6_2(_chans) \
+	STR_SRC_48_6((BIT(_chans) - 1)), \
+	STR_SRC_QOS_2(_chans * LC3_CONFIG_FRAME_LEN_48_6, LC3_QOS_48_6_2_RTN, \
+			LC3_QOS_48_6_2_LATENCY)
+
+#define STR_SRC_AC1_48_6_2 \
+	STR_SRC_48_6_2(1), \
+	SRC_ENABLE, \
+	SNK_START
+
+static struct test_config str_src_ac4_48_6_2 = {
+	.cc = LC3_CONFIG_48_6_AC(2),
+	.qos = LC3_QOS_48_6_2_AC(2),
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_STREAMING,
+};
+
+#define STR_SRC_AC4_48_6_2 \
+	STR_SRC_48_6_2(2), \
+	SRC_ENABLE, \
+	SRC_START
+
+/* Unicast Client Streaming – 1 Unicast Server, 1 Stream, 1 CIS – LC3
+ *
+ * Test Purpose:
+ * Verify that a Unicast Client IUT can stream audio data over one unicast
+ * Audio Stream to or from a Unicast Server.
+ *
+ * Pass verdict:
+ * If the IUT is in the Audio Sink role, the IUT receives SDUs with a zero or
+ * more length that contains LC3-encoded data formatted using the LC3 Media
+ * Packet format (defined in [3] Section 4.2).
+ */
+static void test_str_1_1_1_lc3(void)
+{
+	define_test("BAP/UCL/STR/BV-001-C [UCL, AC 2, LC3 8_1_1]",
+			test_setup, test_client, &str_snk_ac2_8_1_1,
+			STR_SNK_AC2_8_1_1);
+	define_test("BAP/UCL/STR/BV-002-C [UCL, AC 10, LC3 8_1_1]",
+			test_setup, test_client, &str_snk_ac10_8_1_1,
+			STR_SNK_AC10_8_1_1);
+	define_test("BAP/UCL/STR/BV-003-C [UCL, AC 2, LC3 8_2_1]",
+			test_setup, test_client, &str_snk_ac2_8_2_1,
+			STR_SNK_AC2_8_2_1);
+	define_test("BAP/UCL/STR/BV-004-C [UCL, AC 10, LC3 8_2_1]",
+			test_setup, test_client, &str_snk_ac10_8_2_1,
+			STR_SNK_AC10_8_2_1);
+	define_test("BAP/UCL/STR/BV-005-C [UCL, AC 2, LC3 16_1_1]",
+			test_setup, test_client, &str_snk_ac2_16_1_1,
+			STR_SNK_AC2_16_1_1);
+	define_test("BAP/UCL/STR/BV-006-C [UCL, AC 10, LC3 16_1_1]",
+			test_setup, test_client, &str_snk_ac10_16_1_1,
+			STR_SNK_AC10_16_1_1);
+	define_test("BAP/UCL/STR/BV-007-C [UCL, AC 2, LC3 16_2_1]",
+			test_setup, test_client, &str_snk_ac2_16_2_1,
+			STR_SNK_AC2_16_2_1);
+	define_test("BAP/UCL/STR/BV-008-C [UCL, AC 10, LC3 16_2_1]",
+			test_setup, test_client, &str_snk_ac10_16_2_1,
+			STR_SNK_AC10_16_2_1);
+	define_test("BAP/UCL/STR/BV-009-C [UCL, AC 2, LC3 24_1_1]",
+			test_setup, test_client, &str_snk_ac2_24_1_1,
+			STR_SNK_AC2_24_1_1);
+	define_test("BAP/UCL/STR/BV-010-C [UCL, AC 10, LC3 24_1_1]",
+			test_setup, test_client, &str_snk_ac10_24_1_1,
+			STR_SNK_AC10_24_1_1);
+	define_test("BAP/UCL/STR/BV-011-C [UCL, AC 2, LC3 24_2_1]",
+			test_setup, test_client, &str_snk_ac2_24_2_1,
+			STR_SNK_AC2_24_2_1);
+	define_test("BAP/UCL/STR/BV-012-C [UCL, AC 10, LC3 24_2_1]",
+			test_setup, test_client, &str_snk_ac10_24_2_1,
+			STR_SNK_AC10_24_2_1);
+	define_test("BAP/UCL/STR/BV-013-C [UCL, AC 2, LC3 32_1_1]",
+			test_setup, test_client, &str_snk_ac2_32_1_1,
+			STR_SNK_AC2_32_1_1);
+	define_test("BAP/UCL/STR/BV-014-C [UCL, AC 10, LC3 32_1_1]",
+			test_setup, test_client, &str_snk_ac10_32_1_1,
+			STR_SNK_AC10_32_1_1);
+	define_test("BAP/UCL/STR/BV-015-C [UCL, AC 2, LC3 32_2_1]",
+			test_setup, test_client, &str_snk_ac2_32_2_1,
+			STR_SNK_AC2_32_2_1);
+	define_test("BAP/UCL/STR/BV-016-C [UCL, AC 10, LC3 32_2_1]",
+			test_setup, test_client, &str_snk_ac10_32_2_1,
+			STR_SNK_AC10_32_2_1);
+	define_test("BAP/UCL/STR/BV-017-C [UCL, AC 2, LC3 441_1_1]",
+			test_setup, test_client, &str_snk_ac2_44_1_1,
+			STR_SNK_AC2_44_1_1);
+	define_test("BAP/UCL/STR/BV-018-C [UCL, AC 10, LC3 441_1_1]",
+			test_setup, test_client, &str_snk_ac10_44_1_1,
+			STR_SNK_AC10_44_1_1);
+	define_test("BAP/UCL/STR/BV-019-C [UCL, AC 2, LC3 44_2_1]",
+			test_setup, test_client, &str_snk_ac2_44_2_1,
+			STR_SNK_AC2_44_2_1);
+	define_test("BAP/UCL/STR/BV-020-C [UCL, AC 10, LC3 44_2_1]",
+			test_setup, test_client, &str_snk_ac10_44_2_1,
+			STR_SNK_AC10_44_2_1);
+	define_test("BAP/UCL/STR/BV-021-C [UCL, AC 2, LC3 48_1_1]",
+			test_setup, test_client, &str_snk_ac2_48_1_1,
+			STR_SNK_AC2_48_1_1);
+	define_test("BAP/UCL/STR/BV-022-C [UCL, AC 10, LC3 48_1_1]",
+			test_setup, test_client, &str_snk_ac10_48_1_1,
+			STR_SNK_AC10_48_1_1);
+	define_test("BAP/UCL/STR/BV-023-C [UCL, AC 2, LC3 48_2_1]",
+			test_setup, test_client, &str_snk_ac2_48_2_1,
+			STR_SNK_AC2_48_2_1);
+	define_test("BAP/UCL/STR/BV-024-C [UCL, AC 10, LC3 48_2_1]",
+			test_setup, test_client, &str_snk_ac10_48_2_1,
+			STR_SNK_AC10_48_2_1);
+	define_test("BAP/UCL/STR/BV-025-C [UCL, AC 2, LC3 48_3_1]",
+			test_setup, test_client, &str_snk_ac2_48_3_1,
+			STR_SNK_AC2_48_3_1);
+	define_test("BAP/UCL/STR/BV-026-C [UCL, AC 10, LC3 48_3_1]",
+			test_setup, test_client, &str_snk_ac10_48_3_1,
+			STR_SNK_AC10_48_3_1);
+	define_test("BAP/UCL/STR/BV-027-C [UCL, AC 2, LC3 48_4_1]",
+			test_setup, test_client, &str_snk_ac2_48_4_1,
+			STR_SNK_AC2_48_4_1);
+	define_test("BAP/UCL/STR/BV-028-C [UCL, AC 10, LC3 48_4_1]",
+			test_setup, test_client, &str_snk_ac10_48_4_1,
+			STR_SNK_AC10_48_4_1);
+	define_test("BAP/UCL/STR/BV-029-C [UCL, AC 2, LC3 48_5_1]",
+			test_setup, test_client, &str_snk_ac2_48_5_1,
+			STR_SNK_AC2_48_5_1);
+	define_test("BAP/UCL/STR/BV-030-C [UCL, AC 10, LC3 48_5_1]",
+			test_setup, test_client, &str_snk_ac10_48_5_1,
+			STR_SNK_AC10_48_5_1);
+	define_test("BAP/UCL/STR/BV-031-C [UCL, AC 2, LC3 48_6_1]",
+			test_setup, test_client, &str_snk_ac2_48_6_1,
+			STR_SNK_AC2_48_6_1);
+	define_test("BAP/UCL/STR/BV-032-C [UCL, AC 10, LC3 48_6_1]",
+			test_setup, test_client, &str_snk_ac10_48_6_1,
+			STR_SNK_AC10_48_6_1);
+	define_test("BAP/UCL/STR/BV-033-C [UCL, SRC, AC 1, LC3 8_1_1]",
+			test_setup, test_client, &str_src_ac1_8_1_1,
+			STR_SRC_AC1_8_1_1);
+	define_test("BAP/UCL/STR/BV-034-C [UCL, SRC, AC 4, LC3 8_1_1]",
+			test_setup, test_client, &str_src_ac4_8_1_1,
+			STR_SRC_AC4_8_1_1);
+	define_test("BAP/UCL/STR/BV-035-C [UCL, SRC, AC 1, LC3 8_2_1]",
+			test_setup, test_client, &str_src_ac1_8_2_1,
+			STR_SRC_AC1_8_2_1);
+	define_test("BAP/UCL/STR/BV-036-C [UCL, SRC, AC 4, LC3 8_2_1]",
+			test_setup, test_client, &str_src_ac4_8_2_1,
+			STR_SRC_AC4_8_2_1);
+	define_test("BAP/UCL/STR/BV-037-C [UCL, SRC, AC 1, LC3 16_1_1]",
+			test_setup, test_client, &str_src_ac1_16_1_1,
+			STR_SRC_AC1_16_1_1);
+	define_test("BAP/UCL/STR/BV-038-C [UCL, SRC, AC 4, LC3 16_1_1]",
+			test_setup, test_client, &str_src_ac4_16_1_1,
+			STR_SRC_AC4_16_1_1);
+	define_test("BAP/UCL/STR/BV-039-C [UCL, SRC, AC 1, LC3 16_2_1]",
+			test_setup, test_client, &str_src_ac1_16_2_1,
+			STR_SRC_AC1_16_2_1);
+	define_test("BAP/UCL/STR/BV-040-C [UCL, SRC, AC 4, LC3 16_2_1]",
+			test_setup, test_client, &str_src_ac4_16_2_1,
+			STR_SRC_AC4_16_2_1);
+	define_test("BAP/UCL/STR/BV-041-C [UCL, SRC, AC 1, LC3 24_1_1]",
+			test_setup, test_client, &str_src_ac1_24_1_1,
+			STR_SRC_AC1_24_1_1);
+	define_test("BAP/UCL/STR/BV-042-C [UCL, SRC, AC 4, LC3 24_1_1]",
+			test_setup, test_client, &str_src_ac4_24_1_1,
+			STR_SRC_AC4_24_1_1);
+	define_test("BAP/UCL/STR/BV-043-C [UCL, SRC, AC 1, LC3 24_2_1]",
+			test_setup, test_client, &str_src_ac1_24_2_1,
+			STR_SRC_AC1_24_2_1);
+	define_test("BAP/UCL/STR/BV-044-C [UCL, SRC, AC 4, LC3 24_2_1]",
+			test_setup, test_client, &str_src_ac4_24_2_1,
+			STR_SRC_AC4_24_2_1);
+	define_test("BAP/UCL/STR/BV-045-C [UCL, SRC, AC 1, LC3 32_1_1]",
+			test_setup, test_client, &str_src_ac1_32_1_1,
+			STR_SRC_AC1_32_1_1);
+	define_test("BAP/UCL/STR/BV-046-C [UCL, SRC, AC 4, LC3 32_1_1]",
+			test_setup, test_client, &str_src_ac4_32_1_1,
+			STR_SRC_AC4_32_1_1);
+	define_test("BAP/UCL/STR/BV-047-C [UCL, SRC, AC 1, LC3 32_2_1]",
+			test_setup, test_client, &str_src_ac1_32_2_1,
+			STR_SRC_AC1_32_2_1);
+	define_test("BAP/UCL/STR/BV-048-C [UCL, SRC, AC 4, LC3 32_2_1]",
+			test_setup, test_client, &str_src_ac4_32_2_1,
+			STR_SRC_AC4_32_2_1);
+	define_test("BAP/UCL/STR/BV-049-C [UCL, SRC, AC 1, LC3 44_1_1]",
+			test_setup, test_client, &str_src_ac1_44_1_1,
+			STR_SRC_AC1_44_1_1);
+	define_test("BAP/UCL/STR/BV-050-C [UCL, SRC, AC 4, LC3 44_1_1]",
+			test_setup, test_client, &str_src_ac4_44_1_1,
+			STR_SRC_AC4_44_1_1);
+	define_test("BAP/UCL/STR/BV-051-C [UCL, SRC, AC 1, LC3 44_2_1]",
+			test_setup, test_client, &str_src_ac1_44_2_1,
+			STR_SRC_AC1_44_2_1);
+	define_test("BAP/UCL/STR/BV-052-C [UCL, SRC, AC 4, LC3 44_2_1]",
+			test_setup, test_client, &str_src_ac4_44_2_1,
+			STR_SRC_AC4_44_2_1);
+	define_test("BAP/UCL/STR/BV-053-C [UCL, SRC, AC 1, LC3 48_1_1]",
+			test_setup, test_client, &str_src_ac1_48_1_1,
+			STR_SRC_AC1_48_1_1);
+	define_test("BAP/UCL/STR/BV-054-C [UCL, SRC, AC 4, LC3 48_1_1]",
+			test_setup, test_client, &str_src_ac4_48_1_1,
+			STR_SRC_AC4_48_1_1);
+	define_test("BAP/UCL/STR/BV-055-C [UCL, SRC, AC 1, LC3 48_2_1]",
+			test_setup, test_client, &str_src_ac1_48_2_1,
+			STR_SRC_AC1_48_2_1);
+	define_test("BAP/UCL/STR/BV-056-C [UCL, SRC, AC 4, LC3 48_2_1]",
+			test_setup, test_client, &str_src_ac4_48_2_1,
+			STR_SRC_AC4_48_2_1);
+	define_test("BAP/UCL/STR/BV-057-C [UCL, SRC, AC 1, LC3 48_3_1]",
+			test_setup, test_client, &str_src_ac1_48_3_1,
+			STR_SRC_AC1_48_3_1);
+	define_test("BAP/UCL/STR/BV-058-C [UCL, SRC, AC 4, LC3 48_3_1]",
+			test_setup, test_client, &str_src_ac4_48_3_1,
+			STR_SRC_AC4_48_3_1);
+	define_test("BAP/UCL/STR/BV-059-C [UCL, SRC, AC 1, LC3 48_4_1]",
+			test_setup, test_client, &str_src_ac1_48_4_1,
+			STR_SRC_AC1_48_4_1);
+	define_test("BAP/UCL/STR/BV-060-C [UCL, SRC, AC 4, LC3 48_4_1]",
+			test_setup, test_client, &str_src_ac4_48_4_1,
+			STR_SRC_AC4_48_4_1);
+	define_test("BAP/UCL/STR/BV-061-C [UCL, SRC, AC 1, LC3 48_5_1]",
+			test_setup, test_client, &str_src_ac1_48_5_1,
+			STR_SRC_AC1_48_5_1);
+	define_test("BAP/UCL/STR/BV-062-C [UCL, SRC, AC 4, LC3 48_5_1]",
+			test_setup, test_client, &str_src_ac4_48_5_1,
+			STR_SRC_AC4_48_5_1);
+	define_test("BAP/UCL/STR/BV-063-C [UCL, SRC, AC 1, LC3 48_6_1]",
+			test_setup, test_client, &str_src_ac1_48_6_1,
+			STR_SRC_AC1_48_6_1);
+	define_test("BAP/UCL/STR/BV-064-C [UCL, SRC, AC 4, LC3 48_6_1]",
+			test_setup, test_client, &str_src_ac4_48_6_1,
+			STR_SRC_AC4_48_6_1);
+	define_test("BAP/UCL/STR/BV-065-C [UCL, AC 2, LC3 8_1_2]",
+			test_setup, test_client, &str_snk_ac2_8_1_2,
+			STR_SNK_AC2_8_1_2);
+	define_test("BAP/UCL/STR/BV-066-C [UCL, AC 10, LC3 8_1_2]",
+			test_setup, test_client, &str_snk_ac10_8_1_2,
+			STR_SNK_AC10_8_1_2);
+	define_test("BAP/UCL/STR/BV-067-C [UCL, AC 2, LC3 8_2_2]",
+			test_setup, test_client, &str_snk_ac2_8_2_2,
+			STR_SNK_AC2_8_2_2);
+	define_test("BAP/UCL/STR/BV-068-C [UCL, AC 10, LC3 8_2_2]",
+			test_setup, test_client, &str_snk_ac10_8_2_2,
+			STR_SNK_AC10_8_2_2);
+	define_test("BAP/UCL/STR/BV-069-C [UCL, AC 2, LC3 16_1_2]",
+			test_setup, test_client, &str_snk_ac2_16_1_2,
+			STR_SNK_AC2_16_1_2);
+	define_test("BAP/UCL/STR/BV-070-C [UCL, AC 10, LC3 16_1_2]",
+			test_setup, test_client, &str_snk_ac10_16_1_2,
+			STR_SNK_AC10_16_1_2);
+	define_test("BAP/UCL/STR/BV-071-C [UCL, AC 2, LC3 16_2_2]",
+			test_setup, test_client, &str_snk_ac2_16_2_2,
+			STR_SNK_AC2_16_2_2);
+	define_test("BAP/UCL/STR/BV-072-C [UCL, AC 10, LC3 16_2_2]",
+			test_setup, test_client, &str_snk_ac10_16_2_2,
+			STR_SNK_AC10_16_2_2);
+	define_test("BAP/UCL/STR/BV-073-C [UCL, AC 2, LC3 24_1_2]",
+			test_setup, test_client, &str_snk_ac2_24_1_2,
+			STR_SNK_AC2_24_1_2);
+	define_test("BAP/UCL/STR/BV-074-C [UCL, AC 10, LC3 24_1_2]",
+			test_setup, test_client, &str_snk_ac10_24_1_2,
+			STR_SNK_AC10_24_1_2);
+	define_test("BAP/UCL/STR/BV-075-C [UCL, AC 2, LC3 24_2_2]",
+			test_setup, test_client, &str_snk_ac2_24_2_2,
+			STR_SNK_AC2_24_2_2);
+	define_test("BAP/UCL/STR/BV-076-C [UCL, AC 10, LC3 24_2_2]",
+			test_setup, test_client, &str_snk_ac10_24_2_2,
+			STR_SNK_AC10_24_2_2);
+	define_test("BAP/UCL/STR/BV-077-C [UCL, AC 2, LC3 32_1_2]",
+			test_setup, test_client, &str_snk_ac2_32_1_2,
+			STR_SNK_AC2_32_1_2);
+	define_test("BAP/UCL/STR/BV-078-C [UCL, AC 10, LC3 32_1_2]",
+			test_setup, test_client, &str_snk_ac10_32_1_2,
+			STR_SNK_AC10_32_1_2);
+	define_test("BAP/UCL/STR/BV-079-C [UCL, AC 2, LC3 32_2_2]",
+			test_setup, test_client, &str_snk_ac2_32_2_2,
+			STR_SNK_AC2_32_2_2);
+	define_test("BAP/UCL/STR/BV-080-C [UCL, AC 10, LC3 32_2_2]",
+			test_setup, test_client, &str_snk_ac10_32_2_2,
+			STR_SNK_AC10_32_2_2);
+	define_test("BAP/UCL/STR/BV-081-C [UCL, AC 2, LC3 44_1_2]",
+			test_setup, test_client, &str_snk_ac2_44_1_2,
+			STR_SNK_AC2_44_1_2);
+	define_test("BAP/UCL/STR/BV-082-C [UCL, AC 10, LC3 44_1_2]",
+			test_setup, test_client, &str_snk_ac10_44_1_2,
+			STR_SNK_AC10_44_1_2);
+	define_test("BAP/UCL/STR/BV-083-C [UCL, AC 2, LC3 44_2_2]",
+			test_setup, test_client, &str_snk_ac2_44_2_2,
+			STR_SNK_AC2_44_2_2);
+	define_test("BAP/UCL/STR/BV-084-C [UCL, AC 10, LC3 44_2_2]",
+			test_setup, test_client, &str_snk_ac10_44_2_2,
+			STR_SNK_AC10_44_2_2);
+	define_test("BAP/UCL/STR/BV-085-C [UCL, AC 2, LC3 48_1_2]",
+			test_setup, test_client, &str_snk_ac2_48_1_2,
+			STR_SNK_AC2_48_1_2);
+	define_test("BAP/UCL/STR/BV-086-C [UCL, AC 10, LC3 48_1_2]",
+			test_setup, test_client, &str_snk_ac10_48_1_2,
+			STR_SNK_AC10_48_1_2);
+	define_test("BAP/UCL/STR/BV-087-C [UCL, AC 2, LC3 48_2_2]",
+			test_setup, test_client, &str_snk_ac2_48_2_2,
+			STR_SNK_AC2_48_2_2);
+	define_test("BAP/UCL/STR/BV-088-C [UCL, AC 10, LC3 48_2_2]",
+			test_setup, test_client, &str_snk_ac10_48_2_2,
+			STR_SNK_AC10_48_2_2);
+	define_test("BAP/UCL/STR/BV-089-C [UCL, AC 2, LC3 48_3_2]",
+			test_setup, test_client, &str_snk_ac2_48_3_2,
+			STR_SNK_AC2_48_3_2);
+	define_test("BAP/UCL/STR/BV-090-C [UCL, AC 10, LC3 48_3_2]",
+			test_setup, test_client, &str_snk_ac10_48_3_2,
+			STR_SNK_AC10_48_3_2);
+	define_test("BAP/UCL/STR/BV-091-C [UCL, AC 2, LC3 48_4_2]",
+			test_setup, test_client, &str_snk_ac2_48_4_2,
+			STR_SNK_AC2_48_4_2);
+	define_test("BAP/UCL/STR/BV-092-C [UCL, AC 10, LC3 48_4_2]",
+			test_setup, test_client, &str_snk_ac10_48_4_2,
+			STR_SNK_AC10_48_4_2);
+	define_test("BAP/UCL/STR/BV-093-C [UCL, AC 2, LC3 48_5_2]",
+			test_setup, test_client, &str_snk_ac2_48_5_2,
+			STR_SNK_AC2_48_5_2);
+	define_test("BAP/UCL/STR/BV-094-C [UCL, AC 10, LC3 48_5_2]",
+			test_setup, test_client, &str_snk_ac10_48_5_2,
+			STR_SNK_AC10_48_5_2);
+	define_test("BAP/UCL/STR/BV-095-C [UCL, AC 2, LC3 48_6_2]",
+			test_setup, test_client, &str_snk_ac2_48_6_2,
+			STR_SNK_AC2_48_6_2);
+	define_test("BAP/UCL/STR/BV-096-C [UCL, AC 10, LC3 48_6_2]",
+			test_setup, test_client, &str_snk_ac10_48_6_2,
+			STR_SNK_AC10_48_6_2);
+	define_test("BAP/UCL/STR/BV-097-C [UCL, SRC, AC 1, LC3 8_1_2]",
+			test_setup, test_client, &str_src_ac1_8_1_2,
+			STR_SRC_AC1_8_1_2);
+	define_test("BAP/UCL/STR/BV-098-C [UCL, SRC, AC 4, LC3 8_1_2]",
+			test_setup, test_client, &str_src_ac4_8_1_2,
+			STR_SRC_AC4_8_1_2);
+	define_test("BAP/UCL/STR/BV-099-C [UCL, SRC, AC 1, LC3 8_2_2]",
+			test_setup, test_client, &str_src_ac1_8_2_2,
+			STR_SRC_AC1_8_2_2);
+	define_test("BAP/UCL/STR/BV-100-C [UCL, SRC, AC 4, LC3 8_2_2]",
+			test_setup, test_client, &str_src_ac4_8_2_2,
+			STR_SRC_AC4_8_2_2);
+	define_test("BAP/UCL/STR/BV-101-C [UCL, SRC, AC 1, LC3 16_1_2]",
+			test_setup, test_client, &str_src_ac1_16_1_2,
+			STR_SRC_AC1_16_1_2);
+	define_test("BAP/UCL/STR/BV-102-C [UCL, SRC, AC 4, LC3 16_1_2]",
+			test_setup, test_client, &str_src_ac4_16_1_2,
+			STR_SRC_AC4_16_1_2);
+	define_test("BAP/UCL/STR/BV-103-C [UCL, SRC, AC 1, LC3 16_2_2]",
+			test_setup, test_client, &str_src_ac1_16_2_2,
+			STR_SRC_AC1_16_2_2);
+	define_test("BAP/UCL/STR/BV-104-C [UCL, SRC, AC 4, LC3 16_2_2]",
+			test_setup, test_client, &str_src_ac4_16_2_2,
+			STR_SRC_AC4_16_2_2);
+	define_test("BAP/UCL/STR/BV-105-C [UCL, SRC, AC 1, LC3 24_1_2]",
+			test_setup, test_client, &str_src_ac1_24_1_2,
+			STR_SRC_AC1_24_1_2);
+	define_test("BAP/UCL/STR/BV-106-C [UCL, SRC, AC 4, LC3 24_1_2]",
+			test_setup, test_client, &str_src_ac4_24_1_2,
+			STR_SRC_AC4_24_1_2);
+	define_test("BAP/UCL/STR/BV-107-C [UCL, SRC, AC 1, LC3 24_2_2]",
+			test_setup, test_client, &str_src_ac1_24_2_2,
+			STR_SRC_AC1_24_2_2);
+	define_test("BAP/UCL/STR/BV-108-C [UCL, SRC, AC 4, LC3 24_2_2]",
+			test_setup, test_client, &str_src_ac4_24_2_2,
+			STR_SRC_AC4_24_2_2);
+	define_test("BAP/UCL/STR/BV-109-C [UCL, SRC, AC 1, LC3 32_1_2]",
+			test_setup, test_client, &str_src_ac1_32_1_2,
+			STR_SRC_AC1_32_1_2);
+	define_test("BAP/UCL/STR/BV-110-C [UCL, SRC, AC 4, LC3 32_1_2]",
+			test_setup, test_client, &str_src_ac4_32_1_2,
+			STR_SRC_AC4_32_1_2);
+	define_test("BAP/UCL/STR/BV-111-C [UCL, SRC, AC 1, LC3 32_2_2]",
+			test_setup, test_client, &str_src_ac1_32_2_2,
+			STR_SRC_AC1_32_2_2);
+	define_test("BAP/UCL/STR/BV-112-C [UCL, SRC, AC 4, LC3 32_2_2]",
+			test_setup, test_client, &str_src_ac4_32_2_2,
+			STR_SRC_AC4_32_2_2);
+	define_test("BAP/UCL/STR/BV-113-C [UCL, SRC, AC 1, LC3 44_1_2]",
+			test_setup, test_client, &str_src_ac1_44_1_2,
+			STR_SRC_AC1_44_1_2);
+	define_test("BAP/UCL/STR/BV-114-C [UCL, SRC, AC 4, LC3 44_1_2]",
+			test_setup, test_client, &str_src_ac4_44_1_2,
+			STR_SRC_AC4_44_1_2);
+	define_test("BAP/UCL/STR/BV-115-C [UCL, SRC, AC 1, LC3 44_2_2]",
+			test_setup, test_client, &str_src_ac1_44_2_2,
+			STR_SRC_AC1_44_2_2);
+	define_test("BAP/UCL/STR/BV-116-C [UCL, SRC, AC 4, LC3 44_2_2]",
+			test_setup, test_client, &str_src_ac4_44_2_2,
+			STR_SRC_AC4_44_2_2);
+	define_test("BAP/UCL/STR/BV-117-C [UCL, SRC, AC 1, LC3 48_1_2]",
+			test_setup, test_client, &str_src_ac1_48_1_2,
+			STR_SRC_AC1_48_1_2);
+	define_test("BAP/UCL/STR/BV-118-C [UCL, SRC, AC 4, LC3 48_1_2]",
+			test_setup, test_client, &str_src_ac4_48_1_2,
+			STR_SRC_AC4_48_1_2);
+	define_test("BAP/UCL/STR/BV-119-C [UCL, SRC, AC 1, LC3 48_2_2]",
+			test_setup, test_client, &str_src_ac1_48_2_2,
+			STR_SRC_AC1_48_2_2);
+	define_test("BAP/UCL/STR/BV-120-C [UCL, SRC, AC 4, LC3 48_2_2]",
+			test_setup, test_client, &str_src_ac4_48_2_2,
+			STR_SRC_AC4_48_2_2);
+	define_test("BAP/UCL/STR/BV-121-C [UCL, SRC, AC 1, LC3 48_3_2]",
+			test_setup, test_client, &str_src_ac1_48_3_2,
+			STR_SRC_AC1_48_3_2);
+	define_test("BAP/UCL/STR/BV-122-C [UCL, SRC, AC 4, LC3 48_3_2]",
+			test_setup, test_client, &str_src_ac4_48_3_2,
+			STR_SRC_AC4_48_3_2);
+	define_test("BAP/UCL/STR/BV-123-C [UCL, SRC, AC 1, LC3 48_4_2]",
+			test_setup, test_client, &str_src_ac1_48_4_2,
+			STR_SRC_AC1_48_4_2);
+	define_test("BAP/UCL/STR/BV-124-C [UCL, SRC, AC 4, LC3 48_4_2]",
+			test_setup, test_client, &str_src_ac4_48_4_2,
+			STR_SRC_AC4_48_4_2);
+	define_test("BAP/UCL/STR/BV-121-C [UCL, SRC, AC 1, LC3 48_5_2]",
+			test_setup, test_client, &str_src_ac1_48_5_2,
+			STR_SRC_AC1_48_5_2);
+	define_test("BAP/UCL/STR/BV-122-C [UCL, SRC, AC 4, LC3 48_5_2]",
+			test_setup, test_client, &str_src_ac4_48_5_2,
+			STR_SRC_AC4_48_5_2);
+	define_test("BAP/UCL/STR/BV-123-C [UCL, SRC, AC 1, LC3 48_6_2]",
+			test_setup, test_client, &str_src_ac1_48_6_2,
+			STR_SRC_AC1_48_6_2);
+	define_test("BAP/UCL/STR/BV-124-C [UCL, SRC, AC 4, LC3 48_6_2]",
+			test_setup, test_client, &str_src_ac4_48_6_2,
+			STR_SRC_AC4_48_6_2);
 }
 
 static void test_scc(void)
@@ -2835,6 +5471,498 @@ static void test_scc(void)
 	test_scc_disable();
 	test_scc_release();
 	test_scc_metadata();
+	test_str_1_1_1_lc3();
+}
+
+#define LC3_CFG(_freq, _dur, _len) \
+	0x0a, \
+	0x02, 0x01, _freq, \
+	0x02, 0x02, _dur, \
+	0x03, 0x04, _len, _len >> 8
+
+#define BASE(_pd, _sgrp, _nbis, _cfg...) \
+	_pd & 0xff, _pd >> 8, _pd >> 16, \
+	_sgrp, \
+	_nbis, \
+	_cfg
+
+#define BASE_LC3(_pd, _sgrp, _nbis, _cc...) \
+	BASE(_pd, _sgrp, _nbis, 0x06, 0x00, 0x00, 0x00, 0x00, _cc)
+
+#define LC3_CFG_8_1 \
+	LC3_CFG(LC3_CONFIG_FREQ_8KHZ, \
+		LC3_CONFIG_DURATION_7_5, \
+		LC3_CONFIG_FRAME_LEN_8_1)
+
+#define BASE_LC3_8_1 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_8_1, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_8_1_1 = {
+	.cc = LC3_CONFIG_8_1,
+	.qos = LC3_QOS_8_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_8_1),
+};
+
+static struct test_config cfg_bsrc_8_1_2 = {
+	.cc = LC3_CONFIG_8_1,
+	.qos = LC3_QOS_8_1_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_8_1),
+};
+
+#define LC3_CFG_8_2 \
+	LC3_CFG(LC3_CONFIG_FREQ_8KHZ, \
+		LC3_CONFIG_DURATION_10, \
+		LC3_CONFIG_FRAME_LEN_8_2)
+
+#define BASE_LC3_8_2 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_8_2, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_8_2_1 = {
+	.cc = LC3_CONFIG_8_2,
+	.qos = LC3_QOS_8_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_8_2),
+};
+
+static struct test_config cfg_bsrc_8_2_2 = {
+	.cc = LC3_CONFIG_8_2,
+	.qos = LC3_QOS_8_2_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_8_2),
+};
+
+#define LC3_CFG_16_1 \
+	LC3_CFG(LC3_CONFIG_FREQ_16KHZ, \
+		LC3_CONFIG_DURATION_7_5, \
+		LC3_CONFIG_FRAME_LEN_16_1)
+
+#define BASE_LC3_16_1 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_16_1, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_16_1_1 = {
+	.cc = LC3_CONFIG_16_1,
+	.qos = LC3_QOS_16_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_16_1),
+};
+
+static struct test_config cfg_bsrc_16_1_2 = {
+	.cc = LC3_CONFIG_16_1,
+	.qos = LC3_QOS_16_1_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_16_1),
+};
+
+#define LC3_CFG_16_2 \
+	LC3_CFG(LC3_CONFIG_FREQ_16KHZ, \
+		LC3_CONFIG_DURATION_10, \
+		LC3_CONFIG_FRAME_LEN_16_2)
+
+#define BASE_LC3_16_2 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_16_2, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_16_2_1 = {
+	.cc = LC3_CONFIG_16_2,
+	.qos = LC3_QOS_16_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_16_2),
+};
+
+static struct test_config cfg_bsrc_16_2_2 = {
+	.cc = LC3_CONFIG_16_2,
+	.qos = LC3_QOS_16_2_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_16_2),
+};
+
+#define LC3_CFG_24_1 \
+	LC3_CFG(LC3_CONFIG_FREQ_24KHZ, \
+		LC3_CONFIG_DURATION_7_5, \
+		LC3_CONFIG_FRAME_LEN_24_1)
+
+#define BASE_LC3_24_1 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_24_1, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_24_1_1 = {
+	.cc = LC3_CONFIG_24_1,
+	.qos = LC3_QOS_24_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_24_1),
+};
+
+static struct test_config cfg_bsrc_24_1_2 = {
+	.cc = LC3_CONFIG_24_1,
+	.qos = LC3_QOS_24_1_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_24_1),
+};
+
+#define LC3_CFG_24_2 \
+	LC3_CFG(LC3_CONFIG_FREQ_24KHZ, \
+		LC3_CONFIG_DURATION_10, \
+		LC3_CONFIG_FRAME_LEN_24_2)
+
+#define BASE_LC3_24_2 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_24_2, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_24_2_1 = {
+	.cc = LC3_CONFIG_24_2,
+	.qos = LC3_QOS_24_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_24_2),
+};
+
+static struct test_config cfg_bsrc_24_2_2 = {
+	.cc = LC3_CONFIG_24_2,
+	.qos = LC3_QOS_24_2_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_24_2),
+};
+
+#define LC3_CFG_32_1 \
+	LC3_CFG(LC3_CONFIG_FREQ_32KHZ, \
+		LC3_CONFIG_DURATION_7_5, \
+		LC3_CONFIG_FRAME_LEN_32_1)
+
+#define BASE_LC3_32_1 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_32_1, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_32_1_1 = {
+	.cc = LC3_CONFIG_32_1,
+	.qos = LC3_QOS_32_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_32_1),
+};
+
+static struct test_config cfg_bsrc_32_1_2 = {
+	.cc = LC3_CONFIG_32_1,
+	.qos = LC3_QOS_32_1_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_32_1),
+};
+
+#define LC3_CFG_32_2 \
+	LC3_CFG(LC3_CONFIG_FREQ_32KHZ, \
+		LC3_CONFIG_DURATION_10, \
+		LC3_CONFIG_FRAME_LEN_32_2)
+
+#define BASE_LC3_32_2 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_32_2, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_32_2_1 = {
+	.cc = LC3_CONFIG_32_2,
+	.qos = LC3_QOS_32_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_32_2),
+};
+
+static struct test_config cfg_bsrc_32_2_2 = {
+	.cc = LC3_CONFIG_32_2,
+	.qos = LC3_QOS_32_2_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_32_2),
+};
+
+#define LC3_CFG_44_1 \
+	LC3_CFG(LC3_CONFIG_FREQ_44KHZ, \
+		LC3_CONFIG_DURATION_7_5, \
+		LC3_CONFIG_FRAME_LEN_44_1)
+
+#define BASE_LC3_44_1 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_44_1, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_44_1_1 = {
+	.cc = LC3_CONFIG_44_1,
+	.qos = LC3_QOS_44_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_44_1),
+};
+
+static struct test_config cfg_bsrc_44_1_2 = {
+	.cc = LC3_CONFIG_44_1,
+	.qos = LC3_QOS_44_1_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_44_1),
+};
+
+#define LC3_CFG_44_2 \
+	LC3_CFG(LC3_CONFIG_FREQ_44KHZ, \
+		LC3_CONFIG_DURATION_10, \
+		LC3_CONFIG_FRAME_LEN_44_2)
+
+#define BASE_LC3_44_2 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_44_2, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_44_2_1 = {
+	.cc = LC3_CONFIG_44_2,
+	.qos = LC3_QOS_44_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_44_2),
+};
+
+static struct test_config cfg_bsrc_44_2_2 = {
+	.cc = LC3_CONFIG_44_2,
+	.qos = LC3_QOS_44_2_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_44_2),
+};
+
+#define LC3_CFG_48_1 \
+	LC3_CFG(LC3_CONFIG_FREQ_48KHZ, \
+		LC3_CONFIG_DURATION_7_5, \
+		LC3_CONFIG_FRAME_LEN_48_1)
+
+#define BASE_LC3_48_1 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_48_1, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_48_1_1 = {
+	.cc = LC3_CONFIG_48_1,
+	.qos = LC3_QOS_48_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_1),
+};
+
+static struct test_config cfg_bsrc_48_1_2 = {
+	.cc = LC3_CONFIG_48_1,
+	.qos = LC3_QOS_48_1_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_1),
+};
+
+#define LC3_CFG_48_2 \
+	LC3_CFG(LC3_CONFIG_FREQ_48KHZ, \
+		LC3_CONFIG_DURATION_10, \
+		LC3_CONFIG_FRAME_LEN_48_2)
+
+#define BASE_LC3_48_2 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_48_2, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_48_2_1 = {
+	.cc = LC3_CONFIG_48_2,
+	.qos = LC3_QOS_48_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_2),
+};
+
+static struct test_config cfg_bsrc_48_2_2 = {
+	.cc = LC3_CONFIG_48_2,
+	.qos = LC3_QOS_48_2_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_2),
+};
+
+#define LC3_CFG_48_3 \
+	LC3_CFG(LC3_CONFIG_FREQ_48KHZ, \
+		LC3_CONFIG_DURATION_7_5, \
+		LC3_CONFIG_FRAME_LEN_48_3)
+
+#define BASE_LC3_48_3 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_48_3, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_48_3_1 = {
+	.cc = LC3_CONFIG_48_3,
+	.qos = LC3_QOS_48_3_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_3),
+};
+
+static struct test_config cfg_bsrc_48_3_2 = {
+	.cc = LC3_CONFIG_48_3,
+	.qos = LC3_QOS_48_3_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_3),
+};
+
+#define LC3_CFG_48_4 \
+	LC3_CFG(LC3_CONFIG_FREQ_48KHZ, \
+		LC3_CONFIG_DURATION_10, \
+		LC3_CONFIG_FRAME_LEN_48_4)
+
+#define BASE_LC3_48_4 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_48_4, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_48_4_1 = {
+	.cc = LC3_CONFIG_48_4,
+	.qos = LC3_QOS_48_4_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_4),
+};
+
+static struct test_config cfg_bsrc_48_4_2 = {
+	.cc = LC3_CONFIG_48_4,
+	.qos = LC3_QOS_48_4_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_4),
+};
+
+#define LC3_CFG_48_5 \
+	LC3_CFG(LC3_CONFIG_FREQ_48KHZ, \
+		LC3_CONFIG_DURATION_7_5, \
+		LC3_CONFIG_FRAME_LEN_48_5)
+
+#define BASE_LC3_48_5 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_48_5, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_48_5_1 = {
+	.cc = LC3_CONFIG_48_5,
+	.qos = LC3_QOS_48_5_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_5),
+};
+
+static struct test_config cfg_bsrc_48_5_2 = {
+	.cc = LC3_CONFIG_48_5,
+	.qos = LC3_QOS_48_5_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_5),
+};
+
+#define LC3_CFG_48_6 \
+	LC3_CFG(LC3_CONFIG_FREQ_48KHZ, \
+		LC3_CONFIG_DURATION_10, \
+		LC3_CONFIG_FRAME_LEN_48_6)
+
+#define BASE_LC3_48_6 \
+	BASE_LC3(40000, 1, 1, LC3_CFG_48_6, 0x00, 0x01, 0x00)
+
+static struct test_config cfg_bsrc_48_6_1 = {
+	.cc = LC3_CONFIG_48_6,
+	.qos = LC3_QOS_48_6_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_6),
+};
+
+static struct test_config cfg_bsrc_48_6_2 = {
+	.cc = LC3_CONFIG_48_6,
+	.qos = LC3_QOS_48_6_2_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_6),
+};
+
+#define VS_CC \
+	0x02, 0x01, 0x08, \
+	0x02, 0x02, 0x00, \
+	0x05, 0x03, 0x01, 0x00, 0x00, 0x00, \
+	0x03, 0x04, 0x75, 0x00
+
+#define VS_CFG \
+	0x10, \
+	VS_CC
+
+#define BASE_VS \
+	BASE(40000, 1, 1, 0xFF, 0x00, 0x00, 0x00, 0x00, \
+	VS_CFG, 0x00, 0x01, 0x00)
+
+#define QOS_BCAST \
+{ \
+	.bcast.big = 0x00, \
+	.bcast.bis = 0x00, \
+	.bcast.framing = LC3_QOS_UNFRAMED, \
+	.bcast.delay = 40000, \
+	.bcast.io_qos.interval = 7500, \
+	.bcast.io_qos.latency = 10, \
+	.bcast.io_qos.sdu = 40, \
+	.bcast.io_qos.phy = BT_BAP_CONFIG_PHY_2M, \
+	.bcast.io_qos.rtn = 2, \
+}
+
+static struct test_config cfg_bsrc_vs = {
+	.cc = UTIL_IOV_INIT(VS_CC),
+	.qos = QOS_BCAST,
+	.base = UTIL_IOV_INIT(BASE_VS),
+	.vs = true,
+};
+
+/* Test Purpose:
+ * Verify that a Broadcast Source IUT can configure a broadcast
+ * Audio Stream with information defined by the values in its BASE
+ * structure. The verification is performed one Codec Setting and
+ * set of parameters at a time, as enumerated in the test cases in
+ * Table 4.73.
+ *
+ * Pass verdict:
+ * In step 2, the AdvData field of AUX_SYNC_IND and optionally
+ * AUX_CHAIN_IND PDUs contains the configured BASE information.
+ *
+ * In step 3, the IUT transmits the PA synchronization information in
+ * the SyncInfo field of the Extended Header field of AUX_ADV_IND PDUs.
+ * The AUX_ADV_IND PDUs include the Service Data AD Type in the AdvData
+ * field with the Service UUID equal to the Broadcast Audio Announcement
+ * Service UUID. The additional service data includes Broadcast_ID.
+ *
+ * Each value included in the Codec_Specific_Configuration is formatted in
+ * an LTV structure with the length, type, and value specified in Table 4.74.
+ */
+static void test_bsrc_scc(void)
+{
+	define_test("BAP/BSRC/SCC/BV-01-C [Config Broadcast, LC3 8_1_1]",
+		NULL, test_bsrc, &cfg_bsrc_8_1_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-02-C [Config Broadcast, LC3 8_2_1]",
+		NULL, test_bsrc, &cfg_bsrc_8_2_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-03-C [Config Broadcast, LC3 16_1_1]",
+		NULL, test_bsrc, &cfg_bsrc_16_1_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-04-C [Config Broadcast, LC3 16_2_1]",
+		NULL, test_bsrc, &cfg_bsrc_16_2_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-05-C [Config Broadcast, LC3 24_1_1]",
+		NULL, test_bsrc, &cfg_bsrc_24_1_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-06-C [Config Broadcast, LC3 24_2_1]",
+		NULL, test_bsrc, &cfg_bsrc_24_2_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-07-C [Config Broadcast, LC3 32_1_1]",
+		NULL, test_bsrc, &cfg_bsrc_32_1_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-08-C [Config Broadcast, LC3 32_2_1]",
+		NULL, test_bsrc, &cfg_bsrc_32_2_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-09-C [Config Broadcast, LC3 44.1_1_1]",
+		NULL, test_bsrc, &cfg_bsrc_44_1_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-10-C [Config Broadcast, LC3 44.1_2_1]",
+		NULL, test_bsrc, &cfg_bsrc_44_2_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-11-C [Config Broadcast, LC3 48_1_1]",
+		NULL, test_bsrc, &cfg_bsrc_48_1_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-12-C [Config Broadcast, LC3 48_2_1]",
+		NULL, test_bsrc, &cfg_bsrc_48_2_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-13-C [Config Broadcast, LC3 48_3_1]",
+		NULL, test_bsrc, &cfg_bsrc_48_3_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-14-C [Config Broadcast, LC3 48_4_1]",
+		NULL, test_bsrc, &cfg_bsrc_48_4_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-15-C [Config Broadcast, LC3 48_5_1]",
+		NULL, test_bsrc, &cfg_bsrc_48_5_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-16-C [Config Broadcast, LC3 48_6_1]",
+		NULL, test_bsrc, &cfg_bsrc_48_6_1, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-17-C [Config Broadcast, LC3 8_1_2]",
+		NULL, test_bsrc, &cfg_bsrc_8_1_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-18-C [Config Broadcast, LC3 8_2_2]",
+		NULL, test_bsrc, &cfg_bsrc_8_2_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-19-C [Config Broadcast, LC3 16_1_2]",
+		NULL, test_bsrc, &cfg_bsrc_16_1_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-20-C [Config Broadcast, LC3 16_2_2]",
+		NULL, test_bsrc, &cfg_bsrc_16_2_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-21-C [Config Broadcast, LC3 24_1_2]",
+		NULL, test_bsrc, &cfg_bsrc_24_1_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-22-C [Config Broadcast, LC3 24_2_2]",
+		NULL, test_bsrc, &cfg_bsrc_24_2_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-23-C [Config Broadcast, LC3 32_1_2]",
+		NULL, test_bsrc, &cfg_bsrc_32_1_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-24-C [Config Broadcast, LC3 32_2_2]",
+		NULL, test_bsrc, &cfg_bsrc_32_2_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-25-C [Config Broadcast, LC3 44.1_1_2]",
+		NULL, test_bsrc, &cfg_bsrc_44_1_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-26-C [Config Broadcast, LC3 44.1_2_2]",
+		NULL, test_bsrc, &cfg_bsrc_44_2_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-27-C [Config Broadcast, LC3 48_1_2]",
+		NULL, test_bsrc, &cfg_bsrc_48_1_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-28-C [Config Broadcast, LC3 48_2_2]",
+		NULL, test_bsrc, &cfg_bsrc_48_2_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-29-C [Config Broadcast, LC3 48_3_2]",
+		NULL, test_bsrc, &cfg_bsrc_48_3_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-30-C [Config Broadcast, LC3 48_4_2]",
+		NULL, test_bsrc, &cfg_bsrc_48_4_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-31-C [Config Broadcast, LC3 48_5_2]",
+		NULL, test_bsrc, &cfg_bsrc_48_5_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-32-C [Config Broadcast, LC3 48_6_2]",
+		NULL, test_bsrc, &cfg_bsrc_48_6_2, IOV_NULL);
+
+	define_test("BAP/BSRC/SCC/BV-33-C [Config Broadcast, VS]",
+		NULL, test_bsrc, &cfg_bsrc_vs, IOV_NULL);
 }
 
 int main(int argc, char *argv[])
@@ -2843,6 +5971,7 @@ int main(int argc, char *argv[])
 
 	test_disc();
 	test_scc();
+	test_bsrc_scc();
 
 	return tester_run();
 }

@@ -71,16 +71,11 @@ pkglibexec_PROGRAMS += tools/btmon-logger
 
 tools_btmon_logger_SOURCES = tools/btmon-logger.c
 tools_btmon_logger_LDADD = src/libshared-mainloop.la
-tools_btmon_logger_DEPENDENCIES = src/libshared-mainloop.la \
-					tools/bluetooth-logger.service
 
 if SYSTEMD
 systemdsystemunit_DATA += tools/bluetooth-logger.service
 endif
 endif
-
-CLEANFILES += tools/bluetooth-logger.service
-EXTRA_DIST += tools/bluetooth-logger.service.in
 
 if TESTING
 noinst_PROGRAMS += emulator/btvirt emulator/b1ee emulator/hfp \
@@ -140,7 +135,7 @@ tools_mesh_tester_SOURCES = tools/mesh-tester.c monitor/bt.h \
 tools_mesh_tester_LDADD = lib/libbluetooth-internal.la \
 				src/libshared-glib.la $(GLIB_LIBS)
 
-tools_l2cap_tester_SOURCES = tools/l2cap-tester.c monitor/bt.h \
+tools_l2cap_tester_SOURCES = tools/l2cap-tester.c tools/tester.h monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
 				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
@@ -187,7 +182,7 @@ tools_gap_tester_LDADD =  lib/libbluetooth-internal.la \
 				src/libshared-glib.la \
 				$(GLIB_LIBS) $(DBUS_LIBS)
 
-tools_sco_tester_SOURCES = tools/sco-tester.c monitor/bt.h \
+tools_sco_tester_SOURCES = tools/sco-tester.c tools/tester.h monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
 				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
@@ -208,7 +203,7 @@ tools_userchan_tester_SOURCES = tools/userchan-tester.c monitor/bt.h \
 tools_userchan_tester_LDADD = lib/libbluetooth-internal.la \
 				src/libshared-glib.la $(GLIB_LIBS)
 
-tools_iso_tester_SOURCES = tools/iso-tester.c monitor/bt.h \
+tools_iso_tester_SOURCES = tools/iso-tester.c tools/tester.h monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
 				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
@@ -543,7 +538,12 @@ endif
 endif
 
 if CUPS
+
+if CUPS_SERVERBIN
+cupsdir = $(CUPS_SERVERBIN)/backend
+else
 cupsdir = $(libdir)/cups/backend
+endif
 
 cups_PROGRAMS = profiles/cups/bluetooth
 
@@ -578,7 +578,6 @@ noinst_PROGRAMS += tools/btpclient tools/btpclientctl
 tools_btpclient_SOURCES = tools/btpclient.c src/shared/btp.c src/shared/btp.h
 tools_btpclient_LDADD = lib/libbluetooth-internal.la \
 				src/libshared-ell.la $(ell_ldadd)
-tools_btpclient_DEPENDENCIES = lib/libbluetooth-internal.la $(ell_dependencies)
 tools/btpclient.$(OBJEXT): src/libshared-ell.la ell/internal
 
 tools_btpclientctl_SOURCES = tools/btpclientctl.c client/display.c

@@ -141,6 +141,7 @@ struct bt_voice {
 #define BT_PKT_STATUS		16
 
 #define BT_SCM_PKT_STATUS	0x03
+#define BT_SCM_ERROR		0x04
 
 #define BT_ISO_QOS		17
 
@@ -149,6 +150,8 @@ struct bt_voice {
 
 #define BT_ISO_QOS_BIG_UNSET	0xff
 #define BT_ISO_QOS_BIS_UNSET	0xff
+
+#define BT_ISO_SYNC_TIMEOUT	0x07d0 /* 20 secs */
 
 #define BT_ISO_QOS_GROUP_UNSET	0xff
 #define BT_ISO_QOS_STREAM_UNSET	0xff
@@ -236,6 +239,8 @@ enum {
 };
 
 #define BT_ISO_BASE		20
+
+#define BT_POLL_ERRQUEUE	21
 
 /* Byte order conversions */
 #if __BYTE_ORDER == __LITTLE_ENDIAN

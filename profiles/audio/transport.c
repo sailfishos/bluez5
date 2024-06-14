@@ -55,7 +55,7 @@ typedef enum {
 	TRANSPORT_STATE_SUSPENDING,     /* Release in progress */
 } transport_state_t;
 
-static char *str_state[] = {
+static const char *str_state[] = {
 	"TRANSPORT_STATE_IDLE",
 	"TRANSPORT_STATE_PENDING",
 	"TRANSPORT_STATE_REQUESTING",
@@ -124,7 +124,7 @@ struct media_transport {
 	uint16_t		imtu;		/* Transport input mtu */
 	uint16_t		omtu;		/* Transport output mtu */
 	transport_state_t	state;
-	struct media_transport_ops *ops;
+	const struct media_transport_ops *ops;
 	void			*data;
 };
 
@@ -531,6 +531,8 @@ static void media_owner_exit(DBusConnection *connection, void *user_data)
 {
 	struct media_owner *owner = user_data;
 
+	DBG("Owner %s", owner->name);
+
 	owner->watch = 0;
 
 	media_owner_remove(owner);
@@ -741,6 +743,8 @@ static DBusMessage *release(DBusConnection *conn, DBusMessage *msg,
 
 	if (owner == NULL || g_strcmp0(owner->name, sender) != 0)
 		return btd_error_not_authorized(msg);
+
+	DBG("Owner %s", owner->name);
 
 	if (owner->pending) {
 		const char *member;
@@ -1535,7 +1539,8 @@ static guint transport_bap_suspend(struct media_transport *transport,
 	id = bt_bap_stream_disable(bap->stream, bap->linked, func, owner);
 
 	if (bt_bap_stream_get_type(bap->stream) == BT_BAP_STREAM_TYPE_BCAST) {
-		bap_disable_complete(bap->stream, 0x00, 0x00, owner);
+		if (transport->owner == owner)
+			bap_disable_complete(bap->stream, 0x00, 0x00, owner);
 		return 0;
 	}
 
@@ -1749,7 +1754,7 @@ static void *transport_bap_init(struct media_transport *transport, void *stream)
 #define BAP_BC_OPS(_uuid) \
 	BAP_OPS(_uuid, transport_bap_bc_properties, NULL, NULL)
 
-static struct media_transport_ops transport_ops[] = {
+static const struct media_transport_ops transport_ops[] = {
 	A2DP_OPS(A2DP_SOURCE_UUID, transport_a2dp_src_init,
 			transport_a2dp_src_set_volume,
 			transport_a2dp_src_destroy),
@@ -1762,12 +1767,13 @@ static struct media_transport_ops transport_ops[] = {
 	BAP_BC_OPS(BAA_SERVICE_UUID),
 };
 
-static struct media_transport_ops *media_transport_find_ops(const char *uuid)
+static const struct media_transport_ops *
+media_transport_find_ops(const char *uuid)
 {
 	size_t i;
 
 	for (i = 0; i < ARRAY_SIZE(transport_ops); i++) {
-		struct media_transport_ops *ops = &transport_ops[i];
+		const struct media_transport_ops *ops = &transport_ops[i];
 
 		if (!strcasecmp(uuid, ops->uuid))
 			return ops;
@@ -1784,7 +1790,7 @@ struct media_transport *media_transport_create(struct btd_device *device,
 {
 	struct media_endpoint *endpoint = data;
 	struct media_transport *transport;
-	struct media_transport_ops *ops;
+	const struct media_transport_ops *ops;
 	static int fd = 0;
 
 	transport = g_new0(struct media_transport, 1);
@@ -1794,8 +1800,7 @@ struct media_transport *media_transport_create(struct btd_device *device,
 		transport->adapter = media_endpoint_get_btd_adapter(endpoint);
 
 	transport->endpoint = endpoint;
-	transport->configuration = g_new(uint8_t, size);
-	memcpy(transport->configuration, configuration, size);
+	transport->configuration = util_memdup(configuration, size);
 	transport->size = size;
 	transport->remote_endpoint = remote_endpoint;
 

@@ -5,7 +5,7 @@
  *
  *  Copyright (C) 2011-2012  Intel Corporation
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
- *  Copyright 2023 NXP
+ *  Copyright 2023-2024 NXP
  *
  *
  */
@@ -43,6 +43,8 @@
 #define CIS_SIZE		3
 #define BIS_SIZE		3
 #define CIG_SIZE		3
+
+#define MAX_PA_DATA_LEN	252
 
 #define has_bredr(btdev)	(!((btdev)->features[4] & 0x20))
 #define has_le(btdev)		(!!((btdev)->features[4] & 0x40))
@@ -146,6 +148,8 @@ struct btdev {
 	uint8_t  feat_page_2[8];
 	uint16_t acl_mtu;
 	uint16_t acl_max_pkt;
+	uint16_t sco_mtu;
+	uint16_t sco_max_pkt;
 	uint16_t iso_mtu;
 	uint16_t iso_max_pkt;
 	uint8_t  country_code;
@@ -207,7 +211,7 @@ struct btdev {
 	uint16_t le_pa_min_interval;
 	uint16_t le_pa_max_interval;
 	uint8_t  le_pa_data_len;
-	uint8_t  le_pa_data[31];
+	uint8_t  le_pa_data[MAX_PA_DATA_LEN];
 	struct bt_hci_cmd_le_pa_create_sync pa_sync_cmd;
 	uint16_t le_pa_sync_handle;
 	uint8_t  big_handle;
@@ -315,6 +319,18 @@ static inline int del_btdev(struct btdev *btdev)
 	}
 
 	return index;
+}
+
+static inline bool valid_btdev(struct btdev *btdev)
+{
+	int i;
+
+	for (i = 0; i < MAX_BTDEV_ENTRIES; i++) {
+		if (btdev_list[i] == btdev)
+			return true;
+	}
+
+	return false;
 }
 
 static inline struct btdev *find_btdev_by_bdaddr(const uint8_t *bdaddr)
@@ -562,6 +578,8 @@ static void btdev_reset(struct btdev *btdev)
 	btdev->le_scan_enable		= 0x00;
 	btdev->le_adv_enable		= 0x00;
 	btdev->le_pa_enable		= 0x00;
+	btdev->le_pa_sync_handle	= 0x0000;
+	btdev->big_handle		= 0xff;
 
 	al_clear(btdev);
 	rl_clear(btdev);
@@ -637,9 +655,9 @@ static int cmd_read_buffer_size(struct btdev *dev, const void *data,
 
 	rsp.status = BT_HCI_ERR_SUCCESS;
 	rsp.acl_mtu = cpu_to_le16(dev->acl_mtu);
-	rsp.sco_mtu = 0;
+	rsp.sco_mtu = cpu_to_le16(dev->sco_mtu);
 	rsp.acl_max_pkt = cpu_to_le16(dev->acl_max_pkt);
-	rsp.sco_max_pkt = cpu_to_le16(0);
+	rsp.sco_max_pkt = cpu_to_le16(dev->sco_max_pkt);
 
 	cmd_complete(dev, BT_HCI_CMD_READ_BUFFER_SIZE, &rsp, sizeof(rsp));
 
@@ -1245,6 +1263,9 @@ static void conn_complete(struct btdev *btdev,
 	struct bt_hci_evt_conn_complete cc;
 	struct btdev *remote = find_btdev_by_bdaddr(bdaddr);
 
+	if (!remote)
+		return;
+
 	if (!status) {
 		struct btdev_conn *conn;
 
@@ -1280,6 +1301,28 @@ static void conn_complete(struct btdev *btdev,
 	send_event(btdev, BT_HCI_EVT_CONN_COMPLETE, &cc, sizeof(cc));
 }
 
+struct page_timeout_data {
+	struct btdev *btdev;
+	uint8_t bdaddr[6];
+	unsigned int timeout_id;
+};
+
+static bool page_timeout(void *user_data)
+{
+	struct page_timeout_data *pt_data = user_data;
+	struct btdev *btdev = pt_data->btdev;
+	const uint8_t *bdaddr = pt_data->bdaddr;
+
+	timeout_remove(pt_data->timeout_id);
+	pt_data->timeout_id = 0;
+
+	if (valid_btdev(btdev))
+		conn_complete(btdev, bdaddr, BT_HCI_ERR_PAGE_TIMEOUT);
+
+	free(pt_data);
+	return false;
+}
+
 static int cmd_create_conn_complete(struct btdev *dev, const void *data,
 						uint8_t len)
 {
@@ -1297,7 +1340,18 @@ static int cmd_create_conn_complete(struct btdev *dev, const void *data,
 
 		send_event(remote, BT_HCI_EVT_CONN_REQUEST, &cr, sizeof(cr));
 	} else {
-		conn_complete(dev, cmd->bdaddr, BT_HCI_ERR_PAGE_TIMEOUT);
+		struct page_timeout_data *pt_data =
+			new0(struct page_timeout_data, 1);
+
+		pt_data->btdev = dev;
+		memcpy(pt_data->bdaddr, cmd->bdaddr, 6);
+
+		/* Send page timeout after 5.12 seconds to emulate real
+		 * paging.
+		 */
+		pt_data->timeout_id = timeout_add(5120,
+						  page_timeout,
+						  pt_data, NULL);
 	}
 
 	return 0;
@@ -2711,6 +2765,8 @@ static int cmd_enhanced_setup_sync_conn_complete(struct btdev *dev,
 		cc.status = BT_HCI_ERR_MEM_CAPACITY_EXCEEDED;
 		goto done;
 	}
+
+	/* TODO: HCI_Connection_Request connection flow */
 
 	cc.status = BT_HCI_ERR_SUCCESS;
 	memcpy(cc.bdaddr, conn->link->dev->bdaddr, 6);
@@ -5177,9 +5233,13 @@ static int cmd_set_pa_data(struct btdev *dev, const void *data,
 {
 	const struct bt_hci_cmd_le_set_pa_data *cmd = data;
 	uint8_t status = BT_HCI_ERR_SUCCESS;
+	uint8_t data_len = cmd->data_len;
 
-	dev->le_pa_data_len = cmd->data_len;
-	memcpy(dev->le_pa_data, cmd->data, 31);
+	if (data_len > MAX_PA_DATA_LEN)
+		data_len = MAX_PA_DATA_LEN;
+
+	dev->le_pa_data_len = data_len;
+	memcpy(dev->le_pa_data, cmd->data, data_len);
 	cmd_complete(dev, BT_HCI_CMD_LE_SET_PA_DATA, &status,
 							sizeof(status));
 
@@ -5225,7 +5285,7 @@ static void send_pa(struct btdev *dev, const struct btdev *remote,
 {
 	struct __packed {
 		struct bt_hci_le_pa_report ev;
-		uint8_t data[31];
+		uint8_t data[247];
 	} pdu;
 
 	memset(&pdu.ev, 0, sizeof(pdu.ev));
@@ -6424,9 +6484,13 @@ static int cmd_big_term_sync(struct btdev *dev, const void *data, uint8_t len)
 								0x16);
 
 		conn_remove(conn);
+		break;
 	}
 
 done:
+	if (rsp.status == BT_HCI_ERR_SUCCESS)
+		dev->big_handle = 0xff;
+
 	cmd_complete(dev, BT_HCI_CMD_LE_BIG_TERM_SYNC, &rsp, sizeof(rsp));
 
 	return 0;
@@ -7112,6 +7176,9 @@ struct btdev *btdev_create(enum btdev_type type, uint16_t id)
 
 	btdev->acl_mtu = 192;
 	btdev->acl_max_pkt = 1;
+
+	btdev->sco_mtu = 72;
+	btdev->sco_max_pkt = 1;
 
 	btdev->iso_mtu = 251;
 	btdev->iso_max_pkt = 1;

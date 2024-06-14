@@ -4,7 +4,7 @@
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2012-2014  Intel Corporation. All rights reserved.
- *  Copyright 2023 NXP
+ *  Copyright 2023-2024 NXP
  *
  *
  */
@@ -216,6 +216,15 @@ bool util_ltv_foreach(const uint8_t *data, uint8_t len, uint8_t *type,
 	}
 
 	return true;
+}
+
+/* Helper to add l,t,v data in an iovec struct */
+void util_ltv_push(struct iovec *output, uint8_t l, uint8_t t, void *v)
+{
+	output->iov_base = realloc(output->iov_base, output->iov_len + l + 2);
+	util_iov_push_u8(output, l + 1);
+	util_iov_push_u8(output, t);
+	util_iov_push_mem(output, l, v);
 }
 
 /* Helper to print debug information of LTV entries */
@@ -525,6 +534,12 @@ void *util_iov_push_u8(struct iovec *iov, uint8_t val)
 	put_u8(val, p);
 
 	return p;
+}
+
+void *util_iov_append(struct iovec *iov, const void *data, size_t len)
+{
+	iov->iov_base = realloc(iov->iov_base, iov->iov_len + len);
+	return util_iov_push_mem(iov, len, data);
 }
 
 void *util_iov_pull(struct iovec *iov, size_t len)
@@ -1638,6 +1653,8 @@ static const struct {
 	{ "a6695ace-ee7f-4fb9-881a-5fac66c629af", "BlueZ Offload Codecs"},
 	{ "6fbaf188-05e0-496a-9885-d6ddfdb4e03e",
 		"BlueZ Experimental ISO Socket"},
+	{ "69518c4c-b69f-4679-8bc1-c021b47b5733",
+		"BlueZ Experimental Poll Errqueue"},
 	{ }
 };
 

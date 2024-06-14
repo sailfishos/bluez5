@@ -302,10 +302,10 @@ static void start_qemu(void)
 		const char *path = "/tmp/bt-server-bredr";
 		char *chrdev, *serdev;
 
-		chrdev = alloca(32 + strlen(path));
+		chrdev = alloca(48 + strlen(path));
 		sprintf(chrdev, "socket,path=%s,id=bt%d", path, i);
 
-		serdev = alloca(32);
+		serdev = alloca(48);
 		sprintf(serdev, "pci-serial,chardev=bt%d", i);
 
 		argv[pos++] = "-chardev";
@@ -641,7 +641,7 @@ static const char *monitor_table[] = {
 static pid_t start_btmon(const char *home)
 {
 	const char *monitor = NULL;
-	char *argv[3], *envp[2];
+	char *argv[3];
 	pid_t pid;
 	int i;
 
@@ -679,7 +679,7 @@ static pid_t start_btmon(const char *home)
 	}
 
 	if (pid == 0) {
-		execve(argv[0], argv, envp);
+		execv(argv[0], argv);
 		exit(EXIT_SUCCESS);
 	}
 
@@ -698,7 +698,7 @@ static const char *btvirt_table[] = {
 static pid_t start_btvirt(const char *home)
 {
 	const char *btvirt = NULL;
-	char *argv[3], *envp[2];
+	char *argv[3];
 	pid_t pid;
 	int i;
 
@@ -736,7 +736,7 @@ static pid_t start_btvirt(const char *home)
 	}
 
 	if (pid == 0) {
-		execve(argv[0], argv, envp);
+		execv(argv[0], argv);
 		exit(EXIT_SUCCESS);
 	}
 
@@ -912,6 +912,11 @@ static void run_command(char *cmdname, char *home)
 		audio_pid[0] = audio_pid[1] = -1;
 
 start_next:
+	if (!run_auto && !cmdname) {
+		fprintf(stderr, "Missing command argument\n");
+		return;
+	}
+
 	if (run_auto) {
 		if (chdir(home + 5) < 0) {
 			perror("Failed to change home test directory");
@@ -947,6 +952,8 @@ start_next:
 	pid = fork();
 	if (pid < 0) {
 		perror("Failed to fork new process");
+		if (serial_fd >= 0)
+			close(serial_fd);
 		return;
 	}
 

@@ -735,6 +735,7 @@ static bool discover_descs(struct discovery_op *op, bool *discovering)
 		}
 
 		attr = gatt_db_insert_characteristic(client->db,
+							chrc_data->start_handle,
 							chrc_data->value_handle,
 							&chrc_data->uuid, 0,
 							chrc_data->properties,
@@ -829,6 +830,8 @@ done:
 	return true;
 
 failed:
+	DBG(client, "Failed to discover descriptors");
+
 	free(chrc_data);
 	return false;
 }
@@ -1663,7 +1666,7 @@ static bool notify_data_write_ccc(struct notify_data *notify_data, bool enable,
 					bt_gatt_client_callback_t callback)
 {
 	unsigned int att_id;
-	uint16_t value;
+	uint16_t value = 0x0000;
 	uint16_t properties = notify_data->chrc->properties;
 
 	assert(notify_data->chrc->ccc_handle);
@@ -3817,4 +3820,23 @@ bool bt_gatt_client_idle_unregister(struct bt_gatt_client *client,
 	}
 
 	return false;
+}
+
+bool bt_gatt_client_set_retry(struct bt_gatt_client *client,
+					unsigned int id,
+					bool retry)
+{
+	struct request *req;
+
+	if (!client || !id)
+		return false;
+
+	req = queue_find(client->pending_requests, match_req_id,
+							UINT_TO_PTR(id));
+	if (!req)
+		return false;
+
+	bt_att_set_retry(client->att, req->att_id, retry);
+
+	return true;
 }

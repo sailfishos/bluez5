@@ -22,7 +22,7 @@
 	(OBEX_OPP | OBEX_FTP | OBEX_BIP | OBEX_PBAP | OBEX_IRMC |\
 		OBEX_PCSUITE | OBEX_SYNCEVOLUTION | OBEX_MAS)
 
-gboolean plugin_init(const char *pattern, const char *exclude);
+void plugin_init(const char *pattern, const char *exclude);
 void plugin_cleanup(void);
 
 gboolean manager_init(void);

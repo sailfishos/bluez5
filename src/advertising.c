@@ -884,12 +884,18 @@ static int get_adv_flags(struct btd_adv_client *client)
 
 	flags |= client->flags;
 
+	/* Detect if the length is bigger that legacy and secondary is not set
+	 * then force it to be set to ensure the kernel uses EA.
+	 */
+	if (bt_ad_length(client->data) > BT_AD_MAX_DATA_LEN &&
+			!(flags & MGMT_ADV_FLAG_SEC_MASK))
+		flags |= MGMT_ADV_FLAG_SEC_1M;
+
 	return flags;
 }
 
 static int refresh_legacy_adv(struct btd_adv_client *client,
-				mgmt_request_func_t func,
-				unsigned int *mgmt_id)
+				mgmt_request_func_t func)
 {
 	struct mgmt_cp_add_advertising *cp;
 	uint8_t param_len;
@@ -950,8 +956,8 @@ static int refresh_legacy_adv(struct btd_adv_client *client,
 		free(cp);
 		return -EINVAL;
 	}
-	if (mgmt_id)
-		*mgmt_id = mgmt_ret;
+	if (func)
+		client->add_adv_id = mgmt_ret;
 
 	free(cp);
 
@@ -962,7 +968,7 @@ static void add_adv_params_callback(uint8_t status, uint16_t length,
 				    const void *param, void *user_data);
 
 static int refresh_extended_adv(struct btd_adv_client *client,
-				mgmt_request_func_t func, unsigned int *mgmt_id)
+				mgmt_request_func_t func)
 {
 	struct mgmt_cp_add_ext_adv_params cp;
 	uint32_t flags = 0;
@@ -1015,21 +1021,18 @@ static int refresh_extended_adv(struct btd_adv_client *client,
 
 	/* Store callback, called after we set advertising data */
 	client->refresh_done_func = func;
-
-	if (mgmt_id)
-		*mgmt_id = mgmt_ret;
-
+	client->add_adv_id = mgmt_ret;
 
 	return 0;
 }
 
 static int refresh_advertisement(struct btd_adv_client *client,
-			mgmt_request_func_t func, unsigned int *mgmt_id)
+					mgmt_request_func_t func)
 {
 	if (client->manager->extended_add_cmds)
-		return refresh_extended_adv(client, func, mgmt_id);
+		return refresh_extended_adv(client, func);
 
-	return refresh_legacy_adv(client, func, mgmt_id);
+	return refresh_legacy_adv(client, func);
 }
 
 static bool client_discoverable_timeout(void *user_data)
@@ -1042,7 +1045,7 @@ static bool client_discoverable_timeout(void *user_data)
 
 	bt_ad_clear_flags(client->data);
 
-	refresh_advertisement(client, NULL, NULL);
+	refresh_advertisement(client, NULL);
 
 	return FALSE;
 }
@@ -1065,7 +1068,9 @@ static bool parse_discoverable_timeout(DBusMessageIter *iter,
 	if (client->disc_to_id)
 		timeout_remove(client->disc_to_id);
 
-	client->disc_to_id = timeout_add_seconds(client->discoverable_to,
+	if (client->discoverable_to > 0)
+		client->disc_to_id = timeout_add_seconds(
+						client->discoverable_to,
 						client_discoverable_timeout,
 						client, NULL);
 
@@ -1250,7 +1255,7 @@ static void properties_changed(GDBusProxy *proxy, const char *name,
 			continue;
 
 		if (parser->func(iter, client)) {
-			refresh_advertisement(client, NULL, NULL);
+			refresh_advertisement(client, NULL);
 
 			break;
 		}
@@ -1261,9 +1266,18 @@ static void add_client_complete(struct btd_adv_client *client, uint8_t status)
 {
 	DBusMessage *reply;
 
-	if (status) {
+	if (status)
 		error("Failed to add advertisement: %s (0x%02x)",
 						mgmt_errstr(status), status);
+
+	/* If the advertising request was not started by a direct call from
+	 * the client, but rather by a refresh due to properties update or
+	 * our internal timer, there is nothing to reply to.
+	 */
+	if (!client->reg)
+		return;
+
+	if (status) {
 		reply = btd_error_failed(client->reg,
 					"Failed to register advertisement");
 		queue_remove(client->manager->clients, client);
@@ -1329,6 +1343,8 @@ static void add_adv_params_callback(uint8_t status, uint16_t length,
 	unsigned int mgmt_ret;
 	dbus_int16_t tx_power;
 
+	client->add_adv_id = 0;
+
 	if (status)
 		goto fail;
 
@@ -1391,6 +1407,9 @@ static void add_adv_params_callback(uint8_t status, uint16_t length,
 			     client->manager->mgmt_index, param_len, cp,
 			     client->refresh_done_func, client, NULL);
 
+	if (mgmt_ret && client->refresh_done_func)
+		client->add_adv_id = mgmt_ret;
+
 	/* Clear the callback */
 	client->refresh_done_func = NULL;
 
@@ -1398,9 +1417,6 @@ static void add_adv_params_callback(uint8_t status, uint16_t length,
 		error("Failed to add Advertising Data");
 		goto fail;
 	}
-
-	if (client->add_adv_id)
-		client->add_adv_id = mgmt_ret;
 
 	free(cp);
 	cp = NULL;
@@ -1483,8 +1499,7 @@ static DBusMessage *parse_advertisement(struct btd_adv_client *client)
 		goto fail;
 	}
 
-	err = refresh_advertisement(client, add_adv_callback,
-					&client->add_adv_id);
+	err = refresh_advertisement(client, add_adv_callback);
 
 	if (!err)
 		return NULL;
@@ -1891,6 +1906,19 @@ static void read_adv_features_callback(uint8_t status, uint16_t length,
 	/* Reset existing instances */
 	if (feat->num_instances)
 		remove_advertising(manager, 0);
+
+	/* Emit property update */
+	g_dbus_emit_property_changed(btd_get_dbus_connection(),
+		adapter_get_path(manager->adapter),
+		LE_ADVERTISING_MGR_IFACE, "SupportedFeatures");
+
+	g_dbus_emit_property_changed(btd_get_dbus_connection(),
+		adapter_get_path(manager->adapter),
+		LE_ADVERTISING_MGR_IFACE, "SupportedIncludes");
+
+	g_dbus_emit_property_changed(btd_get_dbus_connection(),
+		adapter_get_path(manager->adapter),
+		LE_ADVERTISING_MGR_IFACE, "SupportedSecondaryChannels");
 }
 
 static void read_controller_cap_complete(uint8_t status, uint16_t length,
@@ -2017,7 +2045,7 @@ static void manager_refresh(void *data, void *user_data)
 {
 	struct btd_adv_client *client = data;
 
-	refresh_advertisement(client, user_data, NULL);
+	refresh_advertisement(client, NULL);
 }
 
 void btd_adv_manager_refresh(struct btd_adv_manager *manager)

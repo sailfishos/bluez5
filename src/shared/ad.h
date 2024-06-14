@@ -15,6 +15,8 @@
 #include "lib/uuid.h"
 
 #define BT_AD_MAX_DATA_LEN		31
+#define BT_EA_MAX_DATA_LEN		251
+#define BT_PA_MAX_DATA_LEN		252
 
 #define BT_AD_FLAGS			0x01
 #define BT_AD_UUID16_SOME		0x02
@@ -105,6 +107,8 @@ struct bt_ad *bt_ad_new_with_data(size_t len, const uint8_t *data);
 struct bt_ad *bt_ad_ref(struct bt_ad *ad);
 
 void bt_ad_unref(struct bt_ad *ad);
+
+size_t bt_ad_length(struct bt_ad *ad);
 
 uint8_t *bt_ad_generate(struct bt_ad *ad, size_t *length);
 

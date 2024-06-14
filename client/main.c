@@ -830,6 +830,11 @@ static gboolean parse_argument(int argc, char *argv[], const char **arg_table,
 {
 	const char **opt;
 
+	if (argc < 2) {
+		bt_shell_printf("Missing argument to %s\n", argv[0]);
+		return FALSE;
+	}
+
 	if (!strcmp(argv[1], "help")) {
 		for (opt = arg_table; opt && *opt; opt++)
 			bt_shell_printf("%s\n", *opt);
@@ -2108,7 +2113,7 @@ static void set_default_local_attribute(char *attr)
 	desc = g_strdup_printf(COLOR_BLUE "[%s]" COLOR_OFF "# ", attr);
 
 	bt_shell_set_prompt(desc);
-	free(desc);
+	g_free(desc);
 }
 
 static void cmd_select_attribute(int argc, char *argv[])
@@ -3060,7 +3065,7 @@ static const struct bt_shell_menu gatt_menu = {
 					"Unregister application service" },
 	{ "register-includes", "<UUID> [handle]", cmd_register_includes,
 					"Register as Included service in." },
-	{ "unregister-includes", "<Service-UUID><Inc-UUID>",
+	{ "unregister-includes", "<Service-UUID> <Inc-UUID>",
 			cmd_unregister_includes,
 				 "Unregister Included service." },
 	{ "register-characteristic",

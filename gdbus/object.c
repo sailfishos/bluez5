@@ -14,6 +14,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 
 #include <glib.h>
 #include <dbus/dbus.h>
@@ -127,6 +128,14 @@ static gboolean check_experimental(int flags, int flag)
 	return !(global_flags & G_DBUS_FLAG_ENABLE_EXPERIMENTAL);
 }
 
+static bool check_testing(int flags, int flag)
+{
+	if (!(flags & flag))
+		return false;
+
+	return !(global_flags & G_DBUS_FLAG_ENABLE_TESTING);
+}
+
 static void generate_interface_xml(GString *gstr, struct interface_data *iface)
 {
 	const GDBusMethodTable *method;
@@ -136,6 +145,9 @@ static void generate_interface_xml(GString *gstr, struct interface_data *iface)
 	for (method = iface->methods; method && method->name; method++) {
 		if (check_experimental(method->flags,
 					G_DBUS_METHOD_FLAG_EXPERIMENTAL))
+			continue;
+
+		if (check_testing(method->flags, G_DBUS_METHOD_FLAG_TESTING))
 			continue;
 
 		g_string_append_printf(gstr, "<method name=\"%s\">",
@@ -158,6 +170,9 @@ static void generate_interface_xml(GString *gstr, struct interface_data *iface)
 					G_DBUS_SIGNAL_FLAG_EXPERIMENTAL))
 			continue;
 
+		if (check_testing(signal->flags, G_DBUS_SIGNAL_FLAG_TESTING))
+			continue;
+
 		g_string_append_printf(gstr, "<signal name=\"%s\">",
 								signal->name);
 		print_arguments(gstr, signal->args, NULL);
@@ -173,6 +188,10 @@ static void generate_interface_xml(GString *gstr, struct interface_data *iface)
 								property++) {
 		if (check_experimental(property->flags,
 					G_DBUS_PROPERTY_FLAG_EXPERIMENTAL))
+			continue;
+
+		if (check_testing(property->flags,
+					G_DBUS_PROPERTY_FLAG_TESTING))
 			continue;
 
 		g_string_append_printf(gstr, "<property name=\"%s\""
@@ -532,6 +551,9 @@ static void append_properties(struct interface_data *data,
 					G_DBUS_PROPERTY_FLAG_EXPERIMENTAL))
 			continue;
 
+		if (check_testing(p->flags, G_DBUS_PROPERTY_FLAG_TESTING))
+			continue;
+
 		if (p->get == NULL)
 			continue;
 
@@ -761,6 +783,9 @@ static inline const GDBusPropertyTable *find_property(const GDBusPropertyTable *
 
 		if (check_experimental(p->flags,
 					G_DBUS_PROPERTY_FLAG_EXPERIMENTAL))
+			break;
+
+		if (check_testing(p->flags, G_DBUS_PROPERTY_FLAG_TESTING))
 			break;
 
 		return p;
@@ -1078,6 +1103,9 @@ static DBusHandlerResult generic_message(DBusConnection *connection,
 					G_DBUS_METHOD_FLAG_EXPERIMENTAL))
 			return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 
+		if (check_testing(method->flags, G_DBUS_METHOD_FLAG_TESTING))
+			return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+
 		if (g_dbus_args_have_signature(method->in_args,
 							message) == FALSE)
 			continue;
@@ -1207,17 +1235,25 @@ static gboolean add_interface(struct generic_data *data,
 		if (!check_experimental(method->flags,
 					G_DBUS_METHOD_FLAG_EXPERIMENTAL))
 			goto done;
+
+		if (!check_testing(method->flags, G_DBUS_METHOD_FLAG_TESTING))
+			goto done;
 	}
 
 	for (signal = signals; signal && signal->name; signal++) {
 		if (!check_experimental(signal->flags,
 					G_DBUS_SIGNAL_FLAG_EXPERIMENTAL))
 			goto done;
+		if (!check_testing(signal->flags, G_DBUS_SIGNAL_FLAG_TESTING))
+			goto done;
 	}
 
 	for (property = properties; property && property->name; property++) {
 		if (!check_experimental(property->flags,
 					G_DBUS_PROPERTY_FLAG_EXPERIMENTAL))
+			goto done;
+		if (!check_testing(property->flags,
+					G_DBUS_PROPERTY_FLAG_TESTING))
 			goto done;
 	}
 

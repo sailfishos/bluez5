@@ -788,7 +788,7 @@ static struct obex_mime_type_driver file = {
 	.copy = filesystem_copy,
 };
 
-static struct obex_mime_type_driver capability = {
+static const struct obex_mime_type_driver capability = {
 	.target = FTP_TARGET,
 	.target_size = FTP_TARGET_SIZE,
 	.mimetype = "x-obex/capability",
@@ -797,7 +797,7 @@ static struct obex_mime_type_driver capability = {
 	.read = capability_read,
 };
 
-static struct obex_mime_type_driver folder = {
+static const struct obex_mime_type_driver folder = {
 	.target = FTP_TARGET,
 	.target_size = FTP_TARGET_SIZE,
 	.mimetype = "x-obex/folder-listing",
@@ -806,7 +806,7 @@ static struct obex_mime_type_driver folder = {
 	.read = folder_read,
 };
 
-static struct obex_mime_type_driver pcsuite = {
+static const struct obex_mime_type_driver pcsuite = {
 	.target = FTP_TARGET,
 	.target_size = FTP_TARGET_SIZE,
 	.who = PCSUITE_WHO,

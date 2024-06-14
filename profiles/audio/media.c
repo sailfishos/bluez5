@@ -152,6 +152,11 @@ static void media_endpoint_cancel(struct endpoint_request *request)
 {
 	struct media_endpoint *endpoint = request->endpoint;
 
+	DBG("Canceling %s: name = %s path = %s",
+			dbus_message_get_member(request->msg),
+			dbus_message_get_destination(request->msg),
+			dbus_message_get_path(request->msg));
+
 	if (request->call)
 		dbus_pending_call_cancel(request->call);
 
@@ -1031,6 +1036,33 @@ static int pac_select(struct bt_bap_pac *lpac, struct bt_bap_pac *rpac,
 								data, free);
 }
 
+static void pac_cancel_select(struct bt_bap_pac *lpac, bt_bap_pac_select_t cb,
+						void *cb_data, void *user_data)
+{
+	struct media_endpoint *endpoint = user_data;
+	GSList *l = endpoint->requests;
+
+	while (l) {
+		struct endpoint_request *req = l->data;
+		struct pac_select_data *data;
+
+		if (req->cb != pac_select_cb) {
+			l = g_slist_next(l);
+			continue;
+		}
+
+		data = req->user_data;
+		if (data->pac != lpac || data->cb != cb ||
+						data->user_data != cb_data) {
+			l = g_slist_next(l);
+			continue;
+		}
+
+		media_endpoint_cancel(req);
+		l = endpoint->requests;
+	}
+}
+
 struct pac_config_data {
 	struct bt_bap_stream *stream;
 	bt_bap_pac_config_t cb;
@@ -1198,6 +1230,7 @@ static void pac_clear(struct bt_bap_stream *stream, void *user_data)
 
 static struct bt_bap_pac_ops pac_ops = {
 	.select = pac_select,
+	.cancel_select = pac_cancel_select,
 	.config = pac_config,
 	.clear = pac_clear,
 };
@@ -1263,6 +1296,7 @@ static bool endpoint_init_pac(struct media_endpoint *endpoint, uint8_t type,
 				&data, metadata);
 	if (!endpoint->pac) {
 		error("Unable to create PAC");
+		free(name);
 		free(metadata);
 		return false;
 	}
@@ -1423,7 +1457,7 @@ static bool experimental_bcast_sink_ep_supported(struct btd_adapter *adapter)
 	return g_dbus_get_flags() & G_DBUS_FLAG_ENABLE_EXPERIMENTAL;
 }
 
-static struct media_endpoint_init {
+static const struct media_endpoint_init {
 	const char *uuid;
 	bool (*func)(struct media_endpoint *endpoint, int *err);
 	bool (*supported)(struct btd_adapter *adapter);
@@ -1459,7 +1493,7 @@ media_endpoint_create(struct media_adapter *adapter,
 						int *err)
 {
 	struct media_endpoint *endpoint;
-	struct media_endpoint_init *init;
+	const struct media_endpoint_init *init;
 	size_t i;
 	bool succeeded = false;
 
@@ -3299,7 +3333,7 @@ static gboolean supported_uuids(const GDBusPropertyTable *property,
 				DBUS_TYPE_STRING_AS_STRING, &entry);
 
 	for (i = 0; i < ARRAY_SIZE(init_table); i++) {
-		struct media_endpoint_init *init = &init_table[i];
+		const struct media_endpoint_init *init = &init_table[i];
 
 		if (init->supported(adapter->btd_adapter))
 			dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING,

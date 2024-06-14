@@ -158,10 +158,7 @@ autoreconf --force --install
 
 %make_build
 
-%check
-
 %install
-rm -rf %{buildroot}
 %make_install
 
 # bluez systemd integration
@@ -180,9 +177,6 @@ done
 
 mkdir -p %{buildroot}%{_sysconfdir}/tracing/bluez/
 cp -a %{SOURCE3} %{buildroot}%{_sysconfdir}/tracing/bluez/
-
-# obexd systemd/D-Bus integration
-(cd $RPM_BUILD_ROOT/%{_userunitdir} && ln -s obex.service dbus-org.bluez.obex.service)
 
 # obexd wrapper
 install -m755 -D %{SOURCE1} ${RPM_BUILD_ROOT}/%{_libexecdir}/obexd-wrapper
@@ -239,9 +233,7 @@ systemctl-user reload-or-try-restart mpris-proxy.service ||:
 systemctl-user daemon-reload ||:
 
 %files
-%defattr(-,root,root,-)
 %{_libexecdir}/bluetooth/bluetoothd
-%{_libdir}/bluetooth/plugins/sixaxis.so
 %{_datadir}/dbus-1/system-services/org.bluez.service
 /%{_unitdir}/bluetooth.service
 /%{_unitdir}/network.target.wants/bluetooth.service
@@ -253,35 +245,28 @@ systemctl-user daemon-reload ||:
 %dir %{_localstatedir}/lib/bluetooth
 
 %files configs-mer
-%defattr(-,root,root,-)
 %config %{_sysconfdir}/bluetooth/*
 
 %files cups
-%defattr(-,root,root,-)
 %{_libdir}/cups/backend/bluetooth
 
 %files hcidump
-%defattr(-,root,root,-)
 %{_bindir}/hcidump
 
 %files libs
-%defattr(-,root,root,-)
 %license COPYING
 %{_libdir}/libbluetooth.so.*
 
 %files libs-devel
-%defattr(-,root,root,-)
 %{_libdir}/libbluetooth.so
 %dir %{_includedir}/bluetooth
 %{_includedir}/bluetooth/*
 %{_libdir}/pkgconfig/bluez.pc
 
 %files test
-%defattr(-,root,root,-)
 %{_libdir}/bluez/test/*
 
 %files tools
-%defattr(-,root,root,-)
 %{_bindir}/bluetooth-player
 %{_bindir}/bluemoon
 %{_bindir}/bluetoothctl
@@ -303,11 +288,9 @@ systemctl-user daemon-reload ||:
 /%{_udevrulesdir}/97-hid2hci.rules
 
 %files tools-hciattach
-%defattr(-,root,root,-)
 %{_bindir}/hciattach
 
 %files obexd
-%defattr(-,root,root,-)
 %config %{_sysconfdir}/obexd.conf
 %dir %{_sysconfdir}/obexd/
 %dir %{_sysconfdir}/obexd/plugins/
@@ -319,17 +302,14 @@ systemctl-user daemon-reload ||:
 %{_userunitdir}/dbus-org.bluez.obex.service
 
 %files obexd-tools
-%defattr(-,root,root,-)
 %{_bindir}/obex-client-tool
 %{_bindir}/obex-server-tool
 %{_bindir}/obexctl
 
 %files tracing
-%defattr(-,root,root,-)
 %dir %{_sysconfdir}/tracing/bluez
 %config %{_sysconfdir}/tracing/bluez/bluez.tracing
 
 %files obexd-tracing
-%defattr(-,root,root,-)
 %dir %{_sysconfdir}/tracing/obexd
 %config %{_sysconfdir}/tracing/obexd/obexd.tracing

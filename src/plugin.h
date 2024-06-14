@@ -23,19 +23,25 @@ struct bluetooth_plugin_desc {
 
 #ifdef BLUETOOTH_PLUGIN_BUILTIN
 #define BLUETOOTH_PLUGIN_DEFINE(name, version, priority, init, exit) \
-		struct bluetooth_plugin_desc __bluetooth_builtin_ ## name = { \
+		const struct bluetooth_plugin_desc \
+		__bluetooth_builtin_ ## name = { \
 			#name, version, priority, init, exit \
 		};
 #else
+#if EXTERNAL_PLUGINS
 #define BLUETOOTH_PLUGIN_DEFINE(name, version, priority, init, exit) \
 		extern struct btd_debug_desc __start___debug[] \
 				__attribute__ ((weak, visibility("hidden"))); \
 		extern struct btd_debug_desc __stop___debug[] \
 				__attribute__ ((weak, visibility("hidden"))); \
-		extern struct bluetooth_plugin_desc bluetooth_plugin_desc \
+		extern const struct bluetooth_plugin_desc \
+				bluetooth_plugin_desc \
 				__attribute__ ((visibility("default"))); \
-		struct bluetooth_plugin_desc bluetooth_plugin_desc = { \
+		const struct bluetooth_plugin_desc bluetooth_plugin_desc = { \
 			#name, version, priority, init, exit, \
 			__start___debug, __stop___debug \
 		};
+#else
+#error "Requested non built-in plugin, while external plugins is disabled"
+#endif
 #endif
