@@ -13,7 +13,6 @@ Source4:    obexd.tracing
 Source5:    mpris-proxy.service
 Requires:   %{name}-libs = %{version}-%{release}
 Requires:   dbus >= 0.60
-Requires:   hwdata >= 0.215
 Requires:   bluez5-configs
 Requires:   systemd
 Requires:   oneshot
