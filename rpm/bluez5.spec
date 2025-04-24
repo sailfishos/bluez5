@@ -11,7 +11,6 @@ Source2:    obexd.conf
 Source3:    bluez.tracing
 Source4:    obexd.tracing
 Source5:    mpris-proxy.service
-Requires:   %{name}-libs = %{version}-%{release}
 Requires:   dbus >= 0.60
 Requires:   bluez5-configs
 Requires:   systemd
@@ -77,9 +76,8 @@ Conflicts:  bluez-libs-devel
 %package test
 Summary:    Test utilities for Bluetooth (bluez5)
 Requires:   %{name} = %{version}-%{release}
-Requires:   %{name}-libs = %{version}
-Requires:   dbus-python
-Requires:   pygobject2 >= 3.10.2
+Requires:   dbus-python3
+Requires:   python3-gobject
 Conflicts:  bluez-test
 %description test
 %{summary}.
