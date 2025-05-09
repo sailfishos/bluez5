@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
+#include <limits.h>
 
 #include <dbus/dbus.h>
 #include <glib.h>
@@ -57,7 +58,6 @@
 /* The duration that streams without users are allowed to stay in
  * STREAMING state. */
 #define SUSPEND_TIMEOUT 5
-#define RECONFIGURE_TIMEOUT 500
 
 #define AVDTP_PSM 25
 
@@ -326,6 +326,7 @@ static int error_to_errno(struct avdtp_error *err)
 	case EHOSTDOWN:
 	case ECONNABORTED:
 	case EBADE:
+	case ECONNREFUSED:
 		return -perr;
 	default:
 		/*
@@ -1327,6 +1328,9 @@ static struct a2dp_remote_sep *find_remote_sep(struct a2dp_channel *chan,
 {
 	struct avdtp_remote_sep *rsep;
 
+	if (!chan || !sep)
+		return NULL;
+
 	rsep = avdtp_find_remote_sep(chan->session, sep->lsep);
 
 	return queue_find(chan->seps, match_remote_sep, rsep);
@@ -1393,7 +1397,7 @@ static bool setup_reconfigure(struct a2dp_setup *setup)
 
 	DBG("%p", setup);
 
-	setup->id = g_timeout_add(RECONFIGURE_TIMEOUT, a2dp_reconfigure, setup);
+	setup->id = g_idle_add(a2dp_reconfigure, setup);
 
 	setup->reconfigure = FALSE;
 
@@ -1596,7 +1600,7 @@ static sdp_record_t *a2dp_record(uint8_t type)
 	sdp_record_t *record;
 	sdp_data_t *psm, *version, *features;
 	uint16_t lp = AVDTP_UUID;
-	uint16_t a2dp_ver = 0x0103, avdtp_ver = 0x0103, feat = 0x000f;
+	uint16_t a2dp_ver = 0x0104, avdtp_ver = 0x0103, feat = 0x000f;
 
 	record = sdp_record_alloc();
 	if (!record)
@@ -2593,6 +2597,8 @@ static bool a2dp_server_listen(struct a2dp_server *server)
 				BT_IO_OPT_MODE, mode,
 				BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_MEDIUM,
 				BT_IO_OPT_CENTRAL, true,
+				/* Set Input MTU to 0 for auto-tune attempt */
+				BT_IO_OPT_IMTU, 0,
 				BT_IO_OPT_INVALID);
 	if (server->io)
 		return true;
@@ -3132,6 +3138,9 @@ unsigned int a2dp_resume(struct avdtp *session, struct a2dp_sep *sep,
 	cb_data->resume_cb = cb;
 	cb_data->user_data = user_data;
 
+	if (setup->reconfigure)
+		goto failed;
+
 	setup->sep = sep;
 	setup->stream = sep->stream;
 
@@ -3189,6 +3198,9 @@ unsigned int a2dp_suspend(struct avdtp *session, struct a2dp_sep *sep,
 	cb_data = setup_cb_add(setup);
 	cb_data->suspend_cb = cb;
 	cb_data->user_data = user_data;
+
+	if (setup->reconfigure)
+		goto failed;
 
 	setup->sep = sep;
 	setup->stream = sep->stream;

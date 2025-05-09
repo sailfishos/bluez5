@@ -39,6 +39,8 @@
 #define acl_handle(h)		(h & 0x0fff)
 #define acl_flags(h)		(h >> 12)
 
+#define sco_flags_status(f)	(f & 0x03)
+
 #define iso_flags_pb(f)		(f & 0x0003)
 #define iso_flags_ts(f)		((f >> 2) & 0x0001)
 #define iso_flags_pack(pb, ts)	(((pb) & 0x03) | (((ts) & 0x01) << 2))
@@ -138,8 +140,14 @@ struct rfcomm_chan_hook {
 	struct rfcomm_chan_hook *next;
 };
 
+struct sco_hook {
+	bthost_sco_hook_func_t func;
+	void *user_data;
+	bthost_destroy_func_t destroy;
+};
+
 struct iso_hook {
-	bthost_cid_hook_func_t func;
+	bthost_iso_hook_func_t func;
 	void *user_data;
 	bthost_destroy_func_t destroy;
 };
@@ -155,6 +163,7 @@ struct btconn {
 	struct rcconn *rcconns;
 	struct cid_hook *cid_hooks;
 	struct rfcomm_chan_hook *rfcomm_chan_hooks;
+	struct sco_hook *sco_hook;
 	struct iso_hook *iso_hook;
 	struct btconn *next;
 	void *smp_data;
@@ -195,6 +204,9 @@ struct l2cap_pending_req {
 
 struct l2cap_conn_cb_data {
 	uint16_t psm;
+	uint16_t mtu;
+	uint16_t mps;
+	uint16_t credits;
 	bthost_l2cap_connect_cb func;
 	bthost_l2cap_disconnect_cb disconn_func;
 	void *user_data;
@@ -238,6 +250,8 @@ struct bthost {
 	void *cmd_complete_data;
 	bthost_new_conn_cb new_conn_cb;
 	void *new_conn_data;
+	bthost_new_conn_cb new_sco_cb;
+	void *new_sco_data;
 	bthost_accept_conn_cb accept_iso_cb;
 	bthost_new_conn_cb new_iso_cb;
 	void *new_iso_data;
@@ -323,9 +337,13 @@ static void btconn_free(struct btconn *conn)
 		free(hook);
 	}
 
+	if (conn->sco_hook && conn->sco_hook->destroy)
+		conn->sco_hook->destroy(conn->sco_hook->user_data);
+
 	if (conn->iso_hook && conn->iso_hook->destroy)
 		conn->iso_hook->destroy(conn->iso_hook->user_data);
 
+	free(conn->sco_hook);
 	free(conn->iso_hook);
 	free(conn->recv_data);
 	free(conn);
@@ -717,6 +735,30 @@ void bthost_add_cid_hook(struct bthost *bthost, uint16_t handle, uint16_t cid,
 
 	hook->next = conn->cid_hooks;
 	conn->cid_hooks = hook;
+}
+
+void bthost_add_sco_hook(struct bthost *bthost, uint16_t handle,
+				bthost_sco_hook_func_t func, void *user_data,
+				bthost_destroy_func_t destroy)
+{
+	struct sco_hook *hook;
+	struct btconn *conn;
+
+	conn = bthost_find_conn(bthost, handle);
+	if (!conn || conn->sco_hook)
+		return;
+
+	hook = malloc(sizeof(*hook));
+	if (!hook)
+		return;
+
+	memset(hook, 0, sizeof(*hook));
+
+	hook->func = func;
+	hook->user_data = user_data;
+	hook->destroy = destroy;
+
+	conn->sco_hook = hook;
 }
 
 void bthost_add_iso_hook(struct bthost *bthost, uint16_t handle,
@@ -1181,6 +1223,29 @@ static void init_conn(struct bthost *bthost, uint16_t handle,
 	}
 }
 
+static void init_sco(struct bthost *bthost, uint16_t handle,
+				const uint8_t *bdaddr, uint8_t addr_type)
+{
+	struct btconn *conn;
+
+	bthost_debug(bthost, "SCO handle 0x%4.4x", handle);
+
+	conn = malloc(sizeof(*conn));
+	if (!conn)
+		return;
+
+	memset(conn, 0, sizeof(*conn));
+	conn->handle = handle;
+	memcpy(conn->bdaddr, bdaddr, 6);
+	conn->addr_type = addr_type;
+
+	conn->next = bthost->conns;
+	bthost->conns = conn;
+
+	if (bthost->new_sco_cb)
+		bthost->new_sco_cb(handle, bthost->new_sco_data);
+}
+
 static void evt_conn_complete(struct bthost *bthost, const void *data,
 								uint8_t len)
 {
@@ -1192,7 +1257,13 @@ static void evt_conn_complete(struct bthost *bthost, const void *data,
 	if (ev->status)
 		return;
 
-	init_conn(bthost, le16_to_cpu(ev->handle), ev->bdaddr, BDADDR_BREDR);
+	if (ev->link_type == 0x00) {
+		init_sco(bthost, le16_to_cpu(ev->handle), ev->bdaddr,
+								BDADDR_BREDR);
+	} else if (ev->link_type == 0x01) {
+		init_conn(bthost, le16_to_cpu(ev->handle), ev->bdaddr,
+								BDADDR_BREDR);
+	}
 }
 
 static void evt_disconn_complete(struct bthost *bthost, const void *data,
@@ -1392,6 +1463,20 @@ static void evt_simple_pairing_complete(struct bthost *bthost, const void *data,
 
 	if (len < sizeof(*ev))
 		return;
+}
+
+static void evt_sync_conn_complete(struct bthost *bthost, const void *data,
+								uint8_t len)
+{
+	const struct bt_hci_evt_sync_conn_complete *ev = data;
+
+	if (len < sizeof(*ev))
+		return;
+
+	if (ev->status)
+		return;
+
+	init_sco(bthost, le16_to_cpu(ev->handle), ev->bdaddr, BDADDR_BREDR);
 }
 
 static void evt_le_conn_complete(struct bthost *bthost, const void *data,
@@ -1700,6 +1785,10 @@ static void process_evt(struct bthost *bthost, const void *data, uint16_t len)
 
 	case BT_HCI_EVT_DISCONNECT_COMPLETE:
 		evt_disconn_complete(bthost, param, hdr->plen);
+		break;
+
+	case BT_HCI_EVT_SYNC_CONN_COMPLETE:
+		evt_sync_conn_complete(bthost, param, hdr->plen);
 		break;
 
 	case BT_HCI_EVT_NUM_COMPLETED_PACKETS:
@@ -2164,14 +2253,13 @@ static bool l2cap_le_conn_req(struct bthost *bthost, struct btconn *conn,
 
 	memset(&rsp, 0, sizeof(rsp));
 
-	rsp.mtu = 23;
-	rsp.mps = 23;
-	rsp.credits = 1;
-
 	cb_data = bthost_find_l2cap_cb_by_psm(bthost, psm);
-	if (cb_data)
+	if (cb_data) {
 		rsp.dcid = cpu_to_le16(conn->next_cid++);
-	else
+		rsp.mtu = cpu_to_le16(cb_data->mtu) ? : cpu_to_le16(23);
+		rsp.mps = cpu_to_le16(cb_data->mps) ? : cpu_to_le16(23);
+		rsp.credits = cpu_to_le16(cb_data->credits) ? : cpu_to_le16(1);
+	} else
 		rsp.result = cpu_to_le16(0x0002); /* PSM Not Supported */
 
 	l2cap_sig_send(bthost, conn, BT_L2CAP_PDU_LE_CONN_RSP, ident, &rsp,
@@ -2945,6 +3033,36 @@ static void process_acl(struct bthost *bthost, const void *data, uint16_t len)
 	}
 }
 
+static void process_sco(struct bthost *bthost, const void *data, uint16_t len)
+{
+	const struct bt_hci_sco_hdr *sco_hdr = data;
+	uint16_t handle, sco_len;
+	uint8_t status;
+	struct btconn *conn;
+	struct sco_hook *hook;
+
+	sco_len = le16_to_cpu(sco_hdr->dlen);
+	if (len != sizeof(*sco_hdr) + sco_len)
+		return;
+
+	handle = acl_handle(sco_hdr->handle);
+	status = sco_flags_status(acl_flags(sco_hdr->handle));
+
+	conn = bthost_find_conn(bthost, handle);
+	if (!conn) {
+		bthost_debug(bthost, "Unknown handle: 0x%4.4x", handle);
+		return;
+	}
+
+	bthost_debug(bthost, "SCO data: %u bytes", sco_len);
+
+	hook = conn->sco_hook;
+	if (!hook)
+		return;
+
+	hook->func(sco_hdr->data, sco_len, status, hook->user_data);
+}
+
 static void process_iso_data(struct bthost *bthost, struct btconn *conn,
 					const void *data, uint16_t len)
 {
@@ -3060,6 +3178,9 @@ void bthost_receive_h4(struct bthost *bthost, const void *data, uint16_t len)
 	case BT_H4_ACL_PKT:
 		process_acl(bthost, data + 1, len - 1);
 		break;
+	case BT_H4_SCO_PKT:
+		process_sco(bthost, data + 1, len - 1);
+		break;
 	case BT_H4_ISO_PKT:
 		process_iso(bthost, data + 1, len - 1);
 		break;
@@ -3081,6 +3202,13 @@ void bthost_set_connect_cb(struct bthost *bthost, bthost_new_conn_cb cb,
 {
 	bthost->new_conn_cb = cb;
 	bthost->new_conn_data = user_data;
+}
+
+void bthost_set_sco_cb(struct bthost *bthost, bthost_new_conn_cb cb,
+							void *user_data)
+{
+	bthost->new_sco_cb = cb;
+	bthost->new_sco_data = user_data;
 }
 
 void bthost_set_iso_cb(struct bthost *bthost, bthost_accept_conn_cb accept,
@@ -3247,11 +3375,14 @@ void bthost_set_scan_enable(struct bthost *bthost, uint8_t enable)
 
 void bthost_set_ext_adv_params(struct bthost *bthost)
 {
+	const uint8_t interval_20ms[] = { 0x20, 0x00, 0x00 };
 	struct bt_hci_cmd_le_set_ext_adv_params cp;
 
 	memset(&cp, 0, sizeof(cp));
 	cp.handle = 0x01;
 	cp.evt_properties = cpu_to_le16(0x0013);
+	memcpy(cp.min_interval, interval_20ms, sizeof(cp.min_interval));
+	memcpy(cp.max_interval, interval_20ms, sizeof(cp.max_interval));
 	send_command(bthost, BT_HCI_CMD_LE_SET_EXT_ADV_PARAMS,
 							&cp, sizeof(cp));
 }
@@ -3288,6 +3419,7 @@ static void set_pa_data(struct bthost *bthost, const uint8_t *data,
 {
 	struct bt_hci_cmd_le_set_pa_data *cp;
 	uint8_t buf[sizeof(*cp) + BT_PA_MAX_DATA_LEN];
+	size_t data_len;
 
 	cp = (void *)buf;
 
@@ -3297,14 +3429,14 @@ static void set_pa_data(struct bthost *bthost, const uint8_t *data,
 	cp->handle = 1;
 
 	if (len - offset > BT_PA_MAX_DATA_LEN) {
-		cp->data_len = BT_PA_MAX_DATA_LEN;
+		data_len = BT_PA_MAX_DATA_LEN;
 
 		if (!offset)
 			cp->operation = 0x01;
 		else
 			cp->operation = 0x00;
 	} else {
-		cp->data_len = len - offset;
+		data_len = len - offset;
 
 		if (!offset)
 			cp->operation = 0x03;
@@ -3312,7 +3444,8 @@ static void set_pa_data(struct bthost *bthost, const uint8_t *data,
 			cp->operation = 0x02;
 	}
 
-	memcpy(cp->data, data + offset, cp->data_len);
+	memcpy(cp->data, data + offset, data_len);
+	cp->data_len = data_len;
 
 	send_command(bthost, BT_HCI_CMD_LE_SET_PA_DATA, buf,
 					sizeof(*cp) + cp->data_len);
@@ -3511,7 +3644,8 @@ uint64_t bthost_conn_get_fixed_chan(struct bthost *bthost, uint16_t handle)
 	return conn->fixed_chan;
 }
 
-void bthost_add_l2cap_server(struct bthost *bthost, uint16_t psm,
+void bthost_add_l2cap_server_custom(struct bthost *bthost, uint16_t psm,
+				uint16_t mtu, uint16_t mps, uint16_t credits,
 				bthost_l2cap_connect_cb func,
 				bthost_l2cap_disconnect_cb disconn_func,
 				void *user_data)
@@ -3523,12 +3657,24 @@ void bthost_add_l2cap_server(struct bthost *bthost, uint16_t psm,
 		return;
 
 	data->psm = psm;
+	data->mtu = mtu;
+	data->mps = mps;
+	data->credits = credits;
 	data->user_data = user_data;
 	data->func = func;
 	data->disconn_func = disconn_func;
 	data->next = bthost->new_l2cap_conn_data;
 
 	bthost->new_l2cap_conn_data = data;
+}
+
+void bthost_add_l2cap_server(struct bthost *bthost, uint16_t psm,
+				bthost_l2cap_connect_cb func,
+				bthost_l2cap_disconnect_cb disconn_func,
+				void *user_data)
+{
+	bthost_add_l2cap_server_custom(bthost, psm, 0, 0, 0, func,
+					disconn_func, user_data);
 }
 
 void bthost_set_sc_support(struct bthost *bthost, bool enable)

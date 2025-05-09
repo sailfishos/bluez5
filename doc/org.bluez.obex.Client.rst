@@ -43,6 +43,7 @@ object CreateSession(string destination, dict args)
 		:"opp":
 		:"pbap":
 		:"sync":
+		:"bip-avrcp":
 
 	:string Source:
 
@@ -51,6 +52,10 @@ object CreateSession(string destination, dict args)
 	:byte Channel:
 
 		Channel to be used.
+
+	:uint16 PSM:
+
+		L2CAP PSM to be used.
 
 	Possible errors:
 

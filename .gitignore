@@ -1,5 +1,6 @@
 *.1
 *.5
+*.7
 *.8
 *.o
 *.a
@@ -132,6 +133,7 @@ tools/btpclient
 tools/btpclientctl
 tools/btmon-logger
 tools/bluetooth-logger.service
+tools/mpris-proxy.service
 peripheral/btsensor
 monitor/btmon
 emulator/btvirt
@@ -183,6 +185,9 @@ android/test-ipc
 android/test-*.log
 android/test-*.trs
 
+compile_commands.json
 cscope.in.out
 cscope.out
 cscope.po.out
+
+**/__pycache__

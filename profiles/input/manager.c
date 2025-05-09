@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <stdbool.h>
+#include <stdlib.h>
 
 #include "lib/bluetooth.h"
 #include "lib/sdp.h"
@@ -83,7 +84,8 @@ static int input_init(void)
 	config = load_config_file(CONFIGDIR "/input.conf");
 	if (config) {
 		int idle_timeout;
-		gboolean uhid_enabled, classic_bonded_only, auto_sec;
+		gboolean classic_bonded_only, auto_sec;
+		char *uhid_enabled;
 		gboolean uhid_autodetect;
 
 		idle_timeout = g_key_file_get_integer(config, "General",
@@ -110,12 +112,12 @@ static int input_init(void)
 				err = NULL;
 			}
 
-			uhid_enabled = g_key_file_get_boolean(config, "General",
-					"UserspaceHID", &err);
+			uhid_enabled = g_key_file_get_string(config, "General",
+								"UserspaceHID", &err);
 			if (!err) {
-				DBG("input.conf: UserspaceHID=%s",
-						uhid_enabled ? "true" : "false");
-				input_enable_userspace_hid(uhid_enabled);
+				DBG("input.conf: UserspaceHID=%s", uhid_enabled);
+				input_set_userspace_hid(uhid_enabled);
+				free(uhid_enabled);
 			}
 		}
 

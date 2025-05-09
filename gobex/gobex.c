@@ -317,6 +317,15 @@ static void set_srm(GObex *obex, guint8 op, guint8 srm)
 	struct srm_config *config = obex->srm;
 	gboolean enable;
 
+	switch (srm) {
+	case G_OBEX_SRM_ENABLE:
+	case G_OBEX_SRM_DISABLE:
+	case G_OBEX_SRM_INDICATE:
+		break;
+	default:
+		return;
+	}
+
 	if (config == NULL) {
 		if (srm == G_OBEX_SRM_DISABLE)
 			return;
@@ -1611,7 +1620,7 @@ guint g_obex_setpath(GObex *obex, const char *path, GObexResponseFunc func,
 
 	memset(&data, 0, sizeof(data));
 
-	if (path != NULL && strncmp("..", path, 2) == 0) {
+	if (path != NULL && strlen(path) >= 2 && strncmp("..", path, 2) == 0) {
 		data.flags = 0x03;
 		folder = (path[2] == '/') ? &path[3] : NULL;
 	} else {

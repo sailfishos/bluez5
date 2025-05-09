@@ -43,6 +43,7 @@ struct test_config {
 	bool vs;
 	uint8_t state;
 	bt_bap_state_func_t state_func;
+	uint8_t streams;
 };
 
 struct test_data {
@@ -52,10 +53,11 @@ struct test_data {
 	struct bt_bap_pac *snk;
 	struct bt_bap_pac *src;
 	struct bt_bap_pac *bsrc;
+	struct bt_bap_pac *bsnk;
 	struct iovec *base;
 	struct iovec *caps;
 	struct test_config *cfg;
-	struct bt_bap_stream *stream;
+	struct queue *streams;
 	size_t iovcnt;
 	struct iovec *iov;
 };
@@ -64,10 +66,10 @@ struct test_data {
  * Frequencies: 8Khz 11Khz 16Khz 22Khz 24Khz 32Khz 44.1Khz 48Khz
  * Duration: 7.5 ms 10 ms
  * Channel count: 3
- * Frame length: 30-240
+ * Frame length: 26-240
  */
 static struct iovec lc3_caps = LC3_CAPABILITIES(LC3_FREQ_ANY, LC3_DURATION_ANY,
-								3u, 30, 240);
+								3u, 26, 240);
 
 #define iov_data(args...) ((const struct iovec[]) { args })
 
@@ -79,6 +81,7 @@ static struct iovec lc3_caps = LC3_CAPABILITIES(LC3_FREQ_ANY, LC3_DURATION_ANY,
 		data.cfg = _cfg;				\
 		data.iovcnt = ARRAY_SIZE(iov_data(args));	\
 		data.iov = util_iov_dup(iov, ARRAY_SIZE(iov_data(args))); \
+		data.streams = queue_new(); \
 		tester_add(name, &data, setup, function,	\
 				test_teardown);			\
 	} while (0)
@@ -372,13 +375,13 @@ static void bap_enable(struct bt_bap_stream *stream,
 	case BT_BAP_STREAM_STATE_ENABLING:
 		return;
 	case BT_BAP_STREAM_STATE_DISABLING:
-		id = bt_bap_stream_disable(data->stream, true, bap_disable,
+		id = bt_bap_stream_disable(stream, true, bap_disable,
 						data);
 		break;
 	case BT_BAP_STREAM_STATE_STREAMING:
 		if (data->cfg->snk)
 			return;
-		id = bt_bap_stream_start(data->stream, bap_start, data);
+		id = bt_bap_stream_start(stream, bap_start, data);
 		break;
 	}
 
@@ -399,7 +402,7 @@ static void bap_qos(struct bt_bap_stream *stream,
 	if (data->cfg->state > BT_BAP_STREAM_STATE_QOS) {
 		unsigned int qos_id;
 
-		qos_id = bt_bap_stream_enable(data->stream, true, NULL,
+		qos_id = bt_bap_stream_enable(stream, true, NULL,
 							bap_enable, data);
 		g_assert(qos_id);
 	}
@@ -419,7 +422,7 @@ static void bap_config(struct bt_bap_stream *stream,
 	if (data->cfg->state > BT_BAP_STREAM_STATE_CONFIG) {
 		unsigned int qos_id;
 
-		qos_id = bt_bap_stream_qos(data->stream, &data->cfg->qos,
+		qos_id = bt_bap_stream_qos(stream, &data->cfg->qos,
 					   bap_qos, data);
 		g_assert(qos_id);
 	}
@@ -430,13 +433,16 @@ static bool pac_found(struct bt_bap_pac *lpac, struct bt_bap_pac *rpac,
 {
 	struct test_data *data = user_data;
 	unsigned int config_id;
+	struct bt_bap_stream *stream;
 
-	data->stream = bt_bap_stream_new(data->bap, lpac, rpac,
+	stream = bt_bap_stream_new(data->bap, lpac, rpac,
 						&data->cfg->qos,
 						&data->cfg->cc);
-	g_assert(data->stream);
+	g_assert(stream);
 
-	config_id = bt_bap_stream_config(data->stream, &data->cfg->qos,
+	queue_push_tail(data->streams, stream);
+
+	config_id = bt_bap_stream_config(stream, &data->cfg->qos,
 					&data->cfg->cc, bap_config, data);
 	g_assert(config_id);
 
@@ -528,27 +534,29 @@ static struct bt_bap_pac_ops bcast_pac_ops = {
 static void bsrc_pac_added(struct bt_bap_pac *pac, void *user_data)
 {
 	struct test_data *data = user_data;
+	struct bt_bap_stream *stream;
 
 	bt_bap_pac_set_ops(pac, &bcast_pac_ops, NULL);
 
-	data->stream = bt_bap_stream_new(data->bap, pac, NULL,
-						&data->cfg->qos,
-						&data->cfg->cc);
-	g_assert(data->stream);
+	for (uint8_t i = 0; i < data->cfg->streams; i++) {
+		stream = bt_bap_stream_new(data->bap, pac, NULL,
+							&data->cfg->qos,
+							&data->cfg->cc);
+		g_assert(stream);
 
-	bt_bap_stream_config(data->stream, &data->cfg->qos,
-					&data->cfg->cc, NULL, data);
+		queue_push_tail(data->streams, stream);
+
+		bt_bap_stream_config(stream, &data->cfg->qos,
+						&data->cfg->cc, NULL, data);
+	}
 }
 
-static void bsrc_state(struct bt_bap_stream *stream, uint8_t old_state,
+static void bsrc_state_cfg(struct bt_bap_stream *stream, uint8_t old_state,
 				uint8_t new_state, void *user_data)
 {
 	struct test_data *data = user_data;
 
 	switch (new_state) {
-	case BT_BAP_STREAM_STATE_QOS:
-		bt_bap_stream_enable(stream, true, NULL, NULL, NULL);
-		break;
 	case BT_BAP_STREAM_STATE_CONFIG:
 		data->base = bt_bap_stream_get_base(stream);
 
@@ -557,15 +565,114 @@ static void bsrc_state(struct bt_bap_stream *stream, uint8_t old_state,
 		g_assert(memcmp(data->base->iov_base, data->cfg->base.iov_base,
 				data->base->iov_len) == 0);
 
-		bt_bap_stream_start(stream, NULL, NULL);
-		break;
-	case BT_BAP_STREAM_STATE_STREAMING:
 		tester_test_passed();
 		break;
 	}
 }
 
-static void test_bsrc(const void *user_data)
+static void bsnk_pac_added(struct bt_bap_pac *pac, void *user_data)
+{
+	struct test_data *data = user_data;
+	struct bt_bap_pac *lpac;
+	struct iovec *cc;
+	struct bt_bap_stream *stream;
+	uint8_t bis_idx = 1;
+
+	bt_bap_pac_set_ops(pac, &bcast_pac_ops, NULL);
+
+	for (uint8_t i = 0; i < data->cfg->streams; i++) {
+		cc = bt_bap_merge_caps(&data->cfg->cc, NULL);
+		g_assert(cc);
+
+		bt_bap_verify_bis(data->bap, bis_idx++, cc, &lpac);
+
+		g_assert(lpac);
+		g_assert(pac == lpac);
+
+		stream = bt_bap_stream_new(data->bap,
+			pac, NULL, &data->cfg->qos, cc);
+
+		g_assert(stream);
+
+		queue_push_tail(data->streams, stream);
+
+		bt_bap_stream_config(stream, &data->cfg->qos,
+				cc, NULL, NULL);
+
+		util_iov_free(cc, 1);
+	}
+}
+
+static void bsnk_state(struct bt_bap_stream *stream, uint8_t old_state,
+				uint8_t new_state, void *user_data)
+{
+	struct test_data *data = user_data;
+	struct iovec *cc;
+
+	switch (new_state) {
+	case BT_BAP_STREAM_STATE_CONFIG:
+		/* Check that stream has been configured as expected */
+		cc = bt_bap_stream_get_config(stream);
+
+		g_assert(cc);
+		g_assert(cc->iov_len == data->cfg->cc.iov_len);
+		g_assert(memcmp(cc->iov_base, data->cfg->cc.iov_base,
+				cc->iov_len) == 0);
+
+		tester_test_passed();
+		break;
+	}
+}
+
+static void test_bcast_config(struct test_data *data)
+{
+	if (!data->cfg)
+		return;
+
+	if (data->cfg->src) {
+		bt_bap_pac_register(data->bap, bsrc_pac_added,
+						NULL, data, NULL);
+
+		if (data->cfg->vs)
+			data->bsrc = bt_bap_add_vendor_pac(data->db,
+							"test-bap-bsrc",
+							BT_BAP_BCAST_SOURCE,
+							0x0ff, 0x0000, 0x0000,
+							NULL, data->caps,
+							NULL);
+		else
+			data->bsrc = bt_bap_add_pac(data->db, "test-bap-bsrc",
+							BT_BAP_BCAST_SOURCE,
+							LC3_ID,
+							NULL, data->caps,
+							NULL);
+
+		g_assert(data->bsrc);
+	}
+
+	if (data->cfg->snk) {
+		bt_bap_pac_register(data->bap, bsnk_pac_added,
+						NULL, data, NULL);
+
+		if (data->cfg->vs)
+			data->bsnk = bt_bap_add_vendor_pac(data->db,
+							"test-bap-bsnk",
+							BT_BAP_BCAST_SINK,
+							0xff, 0x0000, 0x0000,
+							NULL, data->caps,
+							NULL);
+		else
+			data->bsnk = bt_bap_add_pac(data->db, "test-bap-bsnk",
+							BT_BAP_BCAST_SINK,
+							LC3_ID,
+							NULL, data->caps,
+							NULL);
+
+		g_assert(data->bsnk);
+	}
+}
+
+static void test_bcast(const void *user_data)
 {
 	struct test_data *data = (void *)user_data;
 
@@ -579,24 +686,11 @@ static void test_bsrc(const void *user_data)
 
 	bt_bap_attach_broadcast(data->bap);
 
-	bt_bap_state_register(data->bap, bsrc_state,
-					NULL, data, NULL);
+	if (data->cfg && data->cfg->state_func)
+		bt_bap_state_register(data->bap, data->cfg->state_func, NULL,
+						data, NULL);
 
-	bt_bap_pac_register(data->bap, bsrc_pac_added,
-					NULL, data, NULL);
-
-	if (data->cfg->vs)
-		data->bsrc = bt_bap_add_vendor_pac(data->db,
-						"test-bap-bsrc",
-						BT_BAP_BCAST_SOURCE, 0x0ff,
-						0x0000, 0x0000,
-						NULL, data->caps, NULL);
-	else
-		data->bsrc = bt_bap_add_pac(data->db, "test-bap-bsrc",
-						BT_BAP_BCAST_SOURCE, LC3_ID,
-						NULL, data->caps, NULL);
-
-	g_assert(data->bsrc);
+	test_bcast_config(data);
 }
 
 static void test_teardown(const void *user_data)
@@ -612,7 +706,10 @@ static void test_teardown(const void *user_data)
 	bt_bap_remove_pac(data->snk);
 	bt_bap_remove_pac(data->src);
 	bt_bap_remove_pac(data->bsrc);
+	bt_bap_remove_pac(data->bsnk);
 	gatt_db_unref(data->db);
+
+	queue_destroy(data->streams, NULL);
 
 	tester_teardown_complete();
 }
@@ -2553,7 +2650,7 @@ static void state_start_disable(struct bt_bap_stream *stream,
 
 	switch (new_state) {
 	case BT_BAP_STREAM_STATE_STREAMING:
-		id = bt_bap_stream_disable(data->stream, true, bap_disable,
+		id = bt_bap_stream_disable(stream, true, bap_disable,
 						data);
 		g_assert(id);
 		break;
@@ -2629,7 +2726,7 @@ static void state_cc_release(struct bt_bap_stream *stream,
 
 	switch (new_state) {
 	case BT_BAP_STREAM_STATE_CONFIG:
-		id = bt_bap_stream_release(data->stream, bap_release, data);
+		id = bt_bap_stream_release(stream, bap_release, data);
 		g_assert(id);
 		break;
 	}
@@ -2698,7 +2795,7 @@ static void state_qos_release(struct bt_bap_stream *stream,
 
 	switch (new_state) {
 	case BT_BAP_STREAM_STATE_QOS:
-		id = bt_bap_stream_release(data->stream, bap_release, data);
+		id = bt_bap_stream_release(stream, bap_release, data);
 		g_assert(id);
 		break;
 	}
@@ -2737,7 +2834,7 @@ static void state_enable_release(struct bt_bap_stream *stream,
 
 	switch (new_state) {
 	case BT_BAP_STREAM_STATE_ENABLING:
-		id = bt_bap_stream_release(data->stream, bap_release, data);
+		id = bt_bap_stream_release(stream, bap_release, data);
 		g_assert(id);
 		break;
 	}
@@ -2776,7 +2873,7 @@ static void state_start_release(struct bt_bap_stream *stream,
 
 	switch (new_state) {
 	case BT_BAP_STREAM_STATE_STREAMING:
-		id = bt_bap_stream_release(data->stream, bap_release, data);
+		id = bt_bap_stream_release(stream, bap_release, data);
 		g_assert(id);
 		break;
 	}
@@ -2804,7 +2901,7 @@ static void state_disable_release(struct bt_bap_stream *stream,
 
 	switch (new_state) {
 	case BT_BAP_STREAM_STATE_DISABLING:
-		id = bt_bap_stream_release(data->stream, bap_release, data);
+		id = bt_bap_stream_release(stream, bap_release, data);
 		g_assert(id);
 		break;
 	}
@@ -2881,7 +2978,7 @@ static void state_enable_metadata(struct bt_bap_stream *stream,
 
 	switch (new_state) {
 	case BT_BAP_STREAM_STATE_ENABLING:
-		id = bt_bap_stream_metadata(data->stream, &iov, bap_metadata,
+		id = bt_bap_stream_metadata(stream, &iov, bap_metadata,
 						data);
 		g_assert(id);
 		break;
@@ -2957,7 +3054,7 @@ static void state_start_metadata(struct bt_bap_stream *stream,
 
 	switch (new_state) {
 	case BT_BAP_STREAM_STATE_STREAMING:
-		id = bt_bap_stream_metadata(data->stream, &iov, bap_metadata,
+		id = bt_bap_stream_metadata(stream, &iov, bap_metadata,
 						data);
 		g_assert(id);
 		break;
@@ -5474,339 +5571,292 @@ static void test_scc(void)
 	test_str_1_1_1_lc3();
 }
 
-#define LC3_CFG(_freq, _dur, _len) \
-	0x0a, \
-	0x02, 0x01, _freq, \
-	0x02, 0x02, _dur, \
-	0x03, 0x04, _len, _len >> 8
-
-#define BASE(_pd, _sgrp, _nbis, _cfg...) \
-	_pd & 0xff, _pd >> 8, _pd >> 16, \
-	_sgrp, \
-	_nbis, \
-	_cfg
-
-#define BASE_LC3(_pd, _sgrp, _nbis, _cc...) \
-	BASE(_pd, _sgrp, _nbis, 0x06, 0x00, 0x00, 0x00, 0x00, _cc)
-
-#define LC3_CFG_8_1 \
-	LC3_CFG(LC3_CONFIG_FREQ_8KHZ, \
-		LC3_CONFIG_DURATION_7_5, \
-		LC3_CONFIG_FRAME_LEN_8_1)
-
-#define BASE_LC3_8_1 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_8_1, 0x00, 0x01, 0x00)
-
 static struct test_config cfg_bsrc_8_1_1 = {
 	.cc = LC3_CONFIG_8_1,
 	.qos = LC3_QOS_8_1_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_8_1),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_8_1_2 = {
 	.cc = LC3_CONFIG_8_1,
 	.qos = LC3_QOS_8_1_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_8_1),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
-
-#define LC3_CFG_8_2 \
-	LC3_CFG(LC3_CONFIG_FREQ_8KHZ, \
-		LC3_CONFIG_DURATION_10, \
-		LC3_CONFIG_FRAME_LEN_8_2)
-
-#define BASE_LC3_8_2 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_8_2, 0x00, 0x01, 0x00)
 
 static struct test_config cfg_bsrc_8_2_1 = {
 	.cc = LC3_CONFIG_8_2,
 	.qos = LC3_QOS_8_2_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_8_2),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_8_2_2 = {
 	.cc = LC3_CONFIG_8_2,
 	.qos = LC3_QOS_8_2_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_8_2),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
-
-#define LC3_CFG_16_1 \
-	LC3_CFG(LC3_CONFIG_FREQ_16KHZ, \
-		LC3_CONFIG_DURATION_7_5, \
-		LC3_CONFIG_FRAME_LEN_16_1)
-
-#define BASE_LC3_16_1 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_16_1, 0x00, 0x01, 0x00)
 
 static struct test_config cfg_bsrc_16_1_1 = {
 	.cc = LC3_CONFIG_16_1,
 	.qos = LC3_QOS_16_1_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_16_1),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_16_1_2 = {
 	.cc = LC3_CONFIG_16_1,
 	.qos = LC3_QOS_16_1_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_16_1),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
-
-#define LC3_CFG_16_2 \
-	LC3_CFG(LC3_CONFIG_FREQ_16KHZ, \
-		LC3_CONFIG_DURATION_10, \
-		LC3_CONFIG_FRAME_LEN_16_2)
-
-#define BASE_LC3_16_2 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_16_2, 0x00, 0x01, 0x00)
 
 static struct test_config cfg_bsrc_16_2_1 = {
 	.cc = LC3_CONFIG_16_2,
 	.qos = LC3_QOS_16_2_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_16_2),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_16_2_2 = {
 	.cc = LC3_CONFIG_16_2,
 	.qos = LC3_QOS_16_2_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_16_2),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
-
-#define LC3_CFG_24_1 \
-	LC3_CFG(LC3_CONFIG_FREQ_24KHZ, \
-		LC3_CONFIG_DURATION_7_5, \
-		LC3_CONFIG_FRAME_LEN_24_1)
-
-#define BASE_LC3_24_1 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_24_1, 0x00, 0x01, 0x00)
 
 static struct test_config cfg_bsrc_24_1_1 = {
 	.cc = LC3_CONFIG_24_1,
 	.qos = LC3_QOS_24_1_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_24_1),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_24_1_2 = {
 	.cc = LC3_CONFIG_24_1,
 	.qos = LC3_QOS_24_1_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_24_1),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
-
-#define LC3_CFG_24_2 \
-	LC3_CFG(LC3_CONFIG_FREQ_24KHZ, \
-		LC3_CONFIG_DURATION_10, \
-		LC3_CONFIG_FRAME_LEN_24_2)
-
-#define BASE_LC3_24_2 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_24_2, 0x00, 0x01, 0x00)
 
 static struct test_config cfg_bsrc_24_2_1 = {
 	.cc = LC3_CONFIG_24_2,
 	.qos = LC3_QOS_24_2_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_24_2),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_24_2_2 = {
 	.cc = LC3_CONFIG_24_2,
 	.qos = LC3_QOS_24_2_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_24_2),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
-
-#define LC3_CFG_32_1 \
-	LC3_CFG(LC3_CONFIG_FREQ_32KHZ, \
-		LC3_CONFIG_DURATION_7_5, \
-		LC3_CONFIG_FRAME_LEN_32_1)
-
-#define BASE_LC3_32_1 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_32_1, 0x00, 0x01, 0x00)
 
 static struct test_config cfg_bsrc_32_1_1 = {
 	.cc = LC3_CONFIG_32_1,
 	.qos = LC3_QOS_32_1_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_32_1),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_32_1_2 = {
 	.cc = LC3_CONFIG_32_1,
 	.qos = LC3_QOS_32_1_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_32_1),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
-
-#define LC3_CFG_32_2 \
-	LC3_CFG(LC3_CONFIG_FREQ_32KHZ, \
-		LC3_CONFIG_DURATION_10, \
-		LC3_CONFIG_FRAME_LEN_32_2)
-
-#define BASE_LC3_32_2 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_32_2, 0x00, 0x01, 0x00)
 
 static struct test_config cfg_bsrc_32_2_1 = {
 	.cc = LC3_CONFIG_32_2,
 	.qos = LC3_QOS_32_2_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_32_2),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_32_2_2 = {
 	.cc = LC3_CONFIG_32_2,
 	.qos = LC3_QOS_32_2_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_32_2),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
-
-#define LC3_CFG_44_1 \
-	LC3_CFG(LC3_CONFIG_FREQ_44KHZ, \
-		LC3_CONFIG_DURATION_7_5, \
-		LC3_CONFIG_FRAME_LEN_44_1)
-
-#define BASE_LC3_44_1 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_44_1, 0x00, 0x01, 0x00)
 
 static struct test_config cfg_bsrc_44_1_1 = {
 	.cc = LC3_CONFIG_44_1,
 	.qos = LC3_QOS_44_1_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_44_1),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_44_1_2 = {
 	.cc = LC3_CONFIG_44_1,
 	.qos = LC3_QOS_44_1_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_44_1),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
-
-#define LC3_CFG_44_2 \
-	LC3_CFG(LC3_CONFIG_FREQ_44KHZ, \
-		LC3_CONFIG_DURATION_10, \
-		LC3_CONFIG_FRAME_LEN_44_2)
-
-#define BASE_LC3_44_2 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_44_2, 0x00, 0x01, 0x00)
 
 static struct test_config cfg_bsrc_44_2_1 = {
 	.cc = LC3_CONFIG_44_2,
 	.qos = LC3_QOS_44_2_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_44_2),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_44_2_2 = {
 	.cc = LC3_CONFIG_44_2,
 	.qos = LC3_QOS_44_2_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_44_2),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
-
-#define LC3_CFG_48_1 \
-	LC3_CFG(LC3_CONFIG_FREQ_48KHZ, \
-		LC3_CONFIG_DURATION_7_5, \
-		LC3_CONFIG_FRAME_LEN_48_1)
-
-#define BASE_LC3_48_1 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_48_1, 0x00, 0x01, 0x00)
 
 static struct test_config cfg_bsrc_48_1_1 = {
 	.cc = LC3_CONFIG_48_1,
 	.qos = LC3_QOS_48_1_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_48_1),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_48_1_2 = {
 	.cc = LC3_CONFIG_48_1,
 	.qos = LC3_QOS_48_1_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_48_1),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
-
-#define LC3_CFG_48_2 \
-	LC3_CFG(LC3_CONFIG_FREQ_48KHZ, \
-		LC3_CONFIG_DURATION_10, \
-		LC3_CONFIG_FRAME_LEN_48_2)
-
-#define BASE_LC3_48_2 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_48_2, 0x00, 0x01, 0x00)
 
 static struct test_config cfg_bsrc_48_2_1 = {
 	.cc = LC3_CONFIG_48_2,
 	.qos = LC3_QOS_48_2_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_48_2),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_48_2_2 = {
 	.cc = LC3_CONFIG_48_2,
 	.qos = LC3_QOS_48_2_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_48_2),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
-
-#define LC3_CFG_48_3 \
-	LC3_CFG(LC3_CONFIG_FREQ_48KHZ, \
-		LC3_CONFIG_DURATION_7_5, \
-		LC3_CONFIG_FRAME_LEN_48_3)
-
-#define BASE_LC3_48_3 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_48_3, 0x00, 0x01, 0x00)
 
 static struct test_config cfg_bsrc_48_3_1 = {
 	.cc = LC3_CONFIG_48_3,
 	.qos = LC3_QOS_48_3_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_48_3),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_48_3_2 = {
 	.cc = LC3_CONFIG_48_3,
 	.qos = LC3_QOS_48_3_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_48_3),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
-
-#define LC3_CFG_48_4 \
-	LC3_CFG(LC3_CONFIG_FREQ_48KHZ, \
-		LC3_CONFIG_DURATION_10, \
-		LC3_CONFIG_FRAME_LEN_48_4)
-
-#define BASE_LC3_48_4 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_48_4, 0x00, 0x01, 0x00)
 
 static struct test_config cfg_bsrc_48_4_1 = {
 	.cc = LC3_CONFIG_48_4,
 	.qos = LC3_QOS_48_4_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_48_4),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_48_4_2 = {
 	.cc = LC3_CONFIG_48_4,
 	.qos = LC3_QOS_48_4_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_48_4),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
-
-#define LC3_CFG_48_5 \
-	LC3_CFG(LC3_CONFIG_FREQ_48KHZ, \
-		LC3_CONFIG_DURATION_7_5, \
-		LC3_CONFIG_FRAME_LEN_48_5)
-
-#define BASE_LC3_48_5 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_48_5, 0x00, 0x01, 0x00)
 
 static struct test_config cfg_bsrc_48_5_1 = {
 	.cc = LC3_CONFIG_48_5,
 	.qos = LC3_QOS_48_5_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_48_5),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_48_5_2 = {
 	.cc = LC3_CONFIG_48_5,
 	.qos = LC3_QOS_48_5_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_48_5),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
-
-#define LC3_CFG_48_6 \
-	LC3_CFG(LC3_CONFIG_FREQ_48KHZ, \
-		LC3_CONFIG_DURATION_10, \
-		LC3_CONFIG_FRAME_LEN_48_6)
-
-#define BASE_LC3_48_6 \
-	BASE_LC3(40000, 1, 1, LC3_CFG_48_6, 0x00, 0x01, 0x00)
 
 static struct test_config cfg_bsrc_48_6_1 = {
 	.cc = LC3_CONFIG_48_6,
 	.qos = LC3_QOS_48_6_1_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_48_6),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 static struct test_config cfg_bsrc_48_6_2 = {
 	.cc = LC3_CONFIG_48_6,
 	.qos = LC3_QOS_48_6_2_B,
 	.base = UTIL_IOV_INIT(BASE_LC3_48_6),
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 #define VS_CC \
@@ -5818,10 +5868,6 @@ static struct test_config cfg_bsrc_48_6_2 = {
 #define VS_CFG \
 	0x10, \
 	VS_CC
-
-#define BASE_VS \
-	BASE(40000, 1, 1, 0xFF, 0x00, 0x00, 0x00, 0x00, \
-	VS_CFG, 0x00, 0x01, 0x00)
 
 #define QOS_BCAST \
 { \
@@ -5839,8 +5885,11 @@ static struct test_config cfg_bsrc_48_6_2 = {
 static struct test_config cfg_bsrc_vs = {
 	.cc = UTIL_IOV_INIT(VS_CC),
 	.qos = QOS_BCAST,
-	.base = UTIL_IOV_INIT(BASE_VS),
+	.base = UTIL_IOV_INIT(BASE_VS(VS_CFG)),
 	.vs = true,
+	.src = true,
+	.state_func = bsrc_state_cfg,
+	.streams = 1,
 };
 
 /* Test Purpose:
@@ -5863,106 +5912,1457 @@ static struct test_config cfg_bsrc_vs = {
  * Each value included in the Codec_Specific_Configuration is formatted in
  * an LTV structure with the length, type, and value specified in Table 4.74.
  */
-static void test_bsrc_scc(void)
+static void test_bsrc_scc_config(void)
 {
 	define_test("BAP/BSRC/SCC/BV-01-C [Config Broadcast, LC3 8_1_1]",
-		NULL, test_bsrc, &cfg_bsrc_8_1_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_8_1_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-02-C [Config Broadcast, LC3 8_2_1]",
-		NULL, test_bsrc, &cfg_bsrc_8_2_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_8_2_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-03-C [Config Broadcast, LC3 16_1_1]",
-		NULL, test_bsrc, &cfg_bsrc_16_1_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_16_1_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-04-C [Config Broadcast, LC3 16_2_1]",
-		NULL, test_bsrc, &cfg_bsrc_16_2_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_16_2_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-05-C [Config Broadcast, LC3 24_1_1]",
-		NULL, test_bsrc, &cfg_bsrc_24_1_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_24_1_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-06-C [Config Broadcast, LC3 24_2_1]",
-		NULL, test_bsrc, &cfg_bsrc_24_2_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_24_2_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-07-C [Config Broadcast, LC3 32_1_1]",
-		NULL, test_bsrc, &cfg_bsrc_32_1_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_32_1_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-08-C [Config Broadcast, LC3 32_2_1]",
-		NULL, test_bsrc, &cfg_bsrc_32_2_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_32_2_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-09-C [Config Broadcast, LC3 44.1_1_1]",
-		NULL, test_bsrc, &cfg_bsrc_44_1_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_44_1_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-10-C [Config Broadcast, LC3 44.1_2_1]",
-		NULL, test_bsrc, &cfg_bsrc_44_2_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_44_2_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-11-C [Config Broadcast, LC3 48_1_1]",
-		NULL, test_bsrc, &cfg_bsrc_48_1_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_48_1_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-12-C [Config Broadcast, LC3 48_2_1]",
-		NULL, test_bsrc, &cfg_bsrc_48_2_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_48_2_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-13-C [Config Broadcast, LC3 48_3_1]",
-		NULL, test_bsrc, &cfg_bsrc_48_3_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_48_3_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-14-C [Config Broadcast, LC3 48_4_1]",
-		NULL, test_bsrc, &cfg_bsrc_48_4_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_48_4_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-15-C [Config Broadcast, LC3 48_5_1]",
-		NULL, test_bsrc, &cfg_bsrc_48_5_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_48_5_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-16-C [Config Broadcast, LC3 48_6_1]",
-		NULL, test_bsrc, &cfg_bsrc_48_6_1, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_48_6_1, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-17-C [Config Broadcast, LC3 8_1_2]",
-		NULL, test_bsrc, &cfg_bsrc_8_1_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_8_1_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-18-C [Config Broadcast, LC3 8_2_2]",
-		NULL, test_bsrc, &cfg_bsrc_8_2_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_8_2_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-19-C [Config Broadcast, LC3 16_1_2]",
-		NULL, test_bsrc, &cfg_bsrc_16_1_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_16_1_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-20-C [Config Broadcast, LC3 16_2_2]",
-		NULL, test_bsrc, &cfg_bsrc_16_2_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_16_2_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-21-C [Config Broadcast, LC3 24_1_2]",
-		NULL, test_bsrc, &cfg_bsrc_24_1_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_24_1_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-22-C [Config Broadcast, LC3 24_2_2]",
-		NULL, test_bsrc, &cfg_bsrc_24_2_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_24_2_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-23-C [Config Broadcast, LC3 32_1_2]",
-		NULL, test_bsrc, &cfg_bsrc_32_1_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_32_1_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-24-C [Config Broadcast, LC3 32_2_2]",
-		NULL, test_bsrc, &cfg_bsrc_32_2_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_32_2_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-25-C [Config Broadcast, LC3 44.1_1_2]",
-		NULL, test_bsrc, &cfg_bsrc_44_1_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_44_1_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-26-C [Config Broadcast, LC3 44.1_2_2]",
-		NULL, test_bsrc, &cfg_bsrc_44_2_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_44_2_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-27-C [Config Broadcast, LC3 48_1_2]",
-		NULL, test_bsrc, &cfg_bsrc_48_1_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_48_1_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-28-C [Config Broadcast, LC3 48_2_2]",
-		NULL, test_bsrc, &cfg_bsrc_48_2_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_48_2_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-29-C [Config Broadcast, LC3 48_3_2]",
-		NULL, test_bsrc, &cfg_bsrc_48_3_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_48_3_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-30-C [Config Broadcast, LC3 48_4_2]",
-		NULL, test_bsrc, &cfg_bsrc_48_4_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_48_4_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-31-C [Config Broadcast, LC3 48_5_2]",
-		NULL, test_bsrc, &cfg_bsrc_48_5_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_48_5_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-32-C [Config Broadcast, LC3 48_6_2]",
-		NULL, test_bsrc, &cfg_bsrc_48_6_2, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_48_6_2, IOV_NULL);
 
 	define_test("BAP/BSRC/SCC/BV-33-C [Config Broadcast, VS]",
-		NULL, test_bsrc, &cfg_bsrc_vs, IOV_NULL);
+		NULL, test_bcast, &cfg_bsrc_vs, IOV_NULL);
+}
+
+static void bsrc_state_estab(struct bt_bap_stream *stream, uint8_t old_state,
+				uint8_t new_state, void *user_data)
+{
+	switch (new_state) {
+	case BT_BAP_STREAM_STATE_CONFIG:
+		bt_bap_stream_enable(stream, true, NULL, NULL, NULL);
+		break;
+	case BT_BAP_STREAM_STATE_ENABLING:
+		bt_bap_stream_start(stream, NULL, NULL);
+		break;
+	case BT_BAP_STREAM_STATE_STREAMING:
+		tester_test_passed();
+		break;
+	}
+}
+
+static struct test_config cfg_bsrc_8_1_1_estab = {
+	.cc = LC3_CONFIG_8_1,
+	.qos = LC3_QOS_8_1_1_B,
+	.src = true,
+	.state_func = bsrc_state_estab,
+	.streams = 1,
+};
+
+/* Test Purpose:
+ * Verify that a Broadcast Source IUT can establish a broadcast
+ * Audio Stream.
+ *
+ * Pass verdict:
+ * The IUT sends AUX_SYNC_IND PDUs with an Extended Header
+ * containing BIGInfo in the ACAD field. The IUT sends BIS Data
+ * PDUs over the broadcast Audio Stream.
+ */
+static void test_bsrc_scc_estab(void)
+{
+	define_test("BAP/BSRC/SCC/BV-35-C [Establishes Broadcast]",
+		NULL, test_bcast, &cfg_bsrc_8_1_1_estab, IOV_NULL);
+}
+
+static void bsrc_state_disable(struct bt_bap_stream *stream, uint8_t old_state,
+				uint8_t new_state, void *user_data)
+{
+	switch (new_state) {
+	case BT_BAP_STREAM_STATE_CONFIG:
+		if (old_state == BT_BAP_STREAM_STATE_IDLE)
+			bt_bap_stream_enable(stream, true, NULL, NULL, NULL);
+		else if (old_state == BT_BAP_STREAM_STATE_STREAMING)
+			tester_test_passed();
+		else
+			/* Other transitions to CONFIG state are invalid. */
+			tester_test_failed();
+		break;
+	case BT_BAP_STREAM_STATE_ENABLING:
+		bt_bap_stream_start(stream, NULL, NULL);
+		break;
+	case BT_BAP_STREAM_STATE_STREAMING:
+		bt_bap_stream_disable(stream, true, NULL, NULL);
+		break;
+	}
+}
+
+static struct test_config cfg_bsrc_8_1_1_disable = {
+	.cc = LC3_CONFIG_8_1,
+	.qos = LC3_QOS_8_1_1_B,
+	.src = true,
+	.state_func = bsrc_state_disable,
+	.streams = 1,
+};
+
+/* Test Purpose:
+ * Verify that a Broadcast Source IUT can disable a broadcast
+ * Audio Stream.
+ *
+ * Pass verdict:
+ * The IUT sends a BIG_TERMINATE_IND PDU in step 1.
+ */
+static void test_bsrc_scc_disable(void)
+{
+	define_test("BAP/BSRC/SCC/BV-36-C [Disables Broadcast]",
+		NULL, test_bcast, &cfg_bsrc_8_1_1_disable, IOV_NULL);
+}
+
+static void bsrc_state_release(struct bt_bap_stream *stream, uint8_t old_state,
+				uint8_t new_state, void *user_data)
+{
+	switch (new_state) {
+	case BT_BAP_STREAM_STATE_CONFIG:
+		if (old_state == BT_BAP_STREAM_STATE_IDLE)
+			bt_bap_stream_enable(stream, true, NULL, NULL, NULL);
+		else if (old_state == BT_BAP_STREAM_STATE_STREAMING)
+			bt_bap_stream_release(stream, NULL, NULL);
+		else
+			/* Other transitions to CONFIG state are invalid. */
+			tester_test_failed();
+		break;
+	case BT_BAP_STREAM_STATE_ENABLING:
+		bt_bap_stream_start(stream, NULL, NULL);
+		break;
+	case BT_BAP_STREAM_STATE_STREAMING:
+		bt_bap_stream_disable(stream, true, NULL, NULL);
+		break;
+	case BT_BAP_STREAM_STATE_IDLE:
+		tester_test_passed();
+		break;
+	}
+}
+
+static struct test_config cfg_bsrc_8_1_1_release = {
+	.cc = LC3_CONFIG_8_1,
+	.qos = LC3_QOS_8_1_1_B,
+	.src = true,
+	.state_func = bsrc_state_release,
+	.streams = 1,
+};
+
+/* Test Purpose:
+ * Verify that a Broadcast Source IUT can release a broadcast
+ * Audio Stream and transition from Configured state to Idle
+ * state.
+ *
+ * Pass verdict:
+ * The IUT stops transmitting periodic advertising.
+ */
+static void test_bsrc_scc_release(void)
+{
+	define_test("BAP/BSRC/SCC/BV-37-C [Releases Broadcast]",
+		NULL, test_bcast, &cfg_bsrc_8_1_1_release, IOV_NULL);
+}
+
+static void test_bsrc_scc(void)
+{
+	test_bsrc_scc_config();
+	test_bsrc_scc_estab();
+	test_bsrc_scc_disable();
+	test_bsrc_scc_release();
+}
+
+static struct test_config cfg_bsnk_8_1 = {
+	.cc = LC3_CONFIG_8_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_8_2 = {
+	.cc = LC3_CONFIG_8_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_16_1 = {
+	.cc = LC3_CONFIG_16_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_16_2 = {
+	.cc = LC3_CONFIG_16_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_24_1 = {
+	.cc = LC3_CONFIG_24_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_24_2 = {
+	.cc = LC3_CONFIG_24_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_32_1 = {
+	.cc = LC3_CONFIG_32_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_32_2 = {
+	.cc = LC3_CONFIG_32_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_44_1 = {
+	.cc = LC3_CONFIG_44_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_44_2 = {
+	.cc = LC3_CONFIG_44_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_48_1 = {
+	.cc = LC3_CONFIG_48_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_48_2 = {
+	.cc = LC3_CONFIG_48_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_48_3 = {
+	.cc = LC3_CONFIG_48_3,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_48_4 = {
+	.cc = LC3_CONFIG_48_4,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_48_5 = {
+	.cc = LC3_CONFIG_48_5,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_48_6 = {
+	.cc = LC3_CONFIG_48_6,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_vs = {
+	.cc = UTIL_IOV_INIT(VS_CC),
+	.qos = QOS_BCAST,
+	.snk = true,
+	.vs = true,
+	.state_func = bsnk_state,
+	.streams = 1,
+};
+
+static void test_bsnk_scc(void)
+{
+	define_test("BAP/BSNK/SCC/BV-01-C [Sync to PA, LC3 8_1_1]",
+		NULL, test_bcast, &cfg_bsnk_8_1, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-02-C [Sync to PA, LC3 8_2_1]",
+		NULL, test_bcast, &cfg_bsnk_8_2, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-03-C [Sync to PA, LC3 16_1_1]",
+		NULL, test_bcast, &cfg_bsnk_16_1, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-04-C [Sync to PA, LC3 16_2_1]",
+		NULL, test_bcast, &cfg_bsnk_16_2, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-05-C [Sync to PA, LC3 24_1_1]",
+		NULL, test_bcast, &cfg_bsnk_24_1, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-06-C [Sync to PA, LC3 24_2_1]",
+		NULL, test_bcast, &cfg_bsnk_24_2, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-07-C [Sync to PA, LC3 32_1_1]",
+		NULL, test_bcast, &cfg_bsnk_32_1, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-08-C [Sync to PA, LC3 32_2_1]",
+		NULL, test_bcast, &cfg_bsnk_32_2, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-09-C [Sync to PA, LC3 44.1_1_1]",
+		NULL, test_bcast, &cfg_bsnk_44_1, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-10-C [Sync to PA, LC3 44.1_2_1]",
+		NULL, test_bcast, &cfg_bsnk_44_2, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-11-C [Sync to PA, LC3 48_1_1]",
+		NULL, test_bcast, &cfg_bsnk_48_1, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-12-C [Sync to PA, LC3 48_2_1]",
+		NULL, test_bcast, &cfg_bsnk_48_2, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-13-C [Sync to PA, LC3 48_3_1]",
+		NULL, test_bcast, &cfg_bsnk_48_3, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-14-C [Sync to PA, LC3 48_4_1]",
+		NULL, test_bcast, &cfg_bsnk_48_4, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-15-C [Sync to PA, LC3 48_5_1]",
+		NULL, test_bcast, &cfg_bsnk_48_5, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-16-C [Sync to PA, LC3 48_6_1]",
+		NULL, test_bcast, &cfg_bsnk_48_6, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-17-C [Sync to PA, LC3 8_1_2]",
+		NULL, test_bcast, &cfg_bsnk_8_1, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-18-C [Sync to PA, LC3 8_2_2]",
+		NULL, test_bcast, &cfg_bsnk_8_2, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-19-C [Sync to PA, LC3 16_1_2]",
+		NULL, test_bcast, &cfg_bsnk_16_1, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-20-C [Sync to PA, LC3 16_2_2]",
+		NULL, test_bcast, &cfg_bsnk_16_2, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-21-C [Sync to PA, LC3 24_1_2]",
+		NULL, test_bcast, &cfg_bsnk_24_1, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-22-C [Sync to PA, LC3 24_2_2]",
+		NULL, test_bcast, &cfg_bsnk_24_2, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-23-C [Sync to PA, LC3 32_1_2]",
+		NULL, test_bcast, &cfg_bsnk_32_1, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-24-C [Sync to PA, LC3 32_2_2]",
+		NULL, test_bcast, &cfg_bsnk_32_2, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-25-C [Sync to PA, LC3 44.1_1_2]",
+		NULL, test_bcast, &cfg_bsnk_44_1, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-26-C [Sync to PA, LC3 44.1_2_2]",
+		NULL, test_bcast, &cfg_bsnk_44_2, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-27-C [Sync to PA, LC3 48_1_2]",
+		NULL, test_bcast, &cfg_bsnk_48_1, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-28-C [Sync to PA, LC3 48_2_2]",
+		NULL, test_bcast, &cfg_bsnk_48_2, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-29-C [Sync to PA, LC3 48_3_2]",
+		NULL, test_bcast, &cfg_bsnk_48_3, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-30-C [Sync to PA, LC3 48_4_2]",
+		NULL, test_bcast, &cfg_bsnk_48_4, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-31-C [Sync to PA, LC3 48_5_2]",
+		NULL, test_bcast, &cfg_bsnk_48_5, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-32-C [Sync to PA, LC3 48_6_2]",
+		NULL, test_bcast, &cfg_bsnk_48_6, IOV_NULL);
+
+	define_test("BAP/BSNK/SCC/BV-33-C [Sync to PA, VS]",
+		NULL, test_bcast, &cfg_bsnk_vs, IOV_NULL);
+}
+
+static void stream_count_streaming(void *data, void *user_data)
+{
+	struct bt_bap_stream *stream = data;
+	uint8_t *num = user_data;
+
+	if (bt_bap_stream_get_state(stream) == BT_BAP_STREAM_STATE_STREAMING)
+		(*num)++;
+}
+
+static void bsnk_state_str(struct bt_bap_stream *stream, uint8_t old_state,
+				uint8_t new_state, void *user_data)
+{
+	struct test_data *data = user_data;
+	struct iovec *cc;
+	uint8_t num = 0;
+
+	switch (new_state) {
+	case BT_BAP_STREAM_STATE_CONFIG:
+		if (old_state == BT_BAP_STREAM_STATE_IDLE) {
+			/* Check that stream has been configured as expected */
+			cc = bt_bap_stream_get_config(stream);
+
+			g_assert(cc);
+			g_assert(cc->iov_len == data->cfg->cc.iov_len);
+			g_assert(memcmp(cc->iov_base, data->cfg->cc.iov_base,
+					cc->iov_len) == 0);
+
+			/* Enable stream */
+			bt_bap_stream_enable(stream, true, NULL, NULL, NULL);
+		} else {
+			/* Other state transitions are invalid */
+			tester_test_failed();
+		}
+
+		break;
+	case BT_BAP_STREAM_STATE_ENABLING:
+		/* Start stream */
+		bt_bap_stream_start(stream, NULL, NULL);
+		break;
+	case BT_BAP_STREAM_STATE_STREAMING:
+		queue_foreach(data->streams, stream_count_streaming, &num);
+
+		if (num == data->cfg->streams)
+			/* Test is completed after all streams have transitioned
+			 * to STREAMING state.
+			 */
+			tester_test_passed();
+
+		break;
+	}
+}
+
+static struct test_config cfg_bsnk_str_8_1 = {
+	.cc = LC3_CONFIG_8_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_8_2 = {
+	.cc = LC3_CONFIG_8_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_16_1 = {
+	.cc = LC3_CONFIG_16_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_16_2 = {
+	.cc = LC3_CONFIG_16_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_24_1 = {
+	.cc = LC3_CONFIG_24_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_24_2 = {
+	.cc = LC3_CONFIG_24_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_32_1 = {
+	.cc = LC3_CONFIG_32_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_32_2 = {
+	.cc = LC3_CONFIG_32_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_44_1 = {
+	.cc = LC3_CONFIG_44_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_44_2 = {
+	.cc = LC3_CONFIG_44_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_48_1 = {
+	.cc = LC3_CONFIG_48_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_48_2 = {
+	.cc = LC3_CONFIG_48_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_48_3 = {
+	.cc = LC3_CONFIG_48_3,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_48_4 = {
+	.cc = LC3_CONFIG_48_4,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_48_5 = {
+	.cc = LC3_CONFIG_48_5,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_48_6 = {
+	.cc = LC3_CONFIG_48_6,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_vs = {
+	.cc = UTIL_IOV_INIT(VS_CC),
+	.qos = QOS_BCAST,
+	.snk = true,
+	.vs = true,
+	.state_func = bsnk_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsnk_str_8_1_mbis = {
+	.cc = LC3_CONFIG_8_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_8_2_mbis = {
+	.cc = LC3_CONFIG_8_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_16_1_mbis = {
+	.cc = LC3_CONFIG_16_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_16_2_mbis = {
+	.cc = LC3_CONFIG_16_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_24_1_mbis = {
+	.cc = LC3_CONFIG_24_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_24_2_mbis = {
+	.cc = LC3_CONFIG_24_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_32_1_mbis = {
+	.cc = LC3_CONFIG_32_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_32_2_mbis = {
+	.cc = LC3_CONFIG_32_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_44_1_mbis = {
+	.cc = LC3_CONFIG_44_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_44_2_mbis = {
+	.cc = LC3_CONFIG_44_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_48_1_mbis = {
+	.cc = LC3_CONFIG_48_1,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_48_2_mbis = {
+	.cc = LC3_CONFIG_48_2,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_48_3_mbis = {
+	.cc = LC3_CONFIG_48_3,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_48_4_mbis = {
+	.cc = LC3_CONFIG_48_4,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_48_5_mbis = {
+	.cc = LC3_CONFIG_48_5,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_48_6_mbis = {
+	.cc = LC3_CONFIG_48_6,
+	.qos = QOS_BCAST,
+	.snk = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsnk_str_vs_mbis = {
+	.cc = UTIL_IOV_INIT(VS_CC),
+	.qos = QOS_BCAST,
+	.snk = true,
+	.vs = true,
+	.state_func = bsnk_state_str,
+	.streams = 2,
+};
+
+static void test_bsnk_str(void)
+{
+	define_test("BAP/BSNK/STR/BV-01-C [BSNK, LC3 8_1]",
+		NULL, test_bcast, &cfg_bsnk_str_8_1, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-02-C [BSNK, LC3 8_2]",
+		NULL, test_bcast, &cfg_bsnk_str_8_2, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-03-C [BSNK, LC3 16_1]",
+		NULL, test_bcast, &cfg_bsnk_str_16_1, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-04-C [BSNK, LC3 16_2]",
+		NULL, test_bcast, &cfg_bsnk_str_16_2, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-05-C [BSNK, LC3 24_1]",
+		NULL, test_bcast, &cfg_bsnk_str_24_1, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-06-C [BSNK, LC3 24_2]",
+		NULL, test_bcast, &cfg_bsnk_str_24_2, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-07-C [BSNK, LC3 32_1]",
+		NULL, test_bcast, &cfg_bsnk_str_32_1, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-08-C [BSNK, LC3 32_2]",
+		NULL, test_bcast, &cfg_bsnk_str_32_2, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-09-C [BSNK, LC3 44.1_1]",
+		NULL, test_bcast, &cfg_bsnk_str_44_1, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-10-C [BSNK, LC3 44.1_2]",
+		NULL, test_bcast, &cfg_bsnk_str_44_2, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-11-C [BSNK, LC3 48_1]",
+		NULL, test_bcast, &cfg_bsnk_str_48_1, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-12-C [BSNK, LC3 48_2]",
+		NULL, test_bcast, &cfg_bsnk_str_48_2, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-13-C [BSNK, LC3 48_3]",
+		NULL, test_bcast, &cfg_bsnk_str_48_3, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-14-C [BSNK, LC3 48_4]",
+		NULL, test_bcast, &cfg_bsnk_str_48_4, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-15-C [BSNK, LC3 48_5]",
+		NULL, test_bcast, &cfg_bsnk_str_48_5, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-16-C [BSNK, LC3 48_6]",
+		NULL, test_bcast, &cfg_bsnk_str_48_6, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-17-C [BSNK, VS]",
+		NULL, test_bcast, &cfg_bsnk_str_vs, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-18-C [BSNK, Multiple BISes, LC3 8_1]",
+		NULL, test_bcast, &cfg_bsnk_str_8_1_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-19-C [BSNK, Multiple BISes, LC3 8_2]",
+		NULL, test_bcast, &cfg_bsnk_str_8_2_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-20-C [BSNK, Multiple BISes, LC3 16_1]",
+		NULL, test_bcast, &cfg_bsnk_str_16_1_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-21-C [BSNK, Multiple BISes, LC3 16_2]",
+		NULL, test_bcast, &cfg_bsnk_str_16_2_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-22-C [BSNK, Multiple BISes, LC3 24_1]",
+		NULL, test_bcast, &cfg_bsnk_str_24_1_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-23-C [BSNK, Multiple BISes, LC3 24_2]",
+		NULL, test_bcast, &cfg_bsnk_str_24_2_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-24-C [BSNK, Multiple BISes, LC3 32_1]",
+		NULL, test_bcast, &cfg_bsnk_str_32_1_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-25-C [BSNK, Multiple BISes, LC3 32_2]",
+		NULL, test_bcast, &cfg_bsnk_str_32_2_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-26-C [BSNK, Multiple BISes, LC3 44.1_1]",
+		NULL, test_bcast, &cfg_bsnk_str_44_1_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-27-C [BSNK, Multiple BISes, LC3 44.1_2]",
+		NULL, test_bcast, &cfg_bsnk_str_44_2_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-28-C [BSNK, Multiple BISes, LC3 48_1]",
+		NULL, test_bcast, &cfg_bsnk_str_48_1_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-29-C [BSNK, Multiple BISes, LC3 48_2]",
+		NULL, test_bcast, &cfg_bsnk_str_48_2_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-30-C [BSNK, Multiple BISes, LC3 48_3]",
+		NULL, test_bcast, &cfg_bsnk_str_48_3_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-31-C [BSNK, Multiple BISes, LC3 48_4]",
+		NULL, test_bcast, &cfg_bsnk_str_48_4_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-32-C [BSNK, Multiple BISes, LC3 48_5]",
+		NULL, test_bcast, &cfg_bsnk_str_48_5_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-33-C [BSNK, Multiple BISes, LC3 48_6]",
+		NULL, test_bcast, &cfg_bsnk_str_48_6_mbis, IOV_NULL);
+
+	define_test("BAP/BSNK/STR/BV-34-C [BSNK, Multiple BISes, VS]",
+		NULL, test_bcast, &cfg_bsnk_str_vs_mbis, IOV_NULL);
+}
+
+static void stream_count_config(void *data, void *user_data)
+{
+	struct bt_bap_stream *stream = data;
+	uint8_t *streams = user_data;
+
+	if (bt_bap_stream_get_state(stream) == BT_BAP_STREAM_STATE_CONFIG)
+		(*streams)++;
+}
+
+static void stream_count_enabling(void *data, void *user_data)
+{
+	struct bt_bap_stream *stream = data;
+	uint8_t *streams = user_data;
+
+	if (bt_bap_stream_get_state(stream) == BT_BAP_STREAM_STATE_ENABLING)
+		(*streams)++;
+}
+
+static void stream_enable(void *data, void *user_data)
+{
+	struct bt_bap_stream *stream = data;
+
+	bt_bap_stream_enable(stream, true, NULL, NULL, NULL);
+}
+
+static void stream_start(void *data, void *user_data)
+{
+	struct bt_bap_stream *stream = data;
+
+	bt_bap_stream_start(stream, NULL, NULL);
+}
+
+static void bsrc_state_str(struct bt_bap_stream *stream, uint8_t old_state,
+				uint8_t new_state, void *user_data)
+{
+	struct test_data *data = user_data;
+	uint8_t streams = 0;
+
+	switch (new_state) {
+	case BT_BAP_STREAM_STATE_CONFIG:
+		queue_foreach(data->streams, stream_count_config, &streams);
+
+		if (streams == data->cfg->streams)
+			/* After all streams have transitioned to CONFIG
+			 * state, enable each one.
+			 */
+			queue_foreach(data->streams, stream_enable, NULL);
+		break;
+	case BT_BAP_STREAM_STATE_ENABLING:
+		queue_foreach(data->streams, stream_count_enabling, &streams);
+
+		if (streams == 1) {
+			/* After the first stream has transitioned to ENABLING
+			 * state, bt_bap_stream_get_base will generate the
+			 * BASE from all previously configured streams.
+			 */
+			data->base = bt_bap_stream_get_base(stream);
+
+			g_assert(data->base);
+			g_assert(data->base->iov_len ==
+					data->cfg->base.iov_len);
+			g_assert(memcmp(data->base->iov_base,
+					data->cfg->base.iov_base,
+					data->base->iov_len) == 0);
+		}
+
+		if (streams == data->cfg->streams)
+			/* After all streams have transitioned to ENABLING
+			 * state, start each one.
+			 */
+			queue_foreach(data->streams, stream_start, NULL);
+		break;
+	case BT_BAP_STREAM_STATE_STREAMING:
+		queue_foreach(data->streams, stream_count_streaming, &streams);
+
+		if (streams == data->cfg->streams)
+			/* Test is completed after all streams have transitioned
+			 * to STREAMING state.
+			 */
+			tester_test_passed();
+		break;
+	}
+}
+
+static struct test_config cfg_bsrc_str_8_1 = {
+	.cc = LC3_CONFIG_8_1,
+	.qos = LC3_QOS_8_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_8_1),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_8_2 = {
+	.cc = LC3_CONFIG_8_2,
+	.qos = LC3_QOS_8_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_8_2),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_16_1 = {
+	.cc = LC3_CONFIG_16_1,
+	.qos = LC3_QOS_16_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_16_1),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_16_2 = {
+	.cc = LC3_CONFIG_16_2,
+	.qos = LC3_QOS_16_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_16_2),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_24_1 = {
+	.cc = LC3_CONFIG_24_1,
+	.qos = LC3_QOS_24_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_24_1),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_24_2 = {
+	.cc = LC3_CONFIG_24_2,
+	.qos = LC3_QOS_24_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_24_2),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_32_1 = {
+	.cc = LC3_CONFIG_32_1,
+	.qos = LC3_QOS_32_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_32_1),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_32_2 = {
+	.cc = LC3_CONFIG_32_2,
+	.qos = LC3_QOS_32_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_32_2),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_44_1 = {
+	.cc = LC3_CONFIG_44_1,
+	.qos = LC3_QOS_44_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_44_1),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_44_2 = {
+	.cc = LC3_CONFIG_44_2,
+	.qos = LC3_QOS_44_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_44_2),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_48_1 = {
+	.cc = LC3_CONFIG_48_1,
+	.qos = LC3_QOS_48_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_1),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_48_2 = {
+	.cc = LC3_CONFIG_48_2,
+	.qos = LC3_QOS_48_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_2),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_48_3 = {
+	.cc = LC3_CONFIG_48_3,
+	.qos = LC3_QOS_48_3_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_3),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_48_4 = {
+	.cc = LC3_CONFIG_48_4,
+	.qos = LC3_QOS_48_4_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_4),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_48_5 = {
+	.cc = LC3_CONFIG_48_5,
+	.qos = LC3_QOS_48_5_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_5),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_48_6 = {
+	.cc = LC3_CONFIG_48_6,
+	.qos = LC3_QOS_48_6_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_6),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+};
+
+static struct test_config cfg_bsrc_str_vs = {
+	.cc = UTIL_IOV_INIT(VS_CC),
+	.qos = QOS_BCAST,
+	.base = UTIL_IOV_INIT(BASE_VS(VS_CFG)),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 1,
+	.vs = true,
+};
+
+/* Test Purpose:
+ * Verify that a Broadcast Source IUT can stream one BIS to a
+ * Broadcast Sink. The verification is performed for each Config
+ * Settings in turn.
+ *
+ * Pass verdict:
+ * If the Codec ID is LC3, the IUT sends encoded LC3 audio data
+ * in BIS Data PDUs on the broadcast Audio Stream. The audio data
+ * is formatted using the LC3 Media Packet format.
+ *
+ * If the Codec ID is a vendor-specific Codec ID, the IUT sends BIS
+ * Data PDUs on the broadcast Audio Stream. The parameters included
+ * in the Codec_Specific_Configuration data are as defined in
+ * TSPX_VS_Codec_Specific_Configuration.
+ *
+ * If the Codec ID is LC3, each parameter included in
+ * Codec_Specific_Configuration data is formatted in an LTV structure
+ * with the length, type, and value specified in Table 4.79.
+ */
+
+static void test_bsrc_str_1b(void)
+{
+	define_test("BAP/BSRC/STR/BV-01-C [BSRC, LC3 8_1]",
+		NULL, test_bcast, &cfg_bsrc_str_8_1, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-02-C [BSRC, LC3 8_2]",
+		NULL, test_bcast, &cfg_bsrc_str_8_2, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-03-C [BSRC, LC3 16_1]",
+		NULL, test_bcast, &cfg_bsrc_str_16_1, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-04-C [BSRC, LC3 16_2]",
+		NULL, test_bcast, &cfg_bsrc_str_16_2, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-05-C [BSRC, LC3 24_1]",
+		NULL, test_bcast, &cfg_bsrc_str_24_1, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-06-C [BSRC, LC3 24_2]",
+		NULL, test_bcast, &cfg_bsrc_str_24_2, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-07-C [BSRC, LC3 32_1]",
+		NULL, test_bcast, &cfg_bsrc_str_32_1, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-08-C [BSRC, LC3 32_2]",
+		NULL, test_bcast, &cfg_bsrc_str_32_2, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-09-C [BSRC, LC3 44.1_1]",
+		NULL, test_bcast, &cfg_bsrc_str_44_1, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-10-C [BSRC, LC3 44.1_2]",
+		NULL, test_bcast, &cfg_bsrc_str_44_2, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-11-C [BSRC, LC3 48_1]",
+		NULL, test_bcast, &cfg_bsrc_str_48_1, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-12-C [BSRC, LC3 48_2]",
+		NULL, test_bcast, &cfg_bsrc_str_48_2, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-13-C [BSRC, LC3 48_3]",
+		NULL, test_bcast, &cfg_bsrc_str_48_3, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-14-C [BSRC, LC3 48_4]",
+		NULL, test_bcast, &cfg_bsrc_str_48_4, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-15-C [BSRC, LC3 48_5]",
+		NULL, test_bcast, &cfg_bsrc_str_48_5, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-16-C [BSRC, LC3 48_6]",
+		NULL, test_bcast, &cfg_bsrc_str_48_6, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-17-C [BSRC, VS]",
+		NULL, test_bcast, &cfg_bsrc_str_vs, IOV_NULL);
+}
+
+static struct test_config cfg_bsrc_str_8_1_mbis = {
+	.cc = LC3_CONFIG_8_1,
+	.qos = LC3_QOS_8_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_8_1_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_8_2_mbis = {
+	.cc = LC3_CONFIG_8_2,
+	.qos = LC3_QOS_8_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_8_2_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_16_1_mbis = {
+	.cc = LC3_CONFIG_16_1,
+	.qos = LC3_QOS_16_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_16_1_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_16_2_mbis = {
+	.cc = LC3_CONFIG_16_2,
+	.qos = LC3_QOS_16_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_16_2_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_24_1_mbis = {
+	.cc = LC3_CONFIG_24_1,
+	.qos = LC3_QOS_24_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_24_1_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_24_2_mbis = {
+	.cc = LC3_CONFIG_24_2,
+	.qos = LC3_QOS_24_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_24_2_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_32_1_mbis = {
+	.cc = LC3_CONFIG_32_1,
+	.qos = LC3_QOS_32_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_32_1_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_32_2_mbis = {
+	.cc = LC3_CONFIG_32_2,
+	.qos = LC3_QOS_32_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_32_2_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_44_1_mbis = {
+	.cc = LC3_CONFIG_44_1,
+	.qos = LC3_QOS_44_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_44_1_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_44_2_mbis = {
+	.cc = LC3_CONFIG_44_2,
+	.qos = LC3_QOS_44_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_44_2_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_48_1_mbis = {
+	.cc = LC3_CONFIG_48_1,
+	.qos = LC3_QOS_48_1_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_1_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_48_2_mbis = {
+	.cc = LC3_CONFIG_48_2,
+	.qos = LC3_QOS_48_2_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_2_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_48_3_mbis = {
+	.cc = LC3_CONFIG_48_3,
+	.qos = LC3_QOS_48_3_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_3_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_48_4_mbis = {
+	.cc = LC3_CONFIG_48_4,
+	.qos = LC3_QOS_48_4_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_4_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_48_5_mbis = {
+	.cc = LC3_CONFIG_48_5,
+	.qos = LC3_QOS_48_5_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_5_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_48_6_mbis = {
+	.cc = LC3_CONFIG_48_6,
+	.qos = LC3_QOS_48_6_1_B,
+	.base = UTIL_IOV_INIT(BASE_LC3_48_6_MBIS),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.streams = 2,
+};
+
+static struct test_config cfg_bsrc_str_vs_mbis = {
+	.cc = UTIL_IOV_INIT(VS_CC),
+	.qos = QOS_BCAST,
+	.base = UTIL_IOV_INIT(BASE_VS_MBIS(VS_CFG)),
+	.src = true,
+	.state_func = bsrc_state_str,
+	.vs = true,
+	.streams = 2,
+};
+
+/* Test Purpose:
+ * Verify that a Broadcast Source IUT can stream multiple BISes to
+ * a Broadcast Sink. The verification is performed for each set of
+ * parameters in turn, as specified in Table 4.82.
+ *
+ * Pass verdict:
+ * If the Codec ID is LC3, the IUT sends encoded LC3 audio data in
+ * BIS Data PDUs on each synchronized BIS.
+ *
+ * If the Codec ID is a vendor-specific Codec ID, the IUT sends BIS
+ * Data PDUs on each synchronized BIS. The parameters included in the
+ * Codec_Specific_Configuration data are as defined in
+ * TSPX_VS_Codec_Specific_Configuration.
+ *
+ * If the Codec ID is LC3, each parameter included in
+ * Codec_Specific_Configuration data is formatted in an LTV structure
+ * with the length, type, and value specified in Table 4.83.
+ */
+static void test_bsrc_str_2b(void)
+{
+	define_test("BAP/BSRC/STR/BV-18-C [BSRC, Multiple BISes, LC3 8_1]",
+		NULL, test_bcast, &cfg_bsrc_str_8_1_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-19-C [BSRC, Multiple BISes, LC3 8_2]",
+		NULL, test_bcast, &cfg_bsrc_str_8_2_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-20-C [BSRC, Multiple BISes, LC3 16_1]",
+		NULL, test_bcast, &cfg_bsrc_str_16_1_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-21-C [BSRC, Multiple BISes, LC3 16_2]",
+		NULL, test_bcast, &cfg_bsrc_str_16_2_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-22-C [BSRC, Multiple BISes, LC3 24_1]",
+		NULL, test_bcast, &cfg_bsrc_str_24_1_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-23-C [BSRC, Multiple BISes, LC3 24_2]",
+		NULL, test_bcast, &cfg_bsrc_str_24_2_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-24-C [BSRC, Multiple BISes, LC3 32_1]",
+		NULL, test_bcast, &cfg_bsrc_str_32_1_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-25-C [BSRC, Multiple BISes, LC3 32_2]",
+		NULL, test_bcast, &cfg_bsrc_str_32_2_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-26-C [BSRC, Multiple BISes, LC3 44.1_1]",
+		NULL, test_bcast, &cfg_bsrc_str_44_1_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-27-C [BSRC, Multiple BISes, LC3 44.1_2]",
+		NULL, test_bcast, &cfg_bsrc_str_44_2_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-28-C [BSRC, Multiple BISes, LC3 48_1]",
+		NULL, test_bcast, &cfg_bsrc_str_48_1_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-29-C [BSRC, Multiple BISes, LC3 48_2]",
+		NULL, test_bcast, &cfg_bsrc_str_48_2_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-30-C [BSRC, Multiple BISes, LC3 48_3]",
+		NULL, test_bcast, &cfg_bsrc_str_48_3_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-31-C [BSRC, Multiple BISes, LC3 48_4]",
+		NULL, test_bcast, &cfg_bsrc_str_48_4_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-32-C [BSRC, Multiple BISes, LC3 48_5]",
+		NULL, test_bcast, &cfg_bsrc_str_48_5_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-33-C [BSRC, Multiple BISes, LC3 48_6]",
+		NULL, test_bcast, &cfg_bsrc_str_48_6_mbis, IOV_NULL);
+
+	define_test("BAP/BSRC/STR/BV-34-C [BSRC, Multiple BISes, VS]",
+		NULL, test_bcast, &cfg_bsrc_str_vs_mbis, IOV_NULL);
+}
+
+static void test_bsrc_str(void)
+{
+	test_bsrc_str_1b();
+	test_bsrc_str_2b();
 }
 
 int main(int argc, char *argv[])
@@ -5972,6 +7372,9 @@ int main(int argc, char *argv[])
 	test_disc();
 	test_scc();
 	test_bsrc_scc();
+	test_bsnk_scc();
+	test_bsnk_str();
+	test_bsrc_str();
 
 	return tester_run();
 }

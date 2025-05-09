@@ -1276,7 +1276,9 @@ next:
 
 	range = queue_peek_head(op->discov_ranges);
 
-	client->discovery_req = bt_gatt_discover_included_services(client->att,
+	if (range)
+		client->discovery_req = bt_gatt_discover_included_services(
+							client->att,
 							range->start,
 							range->end,
 							discover_incl_cb,
@@ -2041,7 +2043,7 @@ static void write_client_features(struct bt_gatt_client *client)
 
 	handle = gatt_db_attribute_get_handle(attr);
 
-	client->features = BT_GATT_CHRC_CLI_FEAT_ROBUST_CACHING;
+	client->features |= BT_GATT_CHRC_CLI_FEAT_ROBUST_CACHING;
 
 	bt_uuid16_create(&uuid, GATT_CHARAC_SERVER_FEAT);
 
@@ -2053,9 +2055,11 @@ static void write_client_features(struct bt_gatt_client *client)
 		gatt_db_attribute_read(attr, 0, BT_ATT_OP_READ_REQ,
 						NULL, server_feat_read_value,
 						&feat);
-		if (feat && feat[0] & BT_GATT_CHRC_SERVER_FEAT_EATT)
-			client->features |= BT_GATT_CHRC_CLI_FEAT_EATT;
+		if (!(feat && feat[0] & BT_GATT_CHRC_SERVER_FEAT_EATT)
+			|| !(client->features & BT_GATT_CHRC_CLI_FEAT_EATT))
+			client->features &= ~BT_GATT_CHRC_CLI_FEAT_EATT;
 	}
+
 
 	client->features |= BT_GATT_CHRC_CLI_FEAT_NFY_MULTI;
 
@@ -2228,7 +2232,7 @@ static void notify_handler(void *data, void *user_data)
 				value_data->len, notify_data->user_data);
 }
 
-static void notify_cb(struct bt_att_chan *chan, uint8_t opcode,
+static void notify_cb(struct bt_att_chan *chan, uint16_t mtu, uint8_t opcode,
 					const void *pdu, uint16_t length,
 					void *user_data)
 {

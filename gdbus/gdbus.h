@@ -4,6 +4,7 @@
  *  D-Bus helper library
  *
  *  Copyright (C) 2004-2011  Marcel Holtmann <marcel@holtmann.org>
+ *  Copyright 2024 NXP
  *
  *
  */
@@ -234,6 +235,12 @@ struct GDBusSecurityTable {
 void g_dbus_set_flags(int flags);
 int g_dbus_get_flags(void);
 
+typedef void (*g_dbus_destroy_func_t)(void *user_data);
+typedef void (*g_dbus_debug_func_t)(const char *str, void *user_data);
+
+void g_dbus_set_debug(g_dbus_debug_func_t cb, void *user_data,
+				g_dbus_destroy_func_t destroy);
+
 gboolean g_dbus_register_interface(DBusConnection *connection,
 					const char *path, const char *name,
 					const GDBusMethodTable *methods,
@@ -317,6 +324,7 @@ guint g_dbus_add_properties_watch(DBusConnection *connection,
 gboolean g_dbus_remove_watch(DBusConnection *connection, guint tag);
 void g_dbus_remove_all_watches(DBusConnection *connection);
 
+const char *g_dbus_pending_property_get_sender(GDBusPendingPropertySet id);
 void g_dbus_pending_property_success(GDBusPendingPropertySet id);
 void g_dbus_pending_property_error_valist(GDBusPendingReply id,
 			const char *name, const char *format, va_list args);
@@ -371,6 +379,11 @@ gboolean g_dbus_proxy_set_property_basic(GDBusProxy *proxy,
 				const char *name, int type, const void *value,
 				GDBusResultFunction function, void *user_data,
 				GDBusDestroyFunction destroy);
+
+gboolean g_dbus_proxy_set_property_dict(GDBusProxy *proxy,
+				const char *name, GDBusResultFunction function,
+				void *user_data, GDBusDestroyFunction destroy,
+				char *entry, ...);
 
 gboolean g_dbus_proxy_set_property_array(GDBusProxy *proxy,
 				const char *name, int type, const void *value,

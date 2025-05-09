@@ -91,6 +91,7 @@ char *strdelimit(char *str, char *del, char c);
 int strsuffix(const char *str, const char *suffix);
 char *strstrip(char *str);
 bool strisutf8(const char *str, size_t length);
+bool argsisutf8(int argc, char *argv[]);
 
 void *util_malloc(size_t size);
 void *util_memdup(const void *src, size_t size);
@@ -176,6 +177,7 @@ void *util_iov_push_le16(struct iovec *iov, uint16_t val);
 void *util_iov_push_be16(struct iovec *iov, uint16_t val);
 void *util_iov_push_u8(struct iovec *iov, uint8_t val);
 void *util_iov_append(struct iovec *iov, const void *data, size_t len);
+struct iovec *util_iov_new(void *data, size_t len);
 void *util_iov_pull(struct iovec *iov, size_t len);
 void *util_iov_pull_mem(struct iovec *iov, size_t len);
 void *util_iov_pull_le64(struct iovec *iov, uint64_t *val);

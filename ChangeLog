@@ -1,3 +1,52 @@
+ver 5.82:
+	Fix issue with handling BAP state transitions.
+	Fix issue with handling D-Bus interface removal.
+
+ver 5.81:
+	Fix issue with handling MAP and supported features.
+	Fix issue with handling SDP record for Phonebook Access Client.
+	Fix issue with handling AVRCP PDU parameters length mismatch.
+	Fix issue with handling AVRCP PDU for SetAbsoluteVolume.
+	Fix issue with handling AVDTP bad media transport format.
+	Fix issue with handling support for LL Privacy setting.
+
+ver 5.80:
+	Fix issue with handling address type for all types of keys.
+	Fix issue with handling maximum number of GATT channels.
+	Fix issue with handling MTU auto-tuning feature.
+	Fix issue with handling AVRCP volume in reconfigured transports.
+	Fix issue with handling VCP volume setting requests.
+	Fix issue with handling VCP connection management.
+	Fix issue with handling MAP qualification.
+	Fix issue with handling PBAP qualification.
+	Fix issue with handling BNEP qualification.
+	Add support for PreferredBearer device property.
+	Add support for SupportedTypes Message Access property.
+	Add support for HFP, A2DP, AVRCP, AVCTP and MAP latest versions.
+
+ver 5.79:
+	Fix issue with handling address type while pairing.
+	Add support for allowing to set A2DP transport delay.
+	Add support for persistent userspace HID operation.
+	Add support for handling syncing to multiple BISes.
+
+ver 5.78:
+	Fix issue with handling notification of scanned BISes to BASS
+	Fix issue with handling checking BIS caps against peer caps.
+	Fix issue with handling MGMT Set Device Flags overwrites.
+	Fix issue with handling ASE notification order.
+	Fix issue with handling BIG Info report events.
+	Fix issue with handling PACS Server role.
+	Fix issue with registering UHID_START multiple times.
+	Fix issue with pairing method not setting auto-connect.
+
+ver 5.77:
+	Fix issue with storing and handling connection parameters.
+	Fix issue with handling device that are marked as temporary.
+	Fix issue with HID and special handling for non-keyboards.
+	Fix issue with BR/EDR not support when discoverable is off.
+	Add support for initial implementation of ASHA profile.
+
 ver 5.76:
 	Fix issue with broadcast channel location and stream capabilities.
 	Fix issue with handling BIS management and synchronization.

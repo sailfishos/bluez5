@@ -22,6 +22,7 @@
 #include <string.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <limits.h>
 #include <sys/signalfd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -108,6 +109,7 @@ static const char *br_options[] = {
 };
 
 static const char *le_options[] = {
+	"CentralAddressResolution",
 	"MinAdvertisementInterval",
 	"MaxAdvertisementInterval",
 	"MultiAdvertisementRotationInterval",
@@ -147,6 +149,7 @@ static const char *gatt_options[] = {
 	"ExchangeMTU",
 	"Channels",
 	"Client",
+	"ExportClaimedServices",
 	NULL
 };
 
@@ -161,6 +164,12 @@ static const char *csip_options[] = {
 static const char *avdtp_options[] = {
 	"SessionMode",
 	"StreamMode",
+	NULL
+};
+
+static const char *avrcp_options[] = {
+	"VolumeWithoutTarget",
+	"VolumeCategory",
 	NULL
 };
 
@@ -180,6 +189,7 @@ static const struct group_table {
 	{ "GATT",	gatt_options },
 	{ "CSIS",	csip_options },
 	{ "AVDTP",	avdtp_options },
+	{ "AVRCP",	avrcp_options },
 	{ "AdvMon",	advmon_options },
 	{ }
 };
@@ -573,6 +583,11 @@ static void parse_br_config(GKeyFile *config)
 static void parse_le_config(GKeyFile *config)
 {
 	static const struct config_param params[] = {
+		{ "CentralAddressResolution",
+		  &btd_opts.defaults.le.addr_resolution,
+		  sizeof(btd_opts.defaults.le.addr_resolution),
+		  0,
+		  1},
 		{ "MinAdvertisementInterval",
 		  &btd_opts.defaults.le.min_adv_interval,
 		  sizeof(btd_opts.defaults.le.min_adv_interval),
@@ -700,9 +715,12 @@ static bool match_experimental(const void *data, const void *match_data)
 bool btd_kernel_experimental_enabled(const char *uuid)
 {
 	if (!btd_opts.kernel)
-		false;
+		return false;
 
-	return queue_find(btd_opts.kernel, match_experimental, uuid);
+	if (queue_find(btd_opts.kernel, match_experimental, uuid))
+		return true;
+
+	return false;
 }
 
 static const char *valid_uuids[] = {
@@ -712,7 +730,6 @@ static const char *valid_uuids[] = {
 	"330859bc-7506-492d-9370-9a6f0614037f",
 	"a6695ace-ee7f-4fb9-881a-5fac66c629af",
 	"6fbaf188-05e0-496a-9885-d6ddfdb4e03e",
-	"69518c4c-b69f-4679-8bc1-c021b47b5733",
 	"*"
 };
 
@@ -1059,6 +1076,33 @@ static void parse_gatt_cache(GKeyFile *config)
 	g_free(str);
 }
 
+static enum bt_gatt_export_t parse_gatt_export_str(const char *str)
+{
+	if (!strcmp(str, "no") || !strcmp(str, "false") ||
+				!strcmp(str, "off")) {
+		return BT_GATT_EXPORT_OFF;
+	} else if (!strcmp(str, "read-only")) {
+		return BT_GATT_EXPORT_READ_ONLY;
+	} else if (!strcmp(str, "read-write")) {
+		return BT_GATT_EXPORT_READ_WRITE;
+	}
+
+	DBG("Invalid value for ExportClaimedServices=%s", str);
+	return BT_GATT_EXPORT_READ_ONLY;
+}
+
+static void parse_gatt_export(GKeyFile *config)
+{
+	char *str = NULL;
+
+	parse_config_string(config, "GATT", "ExportClaimedServices", &str);
+	if (!str)
+		return;
+
+	btd_opts.gatt_export = parse_gatt_export_str(str);
+	g_free(str);
+}
+
 static void parse_gatt(GKeyFile *config)
 {
 	parse_gatt_cache(config);
@@ -1066,8 +1110,9 @@ static void parse_gatt(GKeyFile *config)
 	parse_config_u16(config, "GATT", "ExchangeMTU", &btd_opts.gatt_mtu,
 				BT_ATT_DEFAULT_LE_MTU, BT_ATT_MAX_LE_MTU);
 	parse_config_u8(config, "GATT", "Channels", &btd_opts.gatt_channels,
-				1, 5);
+				1, 6);
 	parse_config_bool(config, "GATT", "Client", &btd_opts.gatt_client);
+	parse_gatt_export(config);
 }
 
 static void parse_csis_sirk(GKeyFile *config)
@@ -1140,6 +1185,16 @@ static void parse_avdtp(GKeyFile *config)
 	parse_avdtp_stream_mode(config);
 }
 
+static void parse_avrcp(GKeyFile *config)
+{
+	parse_config_bool(config, "AVRCP",
+		"VolumeWithoutTarget",
+		&btd_opts.avrcp.volume_without_target);
+	parse_config_bool(config, "AVRCP",
+		"VolumeCategory",
+		&btd_opts.avrcp.volume_category);
+}
+
 static void parse_advmon(GKeyFile *config)
 {
 	parse_config_u8(config, "AdvMon", "RSSISamplingPeriod",
@@ -1163,6 +1218,7 @@ static void parse_config(GKeyFile *config)
 	parse_gatt(config);
 	parse_csis(config);
 	parse_avdtp(config);
+	parse_avrcp(config);
 	parse_advmon(config);
 }
 
@@ -1187,6 +1243,7 @@ static void init_defaults(void)
 	btd_opts.defaults.num_entries = 0;
 	btd_opts.defaults.br.page_scan_type = 0xFFFF;
 	btd_opts.defaults.br.scan_type = 0xFFFF;
+	btd_opts.defaults.le.addr_resolution = 0x01;
 	btd_opts.defaults.le.enable_advmon_interleave_scan = 0xFF;
 
 	if (sscanf(VERSION, "%hhu.%hhu", &major, &minor) != 2)
@@ -1201,9 +1258,13 @@ static void init_defaults(void)
 	btd_opts.gatt_mtu = BT_ATT_MAX_LE_MTU;
 	btd_opts.gatt_channels = 1;
 	btd_opts.gatt_client = true;
+	btd_opts.gatt_export = BT_GATT_EXPORT_READ_ONLY;
 
 	btd_opts.avdtp.session_mode = BT_IO_MODE_BASIC;
 	btd_opts.avdtp.stream_mode = BT_IO_MODE_BASIC;
+
+	btd_opts.avrcp.volume_without_target = false;
+	btd_opts.avrcp.volume_category = true;
 
 	btd_opts.advmon.rssi_sampling_period = 0xFF;
 	btd_opts.csis.encrypt = true;
@@ -1301,6 +1362,11 @@ static void disconnected_dbus(DBusConnection *conn, void *data)
 	mainloop_quit();
 }
 
+static void dbus_debug(const char *str, void *data)
+{
+	DBG_IDX(0xffff, "%s", str);
+}
+
 static int connect_dbus(void)
 {
 	DBusConnection *conn;
@@ -1322,6 +1388,7 @@ static int connect_dbus(void)
 
 	g_dbus_set_disconnect_function(conn, disconnected_dbus, NULL, NULL);
 	g_dbus_attach_object_manager(conn);
+	g_dbus_set_debug(dbus_debug, NULL, NULL);
 
 	return 0;
 }

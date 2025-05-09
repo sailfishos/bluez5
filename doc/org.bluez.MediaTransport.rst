@@ -7,7 +7,7 @@ BlueZ D-Bus MediaTransport API documentation
 --------------------------------------------
 
 :Version: BlueZ
-:Date: September 2023
+:Date: July 2024
 :Manual section: 5
 :Manual group: Linux System Administration
 
@@ -51,6 +51,33 @@ void Release()
 
 	Releases file descriptor.
 
+void Select()
+`````````````
+
+	Applicable only for transports created by a broadcast sink. This moves
+	the transport from 'idle' to 'broadcasting'. This allows the user to
+	select which BISes he wishes to sync to via a 2 step process:
+	1) the user calls the method, changing the transport's state to broadcasting
+	2) the audio server detects that the transport is in the 'broadcasting'
+	state and automatically acquires it
+
+	Possible Errors:
+
+	:org.bluez.Error.NotAuthorized:
+
+void Unselect()
+```````````````
+
+	Applicable only for transports created by a broadcast sink. This moves
+	the transport from 'broadcasting' or 'active' to 'idle'. This allows the
+	user to terminate the sync to a BIS to via a 2 step process:
+	1) the user calls this method, changing the transport's state to idle
+	2) the audio server detects this event and releases the transport
+
+	Possible Errors:
+
+	:org.bluez.Error.NotAuthorized:
+
 Properties
 ----------
 
@@ -84,13 +111,16 @@ string State [readonly]
 
 	:"idle": not streaming
 	:"pending": streaming but not acquired
+	:"broadcasting": streaming but not acquired, applicable only for transports
+		created by a broadcast sink
 	:"active": streaming and acquired
 
 uint16 Delay [readwrite, optional]
 ``````````````````````````````````
 
 	Transport delay in 1/10 of millisecond, this property is only writeable
-	when the transport was acquired by the sender.
+	when the transport corresponds to a sink endpoint and it was acquired by
+	the sender.
 
 uint16 Volume [readwrite, optional]
 ```````````````````````````````````
@@ -98,7 +128,8 @@ uint16 Volume [readwrite, optional]
 	Indicates volume level of the transport, this property is only writeable
 	when the transport was acquired by the sender.
 
-	Possible Values: 0-127
+	Possible Values: 0-127 (A2DP)
+			 0-255 (BAP)
 
 object Endpoint [readonly, optional, experimental]
 ``````````````````````````````````````````````````
@@ -115,13 +146,28 @@ array{byte} Metadata [readwrite, ISO Only, experimental]
 
 	Indicates transport Metadata.
 
-array{object} Links [readonly, optional, ISO only, experimental]
+array{object} Links [readonly, optional, CIS only, experimental]
 ````````````````````````````````````````````````````````````````
 
 	Linked transport objects which the transport is associated with.
 
-dict QoS [readonly, optional, ISO only, experimental]
-`````````````````````````````````````````````````````
+array{object} Links [readwrite, BIS only, experimental]
+```````````````````````````````````````````````````````
+
+	For a Broadcast Sink, the BIG sync procedure requires all
+	desired streams to be enumerated from the start and it cannot
+	be later reconfigured by adding or removing BISes. To avoid
+	terminating and recreating the BIG sync everytime a new
+	transport is selected for acquire, all transports selected via
+	Transport.Select need to be linked together. When the first
+	transport is acquired via Transport.Acquire, all links are
+	included in the BIG sync command. An acquired transport will
+	create and set fds for all its links. Then, each link needs
+	to be acquired separately, to get the fd and start receiving
+	audio.
+
+dict QoS [readwrite, optional, ISO only, experimental]
+``````````````````````````````````````````````````````
 
 	Only present when QoS is configured.
 
@@ -212,6 +258,14 @@ dict QoS [readonly, optional, ISO only, experimental]
 	:byte Framing:
 
 		Indicates configured framing.
+
+	:array{byte} BCode:
+
+		Indicates the string used for encryption/decryption.
+
+	:byte encryption:
+
+		Indicates if the stream is encrypted.
 
 	:byte Options:
 

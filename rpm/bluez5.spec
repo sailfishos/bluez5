@@ -1,7 +1,7 @@
 Name:       bluez5
 
 Summary:    Bluetooth daemon
-Version:    5.65
+Version:    5.82
 Release:    1
 License:    GPLv2+
 URL:        http://www.bluez.org/
@@ -11,7 +11,6 @@ Source2:    obexd.conf
 Source3:    bluez.tracing
 Source4:    obexd.tracing
 Source5:    mpris-proxy.service
-Requires:   %{name}-libs = %{version}-%{release}
 Requires:   dbus >= 0.60
 Requires:   bluez5-configs
 Requires:   systemd
@@ -77,9 +76,8 @@ Conflicts:  bluez-libs-devel
 %package test
 Summary:    Test utilities for Bluetooth (bluez5)
 Requires:   %{name} = %{version}-%{release}
-Requires:   %{name}-libs = %{version}
-Requires:   dbus-python
-Requires:   pygobject2 >= 3.10.2
+Requires:   dbus-python3
+Requires:   python3-gobject
 Conflicts:  bluez-test
 %description test
 %{summary}.
@@ -297,6 +295,7 @@ systemctl-user daemon-reload ||:
 %attr(2755,root,privileged) %{_libexecdir}/bluetooth/obexd
 %{_libexecdir}/obexd-wrapper
 %{_datadir}/dbus-1/services/org.bluez.obex.service
+%{_datadir}/dbus-1/system.d/obex.conf
 %{_userunitdir}/obex.service
 %{_userunitdir}/dbus-org.bluez.obex.service
 

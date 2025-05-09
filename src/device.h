@@ -5,7 +5,7 @@
  *
  *  Copyright (C) 2006-2010  Nokia Corporation
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
- *
+ *  Copyright 2024 NXP
  *
  */
 
@@ -28,6 +28,7 @@ bool device_name_known(struct btd_device *device);
 bool device_is_name_resolve_allowed(struct btd_device *device);
 void device_name_resolve_fail(struct btd_device *device);
 void device_set_class(struct btd_device *device, uint32_t class);
+bool device_address_is_private(struct btd_device *dev);
 void device_set_rpa(struct btd_device *device, bool value);
 void device_update_addr(struct btd_device *device, const bdaddr_t *bdaddr,
 							uint8_t bdaddr_type);
@@ -41,6 +42,7 @@ uint16_t btd_device_get_vendor(struct btd_device *device);
 uint16_t btd_device_get_vendor_src(struct btd_device *device);
 uint16_t btd_device_get_product(struct btd_device *device);
 uint16_t btd_device_get_version(struct btd_device *device);
+const char *btd_device_get_icon(struct btd_device *device);
 void device_remove_bonding(struct btd_device *device, uint8_t bdaddr_type);
 void device_remove(struct btd_device *device, gboolean remove_stored);
 int device_address_cmp(gconstpointer a, gconstpointer b);
@@ -65,6 +67,7 @@ struct gatt_primary *btd_device_get_primary(struct btd_device *device,
 							const char *uuid);
 GSList *btd_device_get_primaries(struct btd_device *device);
 struct gatt_db *btd_device_get_gatt_db(struct btd_device *device);
+bool btd_device_set_gatt_db(struct btd_device *device, struct gatt_db *db);
 struct bt_gatt_client *btd_device_get_gatt_client(struct btd_device *device);
 struct bt_gatt_server *btd_device_get_gatt_server(struct btd_device *device);
 bool btd_device_is_initiator(struct btd_device *device);
@@ -193,8 +196,11 @@ struct btd_service *btd_device_get_service(struct btd_device *dev,
 int device_discover_services(struct btd_device *device);
 int btd_device_connect_services(struct btd_device *dev, GSList *services);
 
+bool btd_device_flags_enabled(struct btd_device *dev, uint32_t flags);
 uint32_t btd_device_get_current_flags(struct btd_device *dev);
 uint32_t btd_device_get_supported_flags(struct btd_device *dev);
+uint32_t btd_device_get_pending_flags(struct btd_device *dev);
+void btd_device_set_pending_flags(struct btd_device *dev, uint32_t flags);
 void btd_device_flags_changed(struct btd_device *dev, uint32_t supported_flags,
 			      uint32_t current_flags);
 
@@ -213,3 +219,6 @@ void btd_device_foreach_ad(struct btd_device *dev, bt_device_ad_func_t func,
 void btd_device_set_conn_param(struct btd_device *device, uint16_t min_interval,
 					uint16_t max_interval, uint16_t latency,
 					uint16_t timeout);
+void btd_device_foreach_service_data(struct btd_device *dev,
+					bt_device_ad_func_t func,
+					void *data);

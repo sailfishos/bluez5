@@ -42,9 +42,12 @@ struct bt_uhid {
 	int ref_count;
 	struct io *io;
 	unsigned int notify_id;
+	bool notifying;
 	struct queue *notify_list;
 	struct queue *input;
+	uint8_t type;
 	bool created;
+	unsigned int start_id;
 	bool started;
 	struct uhid_replay *replay;
 };
@@ -54,6 +57,7 @@ struct uhid_notify {
 	uint32_t event;
 	bt_uhid_callback_t func;
 	void *user_data;
+	bool removed;
 };
 
 static void uhid_replay_free(struct uhid_replay *replay)
@@ -132,6 +136,28 @@ static int bt_uhid_record(struct bt_uhid *uhid, bool input,
 	return 0;
 }
 
+static bool match_removed(const void *a, const void *b)
+{
+	const struct uhid_notify *notify = a;
+
+	return notify->removed;
+}
+
+static void uhid_notify(struct bt_uhid *uhid, struct uhid_event *ev)
+{
+	/* Add a reference to the uhid to ensure it doesn't get freed while at
+	 * notify_handler.
+	 */
+	bt_uhid_ref(uhid);
+
+	uhid->notifying = true;
+	queue_foreach(uhid->notify_list, notify_handler, ev);
+	uhid->notifying = false;
+	queue_remove_all(uhid->notify_list, match_removed, NULL, free);
+
+	bt_uhid_unref(uhid);
+}
+
 static bool uhid_read_handler(struct io *io, void *user_data)
 {
 	struct bt_uhid *uhid = user_data;
@@ -159,7 +185,7 @@ static bool uhid_read_handler(struct io *io, void *user_data)
 		break;
 	}
 
-	queue_foreach(uhid->notify_list, notify_handler, &ev);
+	uhid_notify(uhid, &ev);
 
 	return true;
 }
@@ -245,7 +271,7 @@ unsigned int bt_uhid_register(struct bt_uhid *uhid, uint32_t event,
 		return 0;
 
 	notify = new0(struct uhid_notify, 1);
-	notify->id = uhid->notify_id++;
+	notify->id = ++uhid->notify_id ? uhid->notify_id : ++uhid->notify_id;
 	notify->event = event;
 	notify->func = func;
 	notify->user_data = user_data;
@@ -282,12 +308,39 @@ bool bt_uhid_unregister(struct bt_uhid *uhid, unsigned int id)
 	return true;
 }
 
+static bool match_not_id(const void *a, const void *b)
+{
+	const struct uhid_notify *notify = a;
+	unsigned int id = PTR_TO_UINT(b);
+
+	return notify->id != id;
+}
+
+static void uhid_notify_removed(void *data, void *user_data)
+{
+	struct uhid_notify *notify = data;
+	struct bt_uhid *uhid = user_data;
+
+	/* Skip marking start_id as removed since that is not removed with
+	 * unregister all.
+	 */
+	if (notify->id == uhid->start_id)
+		return;
+
+	notify->removed = true;
+}
+
 bool bt_uhid_unregister_all(struct bt_uhid *uhid)
 {
 	if (!uhid)
 		return false;
 
-	queue_remove_all(uhid->notify_list, NULL, NULL, free);
+	if (!uhid->notifying)
+		queue_remove_all(uhid->notify_list, match_not_id,
+				UINT_TO_PTR(uhid->start_id), free);
+	else
+		queue_foreach(uhid->notify_list, uhid_notify_removed, uhid);
+
 	return true;
 }
 
@@ -338,8 +391,8 @@ static void uhid_start(struct uhid_event *ev, void *user_data)
 
 int bt_uhid_create(struct bt_uhid *uhid, const char *name, bdaddr_t *src,
 			bdaddr_t *dst, uint32_t vendor, uint32_t product,
-			uint32_t version, uint32_t country, void *rd_data,
-			size_t rd_size)
+			uint32_t version, uint32_t country, uint8_t type,
+			void *rd_data, size_t rd_size)
 {
 	struct uhid_event ev;
 	int err;
@@ -349,6 +402,14 @@ int bt_uhid_create(struct bt_uhid *uhid, const char *name, bdaddr_t *src,
 
 	if (uhid->created)
 		return 0;
+
+	/* Register callback for UHID_START if not registered yet */
+	if (!uhid->start_id) {
+		uhid->start_id = bt_uhid_register(uhid, UHID_START, uhid_start,
+									uhid);
+		if (!uhid->start_id)
+			return -ENOMEM;
+	}
 
 	memset(&ev, 0, sizeof(ev));
 	ev.type = UHID_CREATE2;
@@ -377,10 +438,9 @@ int bt_uhid_create(struct bt_uhid *uhid, const char *name, bdaddr_t *src,
 	if (err)
 		return err;
 
-	bt_uhid_register(uhid, UHID_START, uhid_start, uhid);
-
 	uhid->created = true;
 	uhid->started = false;
+	uhid->type = type;
 
 	return 0;
 }
@@ -487,7 +547,7 @@ done:
 	return bt_uhid_send(uhid, &ev);
 }
 
-int bt_uhid_destroy(struct bt_uhid *uhid)
+int bt_uhid_destroy(struct bt_uhid *uhid, bool force)
 {
 	struct uhid_event ev;
 	int err;
@@ -495,7 +555,18 @@ int bt_uhid_destroy(struct bt_uhid *uhid)
 	if (!uhid)
 		return -EINVAL;
 
-	if (!uhid->created)
+	/* Cleanup input queue */
+	queue_destroy(uhid->input, free);
+	uhid->input = NULL;
+
+	/* Force destroy for non-keyboard devices - keyboards are not destroyed
+	 * on disconnect since they can glitch on reconnection losing
+	 * keypresses.
+	 */
+	if (!force && uhid->type != BT_UHID_KEYBOARD)
+		force = true;
+
+	if (!uhid->created || !force)
 		return 0;
 
 	memset(&ev, 0, sizeof(ev));
@@ -558,7 +629,7 @@ resend:
 		return 0;
 	}
 
-	queue_foreach(uhid->notify_list, notify_handler, ev);
+	uhid_notify(uhid, ev);
 
 	return 0;
 }

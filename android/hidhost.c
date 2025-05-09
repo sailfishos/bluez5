@@ -796,7 +796,7 @@ static void hog_conn_cb(const bdaddr_t *addr, int err, void *attrib)
 		if (dev->hog) {
 			bt_hid_notify_state(dev,
 						HAL_HIDHOST_STATE_DISCONNECTED);
-			bt_hog_detach(dev->hog);
+			bt_hog_detach(dev->hog, true);
 			return;
 		}
 		goto fail;
@@ -808,7 +808,8 @@ static void hog_conn_cb(const bdaddr_t *addr, int err, void *attrib)
 	if (!dev->hog) {
 		/* TODO: Get device details and primary */
 		dev->hog = bt_hog_new_default("bluez-input-device", dev->vendor,
-					dev->product, dev->version, NULL);
+					dev->product, dev->version,
+					BT_UHID_NONE, NULL);
 		if (!dev->hog) {
 			error("HoG: unable to create session");
 			goto fail;

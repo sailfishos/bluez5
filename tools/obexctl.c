@@ -33,8 +33,7 @@
 #define COLORED_CHG	COLOR_YELLOW "CHG" COLOR_OFF
 #define COLORED_DEL	COLOR_RED "DEL" COLOR_OFF
 
-#define PROMPT_ON	COLOR_BLUE "[obex]" COLOR_OFF "# "
-#define PROMPT_OFF	"[obex]# "
+#define PROMPT		"[obex]# "
 
 #define OBEX_SESSION_INTERFACE "org.bluez.obex.Session1"
 #define OBEX_TRANSFER_INTERFACE "org.bluez.obex.Transfer1"
@@ -44,8 +43,10 @@
 #define OBEX_PBAP_INTERFACE "org.bluez.obex.PhonebookAccess1"
 #define OBEX_MAP_INTERFACE "org.bluez.obex.MessageAccess1"
 #define OBEX_MSG_INTERFACE "org.bluez.obex.Message1"
+#define OBEXD_SERVICE  "org.bluez.obex"
 
-static DBusConnection *dbus_conn;
+static DBusConnection *dbus_session_conn;
+static DBusConnection *dbus_system_conn;
 static GDBusProxy *default_session;
 static GList *sessions = NULL;
 static GList *opps = NULL;
@@ -64,13 +65,13 @@ struct transfer_data {
 static void connect_handler(DBusConnection *connection, void *user_data)
 {
 	bt_shell_attach(fileno(stdin));
-	bt_shell_set_prompt(PROMPT_ON);
+	bt_shell_set_prompt(PROMPT, COLOR_BLUE);
 }
 
 static void disconnect_handler(DBusConnection *connection, void *user_data)
 {
 	bt_shell_detach();
-	bt_shell_set_prompt(PROMPT_OFF);
+	bt_shell_set_prompt(PROMPT, NULL);
 }
 
 static char *generic_generator(const char *text, int state, GList *source)
@@ -114,7 +115,7 @@ static void connect_reply(DBusMessage *message, void *user_data)
 struct connect_args {
 	char *dev;
 	char *target;
-	uint8_t channel;
+	uint16_t channel;
 };
 
 static void connect_args_free(void *data)
@@ -144,9 +145,14 @@ static void connect_setup(DBusMessageIter *iter, void *user_data)
 		g_dbus_dict_append_entry(&dict, "Target",
 					DBUS_TYPE_STRING, &args->target);
 
-	if (args->channel)
-		g_dbus_dict_append_entry(&dict, "Channel",
+	if (args->channel) {
+		if (args->channel > 31)
+			g_dbus_dict_append_entry(&dict, "PSM",
+					DBUS_TYPE_UINT16, &args->channel);
+		else
+			g_dbus_dict_append_entry(&dict, "Channel",
 					DBUS_TYPE_BYTE, &args->channel);
+	}
 
 	dbus_message_iter_close_container(iter, &dict);
 }
@@ -169,8 +175,8 @@ static void cmd_connect(int argc, char *argv[])
 		char *endptr = NULL;
 
 		channel = strtol(argv[3], &endptr, 0);
-		if (!endptr || *endptr != '\0' || channel > UINT8_MAX) {
-			bt_shell_printf("Invalid channel\n");
+		if (!endptr || *endptr != '\0' || channel > UINT16_MAX) {
+			bt_shell_printf("Invalid channel or PSM\n");
 			return bt_shell_noninteractive_quit(EXIT_FAILURE);
 		}
 	}
@@ -404,15 +410,15 @@ static void set_default_session(GDBusProxy *proxy)
 	default_session = proxy;
 
 	if (!g_dbus_proxy_get_property(proxy, "Destination", &iter)) {
-		desc = g_strdup(PROMPT_ON);
+		desc = g_strdup(PROMPT);
 		goto done;
 	}
 
 	dbus_message_iter_get_basic(&iter, &desc);
-	desc = g_strdup_printf(COLOR_BLUE "[%s]" COLOR_OFF "# ", desc);
+	desc = g_strdup_printf("[%s] #", desc);
 
 done:
-	bt_shell_set_prompt(desc);
+	bt_shell_set_prompt(desc, COLOR_BLUE);
 	g_free(desc);
 }
 
@@ -471,6 +477,11 @@ static void message_info(GDBusProxy *proxy, int argc, char *argv[])
 	print_property(proxy, "Deleted");
 	print_property(proxy, "Sent");
 	print_property(proxy, "Protected");
+	print_property(proxy, "DeliveryStatus");
+	print_property(proxy, "ConversationId");
+	print_property(proxy, "ConversationName");
+	print_property(proxy, "Direction");
+	print_property(proxy, "AttachmentMimeTypes");
 }
 
 static void cmd_info(int argc, char *argv[])
@@ -1846,7 +1857,7 @@ static void cmd_mkdir(int argc, char *argv[])
 static const struct bt_shell_menu main_menu = {
 	.name = "main",
 	.entries = {
-	{ "connect",      "<dev> [uuid] [channel]", cmd_connect,
+	{ "connect",      "<dev> [uuid] [channel|PSM]", cmd_connect,
 						"Connect session" },
 	{ "disconnect",   "[session]", cmd_disconnect, "Disconnect session",
 						session_generator },
@@ -1867,7 +1878,7 @@ static const struct bt_shell_menu main_menu = {
 	{ "pull",	  "<file>",   cmd_pull,
 					"Pull Vobject & stores in file" },
 	{ "cd",           "<path>",   cmd_cd, "Change current folder" },
-	{ "ls",           "<options>", cmd_ls, "List current folder" },
+	{ "ls",           "[options]", cmd_ls, "List current folder" },
 	{ "cp",          "<source file> <destination file>",   cmd_cp,
 				"Copy source file to destination file" },
 	{ "mv",          "<source file> <destination file>",   cmd_mv,
@@ -2145,19 +2156,47 @@ static void property_changed(GDBusProxy *proxy, const char *name,
 		session_property_changed(proxy, name, iter);
 }
 
+static bool check_obexd_service(DBusConnection *conn)
+{
+	DBusError err;
+	bool has_owner;
+
+	dbus_error_init(&err);
+	has_owner = dbus_bus_name_has_owner(conn, OBEXD_SERVICE, &err);
+
+	if (dbus_error_is_set(&err))
+		dbus_error_free(&err);
+
+	return has_owner;
+}
+
 int main(int argc, char *argv[])
 {
-	GDBusClient *client;
+	GDBusClient *client = NULL;
 	int status;
+	bool session_bus_active;
+	bool system_bus_active;
 
 	bt_shell_init(argc, argv, NULL);
 	bt_shell_set_menu(&main_menu);
-	bt_shell_set_prompt(PROMPT_OFF);
+	bt_shell_set_prompt(PROMPT, NULL);
 
-	dbus_conn = g_dbus_setup_bus(DBUS_BUS_SESSION, NULL, NULL);
+	session_bus_active = false;
+	system_bus_active = false;
+	dbus_session_conn = g_dbus_setup_bus(DBUS_BUS_SESSION, NULL, NULL);
+	if (dbus_session_conn)
+		session_bus_active = check_obexd_service(dbus_session_conn);
 
-	client = g_dbus_client_new(dbus_conn, "org.bluez.obex",
-							"/org/bluez/obex");
+	dbus_system_conn = g_dbus_setup_bus(DBUS_BUS_SYSTEM, NULL, NULL);
+	if (dbus_system_conn)
+		system_bus_active = check_obexd_service(dbus_system_conn);
+
+	if (session_bus_active)
+		client = g_dbus_client_new(dbus_session_conn, OBEXD_SERVICE,
+								"/org/bluez/obex");
+	else if (system_bus_active)
+		client = g_dbus_client_new(dbus_system_conn, OBEXD_SERVICE,
+								"/org/bluez/obex");
 
 	g_dbus_client_set_connect_watch(client, connect_handler, NULL);
 	g_dbus_client_set_disconnect_watch(client, disconnect_handler, NULL);
@@ -2167,9 +2206,14 @@ int main(int argc, char *argv[])
 
 	status = bt_shell_run();
 
-	g_dbus_client_unref(client);
+	if (client)
+		g_dbus_client_unref(client);
 
-	dbus_connection_unref(dbus_conn);
+	if (dbus_session_conn)
+		dbus_connection_unref(dbus_session_conn);
+
+	if (dbus_system_conn)
+		dbus_connection_unref(dbus_system_conn);
 
 	return status;
 }

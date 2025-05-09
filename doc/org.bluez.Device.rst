@@ -40,7 +40,8 @@ void Connect()
 	are skip and check latest seen bearer.
 
 	3. Connect last seen bearer, in case the timestamps are the same BR/EDR
-	takes precedence.
+	takes precedence, or in case **PreferredBearer** has been set to a
+	specific bearer then that is used instead.
 
 	Possible errors:
 
@@ -134,6 +135,25 @@ void CancelPairing()
 
 	:org.bluez.Error.DoesNotExist:
 	:org.bluez.Error.Failed:
+
+array{array{byte}} GetServiceRecords() [experimental]
+`````````````````````````````````````````````````````
+
+	Returns all currently known BR/EDR service records for the device. Each
+	individual byte array represents a raw SDP record, as defined by the
+	Bluetooth Service Discovery Protocol specification.
+
+	This method is intended to be only used by compatibility layers like
+	Wine, that need to provide access to raw SDP records to support foreign
+	Bluetooth APIs. General applications should instead use the Profile API
+	for services-related functionality.
+
+	Possible errors:
+
+	:org.bluez.Error.Failed:
+	:org.bluez.Error.NotReady:
+	:org.bluez.Error.NotConnected:
+	:org.bluez.Error.DoesNotExist:
 
 Properties
 ----------
@@ -293,13 +313,13 @@ bool ServicesResolved [readonly]
 
 	Indicate whether or not service discovery has been resolved.
 
-array{byte} AdvertisingFlags [readonly, experimental]
-`````````````````````````````````````````````````````
+array{byte} AdvertisingFlags [readonly]
+```````````````````````````````````````
 
 	The Advertising Data Flags of the remote device.
 
-dict AdvertisingData [readonly, experimental]
-`````````````````````````````````````````````
+dict AdvertisingData [readonly]
+```````````````````````````````
 
 	The Advertising Data of the remote device. Keys are 1 byte AD Type
 	followed by data as byte array.
@@ -327,3 +347,29 @@ array{object, dict} Sets [readonly, experimental]
 	:byte Rank:
 
 		Rank of the device in the Set.
+
+string PreferredBearer [readwrite, optional, experimental]
+``````````````````````````````````````````````````````````
+
+	Indicate the preferred bearer when initiating a connection, only
+	available for dual-mode devices.
+
+	When changing from "bredr" to "le" the device will be removed from the
+	'auto-connect' list so it won't automatically be connected when
+	adverting.
+
+	Note: Changes only take effect when the device is disconnected.
+
+	Possible values:
+
+	:"last-seen":
+
+		Connect to last seen bearer first. Default.
+
+	:"bredr":
+
+		Connect to BR/EDR first.
+
+	:"le":
+
+		Connect to LE first.

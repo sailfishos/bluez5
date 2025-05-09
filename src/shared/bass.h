@@ -3,11 +3,12 @@
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
- *  Copyright 2023 NXP
+ *  Copyright 2023-2024 NXP
  *
  */
 
 struct bt_bass;
+struct bt_bcast_src;
 
 #define NUM_BCAST_RECV_STATES				2
 #define BT_BASS_BCAST_CODE_SIZE				16
@@ -32,35 +33,6 @@ struct bt_bass;
 #define BT_BASS_BIG_ENC_STATE_DEC			0x02
 #define BT_BASS_BIG_ENC_STATE_BAD_CODE			0x03
 
-/* BASS subgroup field of the Broadcast
- * Receive State characteristic
- */
-struct bt_bass_subgroup_data {
-	uint32_t bis_sync;
-	uint32_t pending_bis_sync;
-	uint8_t meta_len;
-	uint8_t *meta;
-};
-
-/* BASS Broadcast Source structure */
-struct bt_bcast_src {
-	struct bt_bass *bass;
-	struct gatt_db_attribute *attr;
-	uint8_t id;
-	uint8_t addr_type;
-	bdaddr_t addr;
-	uint8_t sid;
-	uint32_t bid;
-	uint8_t sync_state;
-	uint8_t enc;
-	uint8_t bad_code[BT_BASS_BCAST_CODE_SIZE];
-	uint8_t num_subgroups;
-	struct bt_bass_subgroup_data *subgroup_data;
-	GIOChannel *listen_io;
-	GIOChannel *pa_sync_io;
-	struct queue *bises;
-};
-
 /* Broadcast Audio Scan Control Point
  * header structure
  */
@@ -74,6 +46,9 @@ struct bt_bass_bcast_audio_scan_cp_hdr {
 
 #define BT_BASS_ADD_SRC					0x02
 
+#define BT_BASS_ADDR_PUBLIC				0x00
+#define BT_BASS_ADDR_RANDOM				0x01
+
 /* PA_Sync values */
 #define PA_SYNC_NO_SYNC					0x00
 #define PA_SYNC_PAST					0x01
@@ -81,6 +56,8 @@ struct bt_bass_bcast_audio_scan_cp_hdr {
 
 /* BIS_Sync no preference bitmask */
 #define BIS_SYNC_NO_PREF				0xFFFFFFFF
+
+#define PA_INTERVAL_UNKNOWN				0xFFFF
 
 struct bt_bass_add_src_params {
 	uint8_t addr_type;
@@ -119,8 +96,14 @@ struct bt_bass_remove_src_params {
 typedef void (*bt_bass_func_t)(struct bt_bass *bass, void *user_data);
 typedef void (*bt_bass_destroy_func_t)(void *user_data);
 typedef void (*bt_bass_debug_func_t)(const char *str, void *user_data);
+typedef void (*bt_bass_src_func_t)(uint8_t id, uint32_t bid, uint8_t enc,
+					uint32_t bis_sync, void *user_data);
+
+typedef int (*bt_bass_cp_handler_func_t)(struct bt_bcast_src *bcast_src,
+		uint8_t op, void *params, void *user_data);
 
 struct bt_att *bt_bass_get_att(struct bt_bass *bass);
+struct bt_gatt_client *bt_bass_get_client(struct bt_bass *bass);
 unsigned int bt_bass_register(bt_bass_func_t attached, bt_bass_func_t detached,
 							void *user_data);
 bool bt_bass_unregister(unsigned int id);
@@ -134,3 +117,21 @@ bool bt_bass_attach(struct bt_bass *bass, struct bt_gatt_client *client);
 bool bt_bass_set_att(struct bt_bass *bass, struct bt_att *att);
 void bt_bass_detach(struct bt_bass *bass);
 void bt_bass_add_db(struct gatt_db *db, const bdaddr_t *adapter_bdaddr);
+int bt_bass_send(struct bt_bass *bass,
+		struct bt_bass_bcast_audio_scan_cp_hdr *hdr,
+		struct iovec *params);
+unsigned int bt_bass_src_register(struct bt_bass *bass, bt_bass_src_func_t cb,
+			void *user_data, bt_bass_destroy_func_t destroy);
+bool bt_bass_src_unregister(struct bt_bass *bass, unsigned int id);
+unsigned int bt_bass_cp_handler_register(struct bt_bass *bass,
+				bt_bass_cp_handler_func_t handler,
+				bt_bass_destroy_func_t destroy,
+				void *user_data);
+bool bt_bass_cp_handler_unregister(struct bt_bass *bass,
+				unsigned int id);
+int bt_bass_set_pa_sync(struct bt_bcast_src *bcast_src, uint8_t sync_state);
+int bt_bass_get_pa_sync(struct bt_bcast_src *bcast_src, uint8_t *sync_state);
+int bt_bass_set_bis_sync(struct bt_bcast_src *bcast_src, uint8_t bis);
+int bt_bass_clear_bis_sync(struct bt_bcast_src *bcast_src, uint8_t bis);
+bool bt_bass_check_bis(struct bt_bcast_src *bcast_src, uint8_t bis);
+int bt_bass_set_enc(struct bt_bcast_src *bcast_src, uint8_t enc);

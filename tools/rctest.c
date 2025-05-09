@@ -41,6 +41,8 @@
 #define SIOCGSTAMP_OLD SIOCGSTAMP
 #endif
 
+#define MAX_DATA_SIZE 0x40000000
+
 /* Test modes */
 enum {
 	SEND,
@@ -500,7 +502,7 @@ static void recv_mode(int sk)
 					timestamp = 0;
 					memset(ts, 0, sizeof(ts));
 				} else {
-					sprintf(ts, "[%lld.%lld] ",
+					snprintf(ts, sizeof(ts), "[%lld.%lld] ",
 							(long long)tv.tv_sec,
 							(long long)tv.tv_usec);
 				}
@@ -554,7 +556,8 @@ static void do_send(int sk)
 			exit(1);
 		}
 		len = read(fd, buf, data_size);
-		send(sk, buf, len, 0);
+		if (len > 0)
+			send(sk, buf, len, 0);
 		close(fd);
 		return;
 	} else {
@@ -739,6 +742,9 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'a':
+			if (!optarg)
+				break;
+
 			mode = AUTO;
 
 			if (!strncasecmp(optarg, "hci", 3))
@@ -748,10 +754,14 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'b':
-			data_size = atoi(optarg);
+			if (optarg && atoi(optarg) < MAX_DATA_SIZE)
+				data_size = atoi(optarg);
 			break;
 
 		case 'i':
+			if (!optarg)
+				break;
+
 			if (!strncasecmp(optarg, "hci", 3))
 				hci_devba(atoi(optarg + 3), &bdaddr);
 			else
@@ -759,10 +769,14 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'P':
-			channel = atoi(optarg);
+			if (optarg)
+				channel = atoi(optarg);
 			break;
 
 		case 'U':
+			if (!optarg)
+				break;
+
 			if (!strcasecmp(optarg, "spp"))
 				uuid = SERIAL_PORT_SVCLASS_ID;
 			else if (!strncasecmp(optarg, "0x", 2))
@@ -788,11 +802,13 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'L':
-			linger = atoi(optarg);
+			if (optarg)
+				linger = atoi(optarg);
 			break;
 
 		case 'W':
-			defer_setup = atoi(optarg);
+			if (optarg)
+				defer_setup = atoi(optarg);
 			break;
 
 		case 'B':
@@ -804,19 +820,23 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'N':
-			num_frames = atoi(optarg);
+			if (optarg)
+				num_frames = atoi(optarg);
 			break;
 
 		case 'C':
-			count = atoi(optarg);
+			if (optarg)
+				count = atoi(optarg);
 			break;
 
 		case 'D':
-			delay = atoi(optarg) * 1000;
+			if (optarg)
+				delay = atoi(optarg) * 1000;
 			break;
 
 		case 'Y':
-			priority = atoi(optarg);
+			if (optarg)
+				priority = atoi(optarg);
 			break;
 
 		case 'T':

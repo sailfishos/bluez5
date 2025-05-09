@@ -26,6 +26,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <sys/socket.h>
+#include <limits.h>
 
 #include "lib/bluetooth.h"
 #include "lib/uuid.h"
@@ -100,7 +101,7 @@
 #define UNKNOWN_MANUFACTURER 0xffff
 
 static time_t time_offset = ((time_t) -1);
-static int priority_level = BTSNOOP_PRIORITY_INFO;
+static int priority_level = BTSNOOP_PRIORITY_DEBUG;
 static unsigned long filter_mask = 0;
 static bool index_filter = false;
 static uint16_t index_current = 0;
@@ -198,7 +199,7 @@ static struct packet_conn_data *release_handle(uint16_t handle)
 
 		if (conn->handle == handle) {
 			if (conn->destroy)
-				conn->destroy(conn->data);
+				conn->destroy(conn, conn->data);
 
 			queue_destroy(conn->tx_q, free);
 			queue_destroy(conn->chan_q, free);
@@ -376,7 +377,7 @@ static void print_packet(struct timeval *tv, struct ucred *cred, char ident,
 					const char *text, const char *extra)
 {
 	int col = num_columns();
-	char line[256], ts_str[96], pid_str[140];
+	char line[LINE_MAX], ts_str[96], pid_str[140];
 	int n, ts_len = 0, ts_pos = 0, len = 0, pos = 0;
 	static size_t last_frame;
 
@@ -488,6 +489,14 @@ static void print_packet(struct timeval *tv, struct ucred *cred, char ident,
 	if (text) {
 		int extra_len = extra ? strlen(extra) : 0;
 		int max_len = col - len - extra_len - ts_len - 3;
+
+		/* Check if there is enough space for the text and the label, if
+		 * there isn't then discard extra text since it won't fit.
+		 */
+		if (max_len <= 0) {
+			extra = NULL;
+			max_len = col - len - ts_len - 3;
+		}
 
 		n = snprintf(line + pos, max_len + 1, "%s%s",
 						label ? ": " : "", text);
@@ -4845,6 +4854,50 @@ static void flow_spec_modify_cmd(uint16_t index, const void *data, uint8_t size)
 	print_flow_spec("RX", cmd->rx_flow_spec);
 }
 
+static void print_coding_format(const char *label,
+						const uint8_t coding_format[5])
+{
+	print_field("%s:", label);
+	packet_print_codec_id("  Codec", coding_format[0]);
+	if (coding_format[0] == 0xff) {
+		print_field("  Company: %s",
+				bt_compidtostr(get_le16(coding_format + 1)));
+		print_field("  Vendor Specific Codec: 0x%4.4x",
+						get_le16(coding_format + 3));
+	}
+}
+
+static void print_pcm_data_format(const char *label, uint8_t pcm)
+{
+	switch (pcm) {
+	case 0:
+		print_field("%s: NA", label);
+		break;
+	case 1:
+		print_field("%s: 1's complement", label);
+		break;
+	case 2:
+		print_field("%s: 2's complement", label);
+		break;
+	case 3:
+		print_field("%s: Sign-magnitude", label);
+		break;
+	case 4:
+		print_field("%s: Unsigned", label);
+		break;
+	default:
+		print_field("%s: Unknown (0x%2.2x)", label, pcm);
+	}
+}
+
+static void print_data_path(const char *label, uint8_t data_path)
+{
+	if (data_path == 0)
+		print_field("%s: HCI", label);
+	else
+		print_field("%s: Vendor Specific (0x%2.2x)", label, data_path);
+}
+
 static void enhanced_setup_sync_conn_cmd(uint16_t index, const void *data,
 							uint8_t size)
 {
@@ -4853,9 +4906,30 @@ static void enhanced_setup_sync_conn_cmd(uint16_t index, const void *data,
 	print_handle(cmd->handle);
 	print_field("Transmit bandwidth: %d", le32_to_cpu(cmd->tx_bandwidth));
 	print_field("Receive bandwidth: %d", le32_to_cpu(cmd->rx_bandwidth));
-
-	/* TODO */
-
+	print_coding_format("Transmit Coding Format", cmd->tx_coding_format);
+	print_coding_format("Receive Coding Format", cmd->rx_coding_format);
+	print_field("Transmit Codec Frame Size: %d",
+					le16_to_cpu(cmd->tx_codec_frame_size));
+	print_field("Receive Codec Frame Size: %d",
+					le16_to_cpu(cmd->rx_codec_frame_size));
+	print_coding_format("Input Coding Format", cmd->input_coding_format);
+	print_coding_format("Output Coding Format", cmd->output_coding_format);
+	print_field("Input Coded Data Size: %d",
+				le16_to_cpu(cmd->input_coded_data_size));
+	print_field("Output Coded Data Size: %d",
+				le16_to_cpu(cmd->output_coded_data_size));
+	print_pcm_data_format("Input PCM Data Format",
+						cmd->input_pcm_data_format);
+	print_pcm_data_format("Output PCM Data Format",
+						cmd->output_pcm_data_format);
+	print_field("Input PCM Sample Payload MSB Position: %d",
+						cmd->input_pcm_msb_position);
+	print_field("Output PCM Sample Payload MSB Position: %d",
+						cmd->output_pcm_msb_position);
+	print_data_path("Input Data Path", cmd->input_data_path);
+	print_data_path("Output Data Path", cmd->output_data_path);
+	print_field("Input Transport Unit Size: %d", cmd->input_unit_size);
+	print_field("Output Transport Unit Size: %d", cmd->output_unit_size);
 	print_field("Max latency: %d", le16_to_cpu(cmd->max_latency));
 	print_pkt_type_sco(cmd->pkt_type);
 	print_retransmission_effort(cmd->retrans_effort);
@@ -4870,9 +4944,30 @@ static void enhanced_accept_sync_conn_request_cmd(uint16_t index,
 	print_bdaddr(cmd->bdaddr);
 	print_field("Transmit bandwidth: %d", le32_to_cpu(cmd->tx_bandwidth));
 	print_field("Receive bandwidth: %d", le32_to_cpu(cmd->rx_bandwidth));
-
-	/* TODO */
-
+	print_coding_format("Transmit Coding Format", cmd->tx_coding_format);
+	print_coding_format("Receive Coding Format", cmd->rx_coding_format);
+	print_field("Transmit Codec Frame Size: %d",
+					le16_to_cpu(cmd->tx_codec_frame_size));
+	print_field("Receive Codec Frame Size: %d",
+					le16_to_cpu(cmd->rx_codec_frame_size));
+	print_coding_format("Input Coding Format", cmd->input_coding_format);
+	print_coding_format("Output Coding Format", cmd->output_coding_format);
+	print_field("Input Coded Data Size: %d",
+				le16_to_cpu(cmd->input_coded_data_size));
+	print_field("Output Coded Data Size: %d",
+				le16_to_cpu(cmd->output_coded_data_size));
+	print_pcm_data_format("Input PCM Data Format",
+						cmd->input_pcm_data_format);
+	print_pcm_data_format("Output PCM Data Format",
+						cmd->output_pcm_data_format);
+	print_field("Input PCM Sample Payload MSB Position: %d",
+						cmd->input_pcm_msb_position);
+	print_field("Output PCM Sample Payload MSB Position: %d",
+						cmd->output_pcm_msb_position);
+	print_data_path("Input Data Path", cmd->input_data_path);
+	print_data_path("Output Data Path", cmd->output_data_path);
+	print_field("Input Transport Unit Size: %d", cmd->input_unit_size);
+	print_field("Output Transport Unit Size: %d", cmd->output_unit_size);
 	print_field("Max latency: %d", le16_to_cpu(cmd->max_latency));
 	print_pkt_type_sco(cmd->pkt_type);
 	print_retransmission_effort(cmd->retrans_effort);
@@ -12904,6 +12999,7 @@ static const struct bitfield_data mgmt_settings_table[] = {
 	{ 19, "CIS Peripheral"		},
 	{ 20, "ISO Broadcaster"		},
 	{ 21, "Sync Receiver"		},
+	{ 22, "LL Privacy"		},
 	{}
 };
 
@@ -14331,6 +14427,7 @@ static void mgmt_set_exp_feature_rsp(const void *data, uint16_t size)
 static const struct bitfield_data mgmt_added_device_flags_table[] = {
 	{ 0, "Remote Wakeup"		},
 	{ 1, "Device Privacy Mode"	},
+	{ 2, "Address Resolution"	},
 	{ }
 };
 
@@ -14625,6 +14722,55 @@ static void mgmt_mesh_send_cancel_cmd(const void *data, uint16_t size)
 	print_field("Handle: %d", handle);
 }
 
+static void mgmt_hci_cmd_sync_cmd(const void *data, uint16_t size)
+{
+	struct iovec iov = { (void *)data, size };
+	uint16_t opcode, len;
+	uint8_t event;
+	uint8_t timeout;
+
+	if (!util_iov_pull_le16(&iov, &opcode)) {
+		print_text(COLOR_ERROR, "  invalid opcode");
+		return;
+	}
+
+	print_field("Opcode: 0x%4.4x", opcode);
+
+	if (!util_iov_pull_u8(&iov, &event)) {
+		print_text(COLOR_ERROR, "  invalid event");
+		return;
+	}
+
+	print_field("Event: 0x%2.2x", event);
+
+	if (!util_iov_pull_u8(&iov, &timeout)) {
+		print_text(COLOR_ERROR, "  invalid timeout");
+		return;
+	}
+
+	print_field("Timeout: %d seconds", timeout);
+
+	if (!util_iov_pull_le16(&iov, &len)) {
+		print_text(COLOR_ERROR, "  invalid parameters length");
+		return;
+	}
+
+	print_field("Parameters Length: %d", len);
+
+	if (iov.iov_len != len) {
+		print_text(COLOR_ERROR, "  length mismatch (%zu != %d)",
+				iov.iov_len, len);
+		return;
+	}
+
+	print_hex_field("Parameters", iov.iov_base, iov.iov_len);
+}
+
+static void mgmt_hci_cmd_sync_rsp(const void *data, uint16_t size)
+{
+	print_hex_field("Response", data, size);
+}
+
 struct mgmt_data {
 	uint16_t opcode;
 	const char *str;
@@ -14895,9 +15041,12 @@ static const struct mgmt_data mgmt_command_table[] = {
 	{ 0x0059, "Mesh Send",
 				mgmt_mesh_send_cmd, 19, false,
 				mgmt_mesh_send_rsp, 1, true},
-	{ 0x0056, "Mesh Send Cancel",
+	{ 0x005A, "Mesh Send Cancel",
 				mgmt_mesh_send_cancel_cmd, 1, true,
 				mgmt_null_rsp, 0, true},
+	{ 0x005B, "Send HCI command and wait for event",
+				mgmt_hci_cmd_sync_cmd, 6, false,
+				mgmt_hci_cmd_sync_rsp, 0, false},
 	{ }
 };
 

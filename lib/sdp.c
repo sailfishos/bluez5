@@ -506,15 +506,17 @@ sdp_data_t *sdp_seq_alloc_with_length(void **dtds, void **values, int *length,
 
 	for (i = 0; i < len; i++) {
 		sdp_data_t *data;
-		int8_t dtd = *(uint8_t *) dtds[i];
+		uint8_t dtd = *(uint8_t *) dtds[i];
 
 		if (dtd >= SDP_SEQ8 && dtd <= SDP_ALT32)
 			data = (sdp_data_t *) values[i];
 		else
 			data = sdp_data_alloc_with_length(dtd, values[i], length[i]);
 
-		if (!data)
+		if (!data) {
+			sdp_data_free(seq);
 			return NULL;
+		}
 
 		if (curr)
 			curr->next = data;
@@ -541,8 +543,10 @@ sdp_data_t *sdp_seq_alloc(void **dtds, void **values, int len)
 		else
 			data = sdp_data_alloc(dtd, values[i]);
 
-		if (!data)
+		if (!data) {
+			sdp_data_free(seq);
 			return NULL;
+		}
 
 		if (curr)
 			curr->next = data;
@@ -577,6 +581,8 @@ int sdp_attr_add(sdp_record_t *rec, uint16_t attr, sdp_data_t *d)
 	sdp_data_t *p = sdp_data_get(rec, attr);
 
 	if (p)
+		return -1;
+	if (!d)
 		return -1;
 
 	d->attrId = attr;
@@ -960,6 +966,8 @@ static void data_seq_free(sdp_data_t *seq)
 
 void sdp_data_free(sdp_data_t *d)
 {
+	if (!d)
+		return;
 	switch (d->dtd) {
 	case SDP_SEQ8:
 	case SDP_SEQ16:
@@ -1533,6 +1541,11 @@ static sdp_data_t *sdp_copy_seq(sdp_data_t *data)
 
 		value = sdp_data_value(tmp, &len);
 		datatmp = sdp_data_alloc_with_length(tmp->dtd, value, len);
+
+		if (!datatmp) {
+			sdp_data_free(seq);
+			return NULL;
+		}
 
 		if (cur)
 			cur->next = datatmp;
@@ -3604,7 +3617,7 @@ sdp_record_t *sdp_service_attr_req(sdp_session_t *session, uint32_t handle,
 	/* get attr seq PDU form */
 	seqlen = gen_attridseq_pdu(pdata, attrids,
 		reqtype == SDP_ATTR_REQ_INDIVIDUAL? SDP_UINT16 : SDP_UINT32);
-	if (seqlen == -1) {
+	if (seqlen < 0) {
 		errno = EINVAL;
 		goto end;
 	}
@@ -3959,7 +3972,7 @@ int sdp_service_attr_async(sdp_session_t *session, uint32_t handle, sdp_attrreq_
 	/* get attr seq PDU form */
 	seqlen = gen_attridseq_pdu(pdata, attrid_list,
 			reqtype == SDP_ATTR_REQ_INDIVIDUAL? SDP_UINT16 : SDP_UINT32);
-	if (seqlen == -1) {
+	if (seqlen < 0) {
 		t->err = EINVAL;
 		goto end;
 	}
@@ -4081,7 +4094,7 @@ int sdp_service_search_attr_async(sdp_session_t *session, const sdp_list_t *sear
 	/* get attr seq PDU form */
 	seqlen = gen_attridseq_pdu(pdata, attrid_list,
 			reqtype == SDP_ATTR_REQ_INDIVIDUAL ? SDP_UINT16 : SDP_UINT32);
-	if (seqlen == -1) {
+	if (seqlen < 0) {
 		t->err = EINVAL;
 		goto end;
 	}
@@ -4465,7 +4478,7 @@ int sdp_service_search_attr_req(sdp_session_t *session, const sdp_list_t *search
 	/* get attr seq PDU form */
 	seqlen = gen_attridseq_pdu(pdata, attrids,
 		reqtype == SDP_ATTR_REQ_INDIVIDUAL ? SDP_UINT16 : SDP_UINT32);
-	if (seqlen == -1) {
+	if (seqlen < 0) {
 		errno = EINVAL;
 		status = -1;
 		goto end;

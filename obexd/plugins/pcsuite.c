@@ -322,7 +322,7 @@ static gboolean send_backup_dbus_message(const char *oper,
 
 	file_size = size ? *size : 0;
 
-	conn = g_dbus_setup_bus(DBUS_BUS_SESSION, NULL, NULL);
+	conn = obex_setup_dbus_connection(NULL, NULL);
 
 	if (conn == NULL)
 		return FALSE;
@@ -376,6 +376,7 @@ static void *backup_open(const char *name, int oflag, mode_t mode,
 	obj->error_code = 0;
 
 	if (send_backup_dbus_message("open", obj, size) == FALSE) {
+		g_free(obj->cmd);
 		g_free(obj);
 		obj = NULL;
 	}

@@ -169,7 +169,7 @@ static void cb_track_duration(struct bt_mcp *mcp, int32_t duration)
 	unsigned char buf[10];
 
 	/* MCP defines duration is int32 but api takes it as uint32 */
-	sprintf((char *)buf, "%d", duration);
+	snprintf((char *)buf, 10, "%d", duration);
 	media_player_set_metadata(mp, NULL, "Duration", buf, sizeof(buf));
 	media_player_metadata_changed(mp);
 }
@@ -224,13 +224,27 @@ static int ct_stop(struct media_player *mp, void *user_data)
 	return bt_mcp_stop(mcp);
 }
 
+static int ct_next(struct media_player *mp, void *user_data)
+{
+	struct bt_mcp *mcp = user_data;
+
+	return bt_mcp_next_track(mcp);
+}
+
+static int ct_previous(struct media_player *mp, void *user_data)
+{
+	struct bt_mcp *mcp = user_data;
+
+	return bt_mcp_previous_track(mcp);
+}
+
 static const struct media_player_callback ct_cbs = {
 	.set_setting	= NULL,
 	.play		= &ct_play,
 	.pause		= &ct_pause,
 	.stop		= &ct_stop,
-	.next		= NULL,
-	.previous	= NULL,
+	.next		= &ct_next,
+	.previous	= &ct_previous,
 	.fast_forward	= NULL,
 	.rewind		= NULL,
 	.press		= NULL,

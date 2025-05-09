@@ -32,12 +32,16 @@ confdir = $(sysconfdir)/bluetooth
 statedir = $(localstatedir)/lib/bluetooth
 
 bluetoothd-fix-permissions:
-	install -dm555 $(DESTDIR)$(confdir)
+	install -dm755 $(DESTDIR)$(confdir)
 	install -dm700 $(DESTDIR)$(statedir)
 
 if DATAFILES
 dbusdir = $(DBUS_CONFDIR)/dbus-1/system.d
 dbus_DATA = src/bluetooth.conf
+
+if OBEX
+dbus_DATA += obexd/src/obex.conf
+endif
 
 conf_DATA = src/main.conf
 conf_DATA += profiles/input/input.conf
@@ -48,6 +52,9 @@ endif
 if SYSTEMD
 systemdsystemunitdir = $(SYSTEMD_SYSTEMUNITDIR)
 systemdsystemunit_DATA = src/bluetooth.service
+
+systemduserunitdir = $(SYSTEMD_USERUNITDIR)
+systemduserunit_DATA =
 
 dbussystembusdir = $(DBUS_SYSTEMBUSDIR)
 dbussystembus_DATA = src/org.bluez.service
@@ -71,7 +78,7 @@ lib_headers = lib/bluetooth.h lib/hci.h lib/hci_lib.h \
 		lib/sco.h lib/l2cap.h lib/sdp.h lib/sdp_lib.h \
 		lib/rfcomm.h lib/bnep.h lib/cmtp.h lib/hidp.h
 
-extra_headers = lib/mgmt.h lib/uuid.h lib/a2mp.h lib/amp.h lib/iso.h
+extra_headers = lib/mgmt.h lib/uuid.h lib/iso.h
 extra_sources = lib/uuid.c
 
 local_headers = $(foreach file,$(lib_headers), lib/bluetooth/$(notdir $(file)))
@@ -84,7 +91,7 @@ pkginclude_HEADERS += $(lib_headers)
 lib_LTLIBRARIES += lib/libbluetooth.la
 
 lib_libbluetooth_la_SOURCES = $(lib_headers) $(lib_sources)
-lib_libbluetooth_la_LDFLAGS = $(AM_LDFLAGS) -version-info 22:14:19
+lib_libbluetooth_la_LDFLAGS = $(AM_LDFLAGS) -version-info 22:15:19
 endif
 
 noinst_LTLIBRARIES += lib/libbluetooth-internal.la
@@ -238,7 +245,8 @@ shared_sources = src/shared/io.h src/shared/timeout.h \
 			src/shared/bass.h src/shared/bass.c \
 			src/shared/ccp.h src/shared/ccp.c \
 			src/shared/lc3.h src/shared/tty.h \
-			src/shared/bap-defs.h
+			src/shared/bap-defs.h \
+			src/shared/asha.h src/shared/asha.c
 
 if READLINE
 shared_sources += src/shared/shell.c src/shared/shell.h
@@ -363,6 +371,7 @@ CLEANFILES += $(builtin_files)
 
 if MANPAGES
 man_MANS += src/bluetoothd.8
+man_MANS += doc/hci.7 doc/l2cap.7 doc/rfcomm.7 doc/sco.7
 man_MANS += doc/org.bluez.Adapter.5 doc/org.bluez.Device.5 \
 		doc/org.bluez.DeviceSet.5 doc/org.bluez.AgentManager.5 \
 		doc/org.bluez.Agent.5 doc/org.bluez.ProfileManager.5 \
@@ -375,7 +384,7 @@ man_MANS += doc/org.bluez.Adapter.5 doc/org.bluez.Device.5 \
 man_MANS += doc/org.bluez.Media.5 doc/org.bluez.MediaControl.5 \
 		doc/org.bluez.MediaPlayer.5 doc/org.bluez.MediaFolder.5 \
 		doc/org.bluez.MediaItem.5 doc/org.bluez.MediaEndpoint.5 \
-		doc/org.bluez.MediaTransport.5
+		doc/org.bluez.MediaTransport.5 doc/org.bluez.MediaAssistant.5
 man_MANS += doc/org.bluez.GattManager.5 doc/org.bluez.GattProfile.5 \
 		doc/org.bluez.GattService.5 \
 		doc/org.bluez.GattCharacteristic.5 \
@@ -392,9 +401,11 @@ man_MANS += doc/org.bluez.obex.Client.5 doc/org.bluez.obex.Session.5 \
 		doc/org.bluez.obex.PhonebookAccess.5 \
 		doc/org.bluez.obex.MessageAccess.5 \
 		doc/org.bluez.obex.Message.5 \
-		doc/org.bluez.obex.AgentManager.5 doc/org.bluez.obex.Agent.5
+		doc/org.bluez.obex.AgentManager.5 doc/org.bluez.obex.Agent.5 \
+		doc/org.bluez.obex.Image.5
 endif
 manual_pages += src/bluetoothd.8
+manual_pages += doc/hci.7 doc/l2cap.7 doc/rfcomm.7 doc/sco.7
 manual_pages += doc/org.bluez.Adapter.5 doc/org.bluez.Device.5 \
 		doc/org.bluez.DeviceSet.5 doc/org.bluez.AgentManager.5 \
 		doc/org.bluez.Agent.5 doc/org.bluez.ProfileManager.5 \
@@ -407,7 +418,7 @@ manual_pages += doc/org.bluez.Adapter.5 doc/org.bluez.Device.5 \
 manual_pages += doc/org.bluez.Media.5 doc/org.bluez.MediaControl.5 \
 		doc/org.bluez.MediaPlayer.5 doc/org.bluez.MediaFolder.5 \
 		doc/org.bluez.MediaItem.5 doc/org.bluez.MediaEndpoint.5 \
-		doc/org.bluez.MediaTransport.5
+		doc/org.bluez.MediaTransport.5 doc/org.bluez.MediaAssistant.5
 manual_pages += doc/org.bluez.GattManager.5 doc/org.bluez.GattProfile.5 \
 		doc/org.bluez.GattService.5 \
 		doc/org.bluez.GattCharacteristic.5 \
@@ -424,11 +435,12 @@ manual_pages += doc/org.bluez.obex.Client.5 doc/org.bluez.obex.Session.5 \
 		doc/org.bluez.obex.PhonebookAccess.5 \
 		doc/org.bluez.obex.MessageAccess.5 \
 		doc/org.bluez.obex.Message.5 \
-		doc/org.bluez.obex.AgentManager.5 doc/org.bluez.obex.Agent.5
+		doc/org.bluez.obex.AgentManager.5 doc/org.bluez.obex.Agent.5 \
+		doc/org.bluez.obex.Image.5
 
 EXTRA_DIST += src/genbuiltin src/bluetooth.conf \
 			src/main.conf profiles/network/network.conf \
-			profiles/input/input.conf
+			profiles/input/input.conf obexd/src/obex.conf
 
 test_scripts =
 unit_tests =
@@ -472,6 +484,8 @@ EXTRA_DIST += doc/mgmt-api.txt \
 		doc/health-api.txt \
 		doc/sap-api.txt
 
+EXTRA_DIST += doc/hci.rst doc/l2cap.rst doc/rfcomm.rst doc/sco.rst
+
 EXTRA_DIST += doc/org.bluez.Adapter.rst doc/org.bluez.Device.rst \
 		doc/org.bluez.DeviceSet.rst doc/org.bluez.AgentManager.rst \
 		doc/org.bluez.Agent.rst doc/org.bluez.ProfileManager.rst \
@@ -485,7 +499,7 @@ EXTRA_DIST += doc/org.bluez.Adapter.rst doc/org.bluez.Device.rst \
 EXTRA_DIST += doc/org.bluez.Media.rst doc/org.bluez.MediaControl.rst \
 		doc/org.bluez.MediaPlayer.rst doc/org.bluez.MediaFolder.rst \
 		doc/org.bluez.MediaItem.rst doc/org.bluez.MediaEndpoint.rst \
-		doc/org.bluez.MediaTransport.rst
+		doc/org.bluez.MediaTransport.rst doc/org.bluez.MediaAssistant.rst
 
 EXTRA_DIST += doc/org.bluez.GattManager.rst doc/org.bluez.GattProfile.rst\
 		doc/org.bluez.GattService.rst \
@@ -504,7 +518,8 @@ EXTRA_DIST += doc/org.bluez.obex.Client.rst doc/org.bluez.obex.Session.rst \
 		doc/org.bluez.obex.PhonebookAccess.rst \
 		doc/org.bluez.obex.MessageAccess.rst \
 		doc/org.bluez.obex.Message.rst \
-		doc/org.bluez.obex.AgentManager.rst doc/org.bluez.obex.Agent.rst
+		doc/org.bluez.obex.AgentManager.rst doc/org.bluez.obex.Agent.rst \
+		doc/org.bluez.obex.Image.rst
 
 EXTRA_DIST += doc/pics-opp.txt doc/pixit-opp.txt \
 		doc/pts-opp.txt
@@ -777,6 +792,9 @@ endif
 	$(RST2MAN_PROCESS)
 
 %.5: %.rst Makefile
+	$(RST2MAN_PROCESS)
+
+%.7: %.rst Makefile
 	$(RST2MAN_PROCESS)
 
 %.8: %.rst Makefile

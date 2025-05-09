@@ -34,7 +34,7 @@
 
 #define DEFAULT_SOCKET_PATH	"/tmp/bt-stack-tester"
 
-#define PROMPT_ON	COLOR_BLUE "[btpclient]" COLOR_OFF "# "
+#define PROMPT_ON	COLOR_BLUE "[btpclient]" COLOR_OFF "> "
 
 #define EVT_OPCODE_BASE	0x80
 
@@ -2340,7 +2340,7 @@ int main(int argc, char *argv[])
 	mainloop_add_fd(btpclientctl->server_fd, EPOLLIN, server_callback,
 			btpclientctl, NULL);
 
-	bt_shell_set_prompt(PROMPT_ON);
+	bt_shell_set_prompt(PROMPT_ON, COLOR_BLUE);
 
 	status = bt_shell_run();
 

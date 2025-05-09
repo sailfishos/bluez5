@@ -184,13 +184,17 @@ struct getcap_resp {
 } __attribute__ ((packed));
 
 struct start_req {
-	struct seid first_seid;
-	struct seid other_seids[0];
+	union {
+		struct seid required[1];
+		struct seid seids[0];
+	};
 } __attribute__ ((packed));
 
 struct suspend_req {
-	struct seid first_seid;
-	struct seid other_seids[0];
+	union {
+		struct seid required[1];
+		struct seid seids[0];
+	};
 } __attribute__ ((packed));
 
 struct seid_rej {
@@ -1308,7 +1312,8 @@ struct avdtp_remote_sep *avdtp_find_remote_sep(struct avdtp *session,
 
 static GSList *caps_to_list(uint8_t *data, size_t size,
 				struct avdtp_service_capability **codec,
-				gboolean *delay_reporting)
+				gboolean *delay_reporting,
+				uint8_t *err)
 {
 	struct avdtp_service_capability *cap;
 	GSList *caps;
@@ -1323,6 +1328,17 @@ static GSList *caps_to_list(uint8_t *data, size_t size,
 		struct avdtp_service_capability *cpy;
 
 		cap = (struct avdtp_service_capability *)data;
+
+		/* Verify that the Media Transport capability's length = 0.
+		 * Reject otherwise
+		 */
+		if (cap->category == AVDTP_MEDIA_TRANSPORT &&
+					cap->length != 0) {
+			error("Invalid media transport in getcap resp");
+			if (err)
+				*err = AVDTP_BAD_MEDIA_TRANSPORT_FORMAT;
+			break;
+		}
 
 		if (sizeof(*cap) + cap->length > size) {
 			error("Invalid capability data in getcap resp");
@@ -1493,9 +1509,8 @@ static gboolean avdtp_setconf_cmd(struct avdtp *session, uint8_t transaction,
 	struct conf_rej rej;
 	struct avdtp_local_sep *sep;
 	struct avdtp_stream *stream;
-	uint8_t err, category = 0x00;
+	uint8_t err = 0, category = 0x00;
 	struct btd_service *service;
-	GSList *l;
 
 	if (size < sizeof(struct setconf_req)) {
 		error("Too short getcap request");
@@ -1551,22 +1566,15 @@ static gboolean avdtp_setconf_cmd(struct avdtp *session, uint8_t transaction,
 	stream->caps = caps_to_list(req->caps,
 					size - sizeof(struct setconf_req),
 					&stream->codec,
-					&stream->delay_reporting);
+					&stream->delay_reporting,
+					&err);
+	if (err)
+		goto failed_stream;
 
 	if (!stream->caps || !stream->codec) {
 		err = AVDTP_UNSUPPORTED_CONFIGURATION;
 		category = 0x00;
 		goto failed_stream;
-	}
-
-	/* Verify that the Media Transport capability's length = 0. Reject otherwise */
-	for (l = stream->caps; l != NULL; l = g_slist_next(l)) {
-		struct avdtp_service_capability *cap = l->data;
-
-		if (cap->category == AVDTP_MEDIA_TRANSPORT && cap->length != 0) {
-			err = AVDTP_BAD_MEDIA_TRANSPORT_FORMAT;
-			goto failed_stream;
-		}
 	}
 
 	if (stream->delay_reporting && session->version < 0x0103)
@@ -1675,12 +1683,12 @@ static void check_seid_collision(struct pending_req *req, uint8_t id)
 static void check_start_collision(struct pending_req *req, uint8_t id)
 {
 	struct start_req *start = req->data;
-	struct seid *seid = &start->first_seid;
 	int count = 1 + req->data_size - sizeof(struct start_req);
 	int i;
 
-	for (i = 0; i < count; i++, seid++) {
-		if (seid->seid == id) {
+	for (i = 0; i < count; i++) {
+		struct seid seid = start->seids[i];
+		if (seid.seid == id) {
 			req->collided = TRUE;
 			return;
 		}
@@ -1690,12 +1698,12 @@ static void check_start_collision(struct pending_req *req, uint8_t id)
 static void check_suspend_collision(struct pending_req *req, uint8_t id)
 {
 	struct suspend_req *suspend = req->data;
-	struct seid *seid = &suspend->first_seid;
 	int count = 1 + req->data_size - sizeof(struct suspend_req);
 	int i;
 
-	for (i = 0; i < count; i++, seid++) {
-		if (seid->seid == id) {
+	for (i = 0; i < count; i++) {
+		struct seid seid = suspend->seids[i];
+		if (seid.seid == id) {
 			req->collided = TRUE;
 			return;
 		}
@@ -1788,7 +1796,6 @@ static gboolean avdtp_start_cmd(struct avdtp *session, uint8_t transaction,
 	struct avdtp_local_sep *sep;
 	struct avdtp_stream *stream;
 	struct stream_rej rej;
-	struct seid *seid;
 	uint8_t err, failed_seid;
 	int seid_count, i;
 
@@ -1799,12 +1806,12 @@ static gboolean avdtp_start_cmd(struct avdtp *session, uint8_t transaction,
 
 	seid_count = 1 + size - sizeof(struct start_req);
 
-	seid = &req->first_seid;
+	for (i = 0; i < seid_count; i++) {
+		struct seid seid = req->seids[i];
 
-	for (i = 0; i < seid_count; i++, seid++) {
-		failed_seid = seid->seid;
+		failed_seid = seid.seid;
 
-		sep = find_local_sep_by_seid(session, seid->seid);
+		sep = find_local_sep_by_seid(session, seid.seid);
 		if (!sep || !sep->stream) {
 			err = AVDTP_BAD_ACP_SEID;
 			goto failed;
@@ -1901,7 +1908,6 @@ static gboolean avdtp_suspend_cmd(struct avdtp *session, uint8_t transaction,
 	struct avdtp_local_sep *sep;
 	struct avdtp_stream *stream;
 	struct stream_rej rej;
-	struct seid *seid;
 	uint8_t err, failed_seid;
 	int seid_count, i;
 
@@ -1912,12 +1918,11 @@ static gboolean avdtp_suspend_cmd(struct avdtp *session, uint8_t transaction,
 
 	seid_count = 1 + size - sizeof(struct suspend_req);
 
-	seid = &req->first_seid;
+	for (i = 0; i < seid_count; i++) {
+		struct seid seid = req->seids[i];
+		failed_seid = seid.seid;
 
-	for (i = 0; i < seid_count; i++, seid++) {
-		failed_seid = seid->seid;
-
-		sep = find_local_sep_by_seid(session, seid->seid);
+		sep = find_local_sep_by_seid(session, seid.seid);
 		if (!sep || !sep->stream) {
 			err = AVDTP_BAD_ACP_SEID;
 			goto failed;
@@ -2039,6 +2044,14 @@ failed:
 static gboolean avdtp_parse_cmd(struct avdtp *session, uint8_t transaction,
 				uint8_t signal_id, void *buf, int size)
 {
+	/* Reset disconnect timer if command is received */
+	if (session->dc_timer) {
+		timeout_remove(session->dc_timer);
+		session->dc_timer = timeout_add_seconds(session->dc_timeout,
+						disconnect_timeout,
+						session, NULL);
+	}
+
 	switch (signal_id) {
 	case AVDTP_DISCOVER:
 		DBG("Received DISCOVER_CMD");
@@ -2828,7 +2841,8 @@ static gboolean avdtp_get_capabilities_resp(struct avdtp *session,
 	}
 
 	sep->caps = caps_to_list(resp->caps, size - sizeof(struct getcap_resp),
-					&sep->codec, &sep->delay_reporting);
+					&sep->codec, &sep->delay_reporting,
+					NULL);
 
 	return TRUE;
 }
@@ -3210,6 +3224,10 @@ gboolean avdtp_stream_has_capabilities(struct avdtp_stream *stream,
 	}
 
 	return TRUE;
+}
+
+gboolean avdtp_stream_has_delay_reporting(struct avdtp_stream *stream) {
+	return stream->delay_reporting;
 }
 
 struct avdtp_remote_sep *avdtp_stream_get_remote_sep(
@@ -3673,7 +3691,7 @@ int avdtp_start(struct avdtp *session, struct avdtp_stream *stream)
 	}
 
 	memset(&req, 0, sizeof(req));
-	req.first_seid.seid = stream->rseid;
+	req.required->seid = stream->rseid;
 
 	ret = send_request(session, FALSE, stream, AVDTP_START,
 							&req, sizeof(req));
@@ -3778,11 +3796,12 @@ int avdtp_delay_report(struct avdtp *session, struct avdtp_stream *stream,
 		return -EINVAL;
 
 	if (stream->lsep->state != AVDTP_STATE_CONFIGURED &&
+				stream->lsep->state != AVDTP_STATE_OPEN &&
 				stream->lsep->state != AVDTP_STATE_STREAMING)
 		return -EINVAL;
 
 	if (!stream->delay_reporting || session->version < 0x0103)
-		return -EINVAL;
+		return -ENOTSUP;
 
 	stream->delay = delay;
 
@@ -3928,6 +3947,9 @@ struct btd_device *avdtp_get_device(struct avdtp *session)
 
 gboolean avdtp_has_stream(struct avdtp *session, struct avdtp_stream *stream)
 {
+	if (!session || !stream)
+		return FALSE;
+
 	return g_slist_find(session->streams, stream) ? TRUE : FALSE;
 }
 

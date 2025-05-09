@@ -66,7 +66,7 @@ bool bt_shell_add_submenu(const struct bt_shell_menu *menu);
 
 bool bt_shell_remove_submenu(const struct bt_shell_menu *menu);
 
-void bt_shell_set_prompt(const char *string);
+void bt_shell_set_prompt(const char *string, const char *color);
 
 void bt_shell_printf(const char *fmt,
 				...) __attribute__((format(printf, 1, 2)));
@@ -84,5 +84,7 @@ bool bt_shell_detach(void);
 
 void bt_shell_set_env(const char *name, void *value);
 void *bt_shell_get_env(const char *name);
+
+int bt_shell_get_timeout(void);
 
 void bt_shell_cleanup(void);

@@ -4,9 +4,6 @@ builtin_modules += hostname
 builtin_sources += plugins/hostname.c
 endif
 
-builtin_modules += wiimote
-builtin_sources += plugins/wiimote.c
-
 if AUTOPAIR
 builtin_modules += autopair
 builtin_sources += plugins/autopair.c
@@ -14,6 +11,10 @@ endif
 
 builtin_modules += policy
 builtin_sources += plugins/policy.c
+
+builtin_sources += profiles/audio/media.h profiles/audio/media.c \
+			profiles/audio/transport.h profiles/audio/transport.c \
+			profiles/audio/player.h profiles/audio/player.c
 
 if ADMIN
 builtin_modules += admin
@@ -39,8 +40,6 @@ builtin_sources += profiles/audio/source.h profiles/audio/source.c \
 			profiles/audio/sink.h profiles/audio/sink.c \
 			profiles/audio/a2dp.h profiles/audio/a2dp.c \
 			profiles/audio/avdtp.h profiles/audio/avdtp.c \
-			profiles/audio/media.h profiles/audio/media.c \
-			profiles/audio/transport.h profiles/audio/transport.c \
 			profiles/audio/a2dp-codecs.h
 endif
 
@@ -49,8 +48,7 @@ if AVRCP
 builtin_modules += avrcp
 builtin_sources += profiles/audio/control.h profiles/audio/control.c \
 			profiles/audio/avctp.h profiles/audio/avctp.c \
-			profiles/audio/avrcp.h profiles/audio/avrcp.c \
-			profiles/audio/player.h profiles/audio/player.c
+			profiles/audio/avrcp.h profiles/audio/avrcp.c
 endif
 
 if NETWORK
@@ -134,7 +132,7 @@ endif
 
 if VCP
 builtin_modules += vcp
-builtin_sources += profiles/audio/vcp.c
+builtin_sources += profiles/audio/vcp.h profiles/audio/vcp.c
 endif
 
 if MICP
@@ -150,4 +148,9 @@ endif
 if CSIP
 builtin_modules += csip
 builtin_sources += profiles/audio/csip.c
+endif
+
+if ASHA
+builtin_modules += asha
+builtin_sources += profiles/audio/asha.h profiles/audio/asha.c
 endif

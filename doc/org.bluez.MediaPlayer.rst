@@ -237,6 +237,11 @@ dict Track [readonly]
 
 		Track duration in milliseconds
 
+	:string ImgHandle: [experimental]
+
+		Track image handle, available and valid only during the lifetime of an
+		OBEX BIP connection to the ObexPort.
+
 object Device [readonly]
 ````````````````````````
 
@@ -313,3 +318,9 @@ object Playlist
 ```````````````
 
 	Playlist object path.
+
+uint16 ObexPort [readonly, experimental]
+````````````````````````````````````````
+
+	If present indicates the player can get cover art using BIP over OBEX
+	on this PSM port.

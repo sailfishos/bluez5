@@ -84,11 +84,12 @@ struct input_device {
 	unsigned int		report_req_timer;
 	uint32_t		report_rsp_id;
 	bool			virtual_cable_unplug;
+	uint8_t			type;
 	unsigned int		idle_timer;
 };
 
 static int idle_timeout = 0;
-static bool uhid_enabled = true;
+static uhid_state_t uhid_state = UHID_ENABLED;
 static bool classic_bonded_only = true;
 
 void input_set_idle_timeout(int timeout)
@@ -96,9 +97,23 @@ void input_set_idle_timeout(int timeout)
 	idle_timeout = timeout;
 }
 
-void input_enable_userspace_hid(bool state)
+void input_set_userspace_hid(char *state)
 {
-	uhid_enabled = state;
+	if (!strcasecmp(state, "false") || !strcasecmp(state, "no") ||
+			!strcasecmp(state, "off"))
+		uhid_state = UHID_DISABLED;
+	else if (!strcasecmp(state, "true") || !strcasecmp(state, "yes") ||
+			!strcasecmp(state, "on"))
+		uhid_state = UHID_ENABLED;
+	else if (!strcasecmp(state, "persist"))
+		uhid_state = UHID_PERSIST;
+	else
+		error("Unknown value '%s'", state);
+}
+
+uint8_t input_get_userspace_hid(void)
+{
+	return uhid_state;
 }
 
 void input_set_classic_bonded_only(bool state)
@@ -116,11 +131,11 @@ void input_autodetect_hidp(void)
 	int ctl;
 
 	ctl = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HIDP);
-	uhid_enabled = ctl < 0 ? true : false;
+	uhid_state = ctl < 0 ? UHID_ENABLED : UHID_DISABLED;
 	if (ctl >= 0)
 		close(ctl);
 
-	DBG("Autodetect HIDP: Use %s HIDP", uhid_enabled ? "userspace" : "kernel");
+	DBG("Autodetect HIDP: Use %s HIDP", uhid_state == UHID_ENABLED ? "userspace" : "kernel");
 }
 
 static void input_device_enter_reconnect_mode(struct input_device *idev);
@@ -186,17 +201,21 @@ static int uhid_disconnect(struct input_device *idev, bool force)
 	if (!bt_uhid_created(idev->uhid))
 		return 0;
 
-	/* Only destroy the node if virtual cable unplug flag has been set */
-	if (!idev->virtual_cable_unplug && !force)
-		return 0;
+	/* Force destroy the node if virtual cable unplug flag has been set */
+	if (idev->virtual_cable_unplug && !force)
+		force = true;
 
-	bt_uhid_unregister_all(idev->uhid);
+	if (!force && uhid_state != UHID_PERSIST)
+		force = true;
 
-	err = bt_uhid_destroy(idev->uhid);
+	err = bt_uhid_destroy(idev->uhid, force);
 	if (err < 0) {
 		error("bt_uhid_destroy: %s", strerror(-err));
 		return err;
 	}
+
+	if (!bt_uhid_created(idev->uhid))
+		bt_uhid_unregister_all(idev->uhid);
 
 	return err;
 }
@@ -1001,7 +1020,8 @@ static int uhid_connadd(struct input_device *idev, struct hidp_connadd_req *req)
 
 	err = bt_uhid_create(idev->uhid, req->name, &idev->src, &idev->dst,
 				req->vendor, req->product, req->version,
-				req->country, req->rd_data, req->rd_size);
+				req->country, idev->type,
+				req->rd_data, req->rd_size);
 	if (err < 0) {
 		error("bt_uhid_create: %s", strerror(-err));
 		return err;
@@ -1090,7 +1110,7 @@ static int hidp_add_connection(struct input_device *idev)
 	/* Some platforms may choose to require encryption for all devices */
 	/* Note that this only matters for pre 2.1 devices as otherwise the */
 	/* device is encrypted by default by the lower layers */
-	if (classic_bonded_only || req->subclass & 0x40) {
+	if (classic_bonded_only || idev->type == BT_UHID_KEYBOARD) {
 		if (!bt_io_set(idev->intr_io, &gerr,
 					BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_MEDIUM,
 					BT_IO_OPT_INVALID)) {
@@ -1480,6 +1500,7 @@ static struct input_device *input_device_new(struct btd_service *service)
 	idev->service = btd_service_ref(service);
 	idev->device = btd_device_ref(device);
 	idev->path = g_strdup(path);
+	idev->type = bt_uhid_icon_to_type(btd_device_get_icon(device));
 
 	input_device_update_rec(idev);
 
@@ -1515,12 +1536,12 @@ int input_device_register(struct btd_service *service)
 	if (!idev)
 		return -EINVAL;
 
-	if (uhid_enabled) {
+	if (uhid_state) {
 		idev->uhid = bt_uhid_new_default();
 		if (!idev->uhid) {
-			error("bt_uhid_new_default: failed");
-			input_device_free(idev);
-			return -EIO;
+			DBG("bt_uhid_new_default failed, switching to kernel "
+			    "mode");
+			uhid_state = UHID_DISABLED;
 		}
 	}
 
@@ -1613,7 +1634,7 @@ int input_device_set_channel(const bdaddr_t *src, const bdaddr_t *dst, int psm,
 	if (!idev)
 		return -ENOENT;
 
-	if (uhid_enabled)
+	if (uhid_state)
 		cond |= G_IO_IN;
 
 	switch (psm) {
