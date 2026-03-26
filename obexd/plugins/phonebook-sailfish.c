@@ -143,7 +143,7 @@ static void append_filter(DBusMessage *msg, uint8_t format, uint64_t filter)
 	if (filter != 0) {
 		uint64_t i;
 
-		filter |= 
+		filter |=
 			format == PB_FORMAT_VCARD30
 			? 0x87 /* VERSION, N, FN, TEL */
 			: format == PB_FORMAT_VCARD21
@@ -797,7 +797,7 @@ void *phonebook_get_entry(const char *folder, const char *id,
 					&data->pend,
 					DBUS_TIMEOUT_USE_DEFAULT);
 	dbus_pending_call_set_notify(data->pend,
-				fetch_one_cb, 
+				fetch_one_cb,
 				data,
 				NULL);
 	dbus_message_unref(msg);

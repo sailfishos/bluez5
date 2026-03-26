@@ -1,7 +1,7 @@
 Name:       bluez5
 
 Summary:    Bluetooth daemon
-Version:    5.82
+Version:    5.86
 Release:    1
 License:    GPLv2+
 URL:        http://www.bluez.org/
@@ -19,6 +19,7 @@ Requires:   oneshot
 Requires:   findutils
 # For bluetooth group
 Requires:   sailfish-setup
+BuildRequires:  pkgconfig(cups)
 BuildRequires:  pkgconfig(dbus-1)
 BuildRequires:  pkgconfig(libusb)
 BuildRequires:  pkgconfig(udev)
@@ -245,7 +246,7 @@ systemctl-user daemon-reload ||:
 %config %{_sysconfdir}/bluetooth/*
 
 %files cups
-%{_libdir}/cups/backend/bluetooth
+%{_exec_prefix}/lib/cups/backend/bluetooth
 
 %files hcidump
 %{_bindir}/hcidump

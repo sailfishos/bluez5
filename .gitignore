@@ -38,7 +38,6 @@ coverage
 ell
 
 lib/bluez.pc
-lib/bluetooth
 src/builtin.h
 src/bluetoothd
 tools/97-hid2hci.rules
@@ -94,11 +93,9 @@ tools/btgatt-server
 tools/create-image
 tools/test-runner
 tools/check-selftest
-tools/mcaptest
 tools/bneptest
 tools/isotest
 tools/iso-tester
-test/sap_client.pyc
 test/bluezutils.pyc
 unit/test-tester
 unit/test-ringbuf
@@ -118,11 +115,18 @@ unit/test-ecc
 unit/test-hog
 unit/test-bap
 unit/test-bass
+unit/test-battery
+unit/test-tmap
+unit/test-gmap
+unit/test-mcp
+unit/test-rap
+unit/test-profile
 tools/mgmt-tester
 tools/smp-tester
 tools/gap-tester
 tools/rfcomm-tester
 tools/bnep-tester
+tools/6lowpan-tester
 tools/userchan-tester
 tools/ioctl-tester
 tools/btattach
@@ -145,9 +149,9 @@ tools/mesh-cfgclient
 tools/mesh-cfgtest
 tools/mesh-tester
 mesh/bluetooth-meshd
-mesh/bluetooth-meshd.rst
+doc/bluetooth-meshd.rst
 
-src/bluetoothd.rst
+doc/bluetoothd.rst
 src/bluetooth.service
 mesh/bluetooth-mesh.service
 
@@ -173,17 +177,6 @@ unit/test-micp
 unit/test-vcp
 unit/test-*.log
 unit/test-*.trs
-
-android/system-emulator
-android/bluetoothd
-android/avdtptest
-android/haltest
-android/android-tester
-android/ipc-tester
-android/bluetoothd-snoop
-android/test-ipc
-android/test-*.log
-android/test-*.trs
 
 compile_commands.json
 cscope.in.out

@@ -562,7 +562,6 @@ static void xml_text(GMarkupParseContext *context,
 		state->blacklist_file = g_realloc(state->blacklist_file,
 						curr_len + text_len + 1);
 		memcpy(&state->blacklist_file[curr_len], text, text_len + 1);
-		
 	} else {
 		/* Whitespace is ignored; anything else triggers an error */
 		gsize i;
@@ -633,7 +632,7 @@ static int append_config(const gchar *config_file)
 		r = -EINVAL;
 		goto out;
 	}
-	
+
 	if (!g_markup_parse_context_parse(ctxt, buf, len, &error) ||
 		!g_markup_parse_context_end_parse(ctxt, &error)) {
 		DBG("Cannot parse configuration file '%s': %s",

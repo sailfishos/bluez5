@@ -142,7 +142,7 @@ static void test_blacklist_reading_valid_blacklists(void)
 						strlen(test_blacklists[i]),
 						NULL) == TRUE);
 		g_assert(blacklist_add("/home/nemo", tmplate) == 0);
-		
+
 		/* Check data is as expected */
 		g_assert_cmpint(g_slist_length(blacklists), ==, 1);
 		data = blacklists->data;

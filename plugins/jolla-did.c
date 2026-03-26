@@ -36,8 +36,8 @@
 #include <ctype.h>
 #include <glib.h>
 
-#include "lib/bluetooth.h"
-#include "lib/sdp.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/sdp.h"
 #include "src/plugin.h"
 #include "src/log.h"
 #include "src/adapter.h"
@@ -289,7 +289,7 @@ static int jolla_did_init(void)
 			/* Need to push the version to adapters (for
 			   EIR) as well as SDP server */
 
-			adapter_foreach(set_did, NULL);
+			btd_adapter_foreach(set_did, NULL);
 			update_device_id(btd_opts.did_vendor,
 						btd_opts.did_product,
 						btd_opts.did_version,

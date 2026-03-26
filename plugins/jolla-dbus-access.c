@@ -133,7 +133,7 @@ static void pid_query_result(DBusPendingCall *pend,
 
 	DBG("query done, pid %d has gid %d", pid, st.st_gid);
 
-	name_watch = g_dbus_add_disconnect_watch(check->connection, 
+	name_watch = g_dbus_add_disconnect_watch(check->connection,
 						check->busname,
 						busname_exit_callback,
 						g_strdup(check->busname),
