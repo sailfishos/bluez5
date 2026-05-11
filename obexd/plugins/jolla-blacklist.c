@@ -403,7 +403,7 @@ static void start_storage(struct parser_state *state,
 			if (attr_value[i][0] != G_DIR_SEPARATOR) {
 				*error = g_error_new(G_MARKUP_ERROR,
 						G_MARKUP_ERROR_INVALID_CONTENT,
-						"Relative path");
+						"Not absolute path: '%s'", attr_value[i]);
 				return;
 			}
 			state->storage_path = trimmed_string(attr_value[i]);
