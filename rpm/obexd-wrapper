@@ -8,4 +8,4 @@ if [ -f /etc/obexd.conf ]; then
     . /etc/obexd.conf
 fi
 
-exec /usr/libexec/bluetooth/obexd -n $TRACING $OBEXD_ARGUMENTS
+exec /usr/libexec/bluetooth/obexd -n $TRACING $OBEXD_ARGUMENTS 2>/dev/null

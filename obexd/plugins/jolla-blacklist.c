@@ -400,13 +400,23 @@ static void start_storage(struct parser_state *state,
 						"Duplicate path attribute");
 				return;
 			}
-			if (attr_value[i][0] != G_DIR_SEPARATOR) {
+			GString *path = g_string_new(attr_value[i]);
+			if (g_strstr_len(path->str, -1, "%u")) {
+				g_string_replace(path, "%u", getenv("USER"), 0);
+			}
+
+			if (g_strstr_len(path->str, -1, "%h")) {
+				g_string_replace(path, "%h", getenv("HOME"), 0);
+			}
+			if (path->str[0] != G_DIR_SEPARATOR) {
 				*error = g_error_new(G_MARKUP_ERROR,
 						G_MARKUP_ERROR_INVALID_CONTENT,
-						"Relative path");
+						"Not absolute path: '%s'", attr_value[i]);
+				g_string_free(path, TRUE);
 				return;
 			}
-			state->storage_path = trimmed_string(attr_value[i]);
+			state->storage_path = trimmed_string(path->str);
+			g_string_free(path, TRUE);
 		} else if (!strcasecmp(attr_name[i], "name")) {
 			/* Ignore */
 		} else if (!strcasecmp(attr_name[i], "description")) {
