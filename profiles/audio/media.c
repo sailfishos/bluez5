@@ -138,12 +138,14 @@ struct media_endpoint {
 	guint			watch;
 	GSList			*requests;
 	struct media_adapter	*adapter;
+	struct media_app	*app;
 	GSList			*transports;
 	struct endpoint_features	features;
 };
 
 struct local_player {
 	struct media_adapter	*adapter;
+	struct media_app	*app;
 	char			*sender;	/* Player DBus bus id */
 	char			*path;		/* Player object path */
 	GHashTable		*settings;	/* Player settings */
@@ -307,6 +309,11 @@ static void media_endpoint_remove(void *data)
 		return;
 	}
 #endif
+
+	if (endpoint->app) {
+		queue_remove(endpoint->app->endpoints, endpoint);
+		endpoint->app = NULL;
+	}
 
 	info("Endpoint unregistered: sender=%s path=%s", endpoint->sender,
 			endpoint->path);
@@ -2079,6 +2086,11 @@ static void local_player_remove(void *data)
 {
 	struct local_player *mp = data;
 
+	if (mp->app) {
+		queue_remove(mp->app->players, mp);
+		mp->app = NULL;
+	}
+
 	info("Player unregistered: sender=%s path=%s", mp->sender, mp->path);
 
 	local_player_destroy(mp);
@@ -3200,6 +3212,8 @@ static void app_register_endpoint(void *data, void *user_data)
 		return;
 	}
 
+	endpoint->app = app;
+
 	queue_push_tail(app->endpoints, endpoint);
 
 	return;
@@ -3227,6 +3241,8 @@ static void app_register_player(void *data, void *user_data)
 							&app->err);
 	if (!player)
 		return;
+
+	player->app = app;
 
 	if (g_dbus_proxy_get_property(proxy, "PlaybackStatus", &iter)) {
 		if (!set_status(player, &iter))
