@@ -20,10 +20,6 @@
 #include "src/shared/gatt-helpers.h"
 #include "src/shared/util.h"
 
-#ifndef MIN
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-#endif
-
 struct bt_gatt_result {
 	uint8_t opcode;
 	void *pdu;
@@ -788,6 +784,22 @@ static void find_by_type_val_cb(uint8_t opcode, const void *pdu,
 
 done:
 	discovery_op_complete(op, success, att_ecode);
+}
+
+uint16_t bt_gatt_req_get_start_handle(struct bt_gatt_request *req)
+{
+	if (!req)
+		return 0;
+
+	return req->start_handle;
+}
+
+uint16_t bt_gatt_req_get_end_handle(struct bt_gatt_request *req)
+{
+	if (!req)
+		return 0;
+
+	return req->end_handle;
 }
 
 static struct bt_gatt_request *discover_services(struct bt_att *att,

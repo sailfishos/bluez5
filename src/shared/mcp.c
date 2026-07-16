@@ -343,6 +343,11 @@ static void write_media_cp(struct gatt_db_attribute *attrib,
 		rsp.result = BT_MCS_RESULT_OP_NOT_SUPPORTED;
 		goto respond;
 	}
+	if (cmd->int32_arg && !util_iov_pull_le32(&iov, (uint32_t *)&arg)) {
+		ret = BT_ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LEN;
+		rsp.op = 0;
+		goto respond;
+	}
 
 	DBG_MCS(mcs, "Command %s", cmd->name);
 
@@ -566,19 +571,20 @@ static bool match_session_att(const void *data, const void *match_data)
 static void session_destroy(void *data)
 {
 	struct bt_mcs_session *session = data;
+	struct bt_mcs *mcs = session->mcs;
 
-	bt_att_unregister_disconnect(session->att, session->disconn_id);
+	if (mcs)
+		queue_remove(mcs->sessions, session);
 	queue_destroy(session->changed, NULL);
 	free(session);
 }
 
-static void session_disconnect(int err, void *user_data)
+static void session_remove(void *user_data)
 {
 	struct bt_mcs_session *session = user_data;
-	struct bt_mcs *mcs = session->mcs;
 
-	queue_remove(mcs->sessions, session);
-	session_destroy(session);
+	session->mcs = NULL;
+	bt_att_unregister_disconnect(session->att, session->disconn_id);
 }
 
 static struct bt_mcs_session *get_session(struct bt_mcs *mcs,
@@ -591,8 +597,8 @@ static struct bt_mcs_session *get_session(struct bt_mcs *mcs,
 		return session;
 
 	session = new0(struct bt_mcs_session, 1);
-	session->disconn_id = bt_att_register_disconnect(att,
-					session_disconnect, session, NULL);
+	session->disconn_id = bt_att_register_disconnect(att, NULL, session,
+							session_destroy);
 	if (!session->disconn_id) {
 		free(session);
 		return NULL;
@@ -1036,7 +1042,7 @@ void bt_mcs_unregister(struct bt_mcs *mcs)
 		servers = NULL;
 	}
 
-	queue_destroy(mcs->sessions, session_destroy);
+	queue_destroy(mcs->sessions, session_remove);
 
 	free(mcs);
 }

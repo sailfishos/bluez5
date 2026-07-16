@@ -39,6 +39,15 @@ struct packet_frame {
 	size_t len;
 };
 
+enum {
+	BTMON_CONN_ACL = 0x00,
+	BTMON_CONN_LE,
+	BTMON_CONN_SCO,
+	BTMON_CONN_ESCO,
+	BTMON_CONN_CIS,
+	BTMON_CONN_BIS
+};
+
 struct packet_conn_data {
 	uint16_t index;
 	uint8_t  src[6];
@@ -47,6 +56,10 @@ struct packet_conn_data {
 	uint8_t  type;
 	uint8_t  dst[6];
 	uint8_t  dst_type;
+	union {
+		char *dst_oui;
+		char *dst_rtype;
+	};
 	struct queue *tx_q;
 	struct queue *chan_q;
 	struct packet_latency tx_l;
@@ -105,8 +118,8 @@ void packet_index_info(struct timeval *tv, uint16_t index, const char *label,
 void packet_vendor_diag(struct timeval *tv, uint16_t index,
 					uint16_t manufacturer,
 					const void *data, uint16_t size);
-void packet_system_note(struct timeval *tv, struct ucred *cred,
-					uint16_t index, const void *message);
+void packet_system_note(struct timeval *tv, struct ucred *cred, uint16_t index,
+					const void *data, uint16_t size);
 void packet_user_logging(struct timeval *tv, struct ucred *cred,
 					uint16_t index, uint8_t priority,
 					const char *ident, const void *data,

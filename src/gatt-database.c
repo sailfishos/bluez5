@@ -54,10 +54,6 @@
 #define UUID_GATT	0x1801
 #define UUID_DIS	0x180a
 
-#ifndef MIN
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-#endif
-
 struct gatt_record {
 	struct btd_gatt_database *database;
 	uint32_t handle;
@@ -1450,7 +1446,7 @@ static void send_notification_to_device(void *data, void *user_data)
 	 * TODO: If the device is not connected but bonded, send the
 	 * notification/indication when it becomes connected.
 	 */
-	if (!(ccc->value & 0x0002)) {
+	if (ccc->value & 0x0001) {
 		DBG("GATT server sending notification");
 		bt_gatt_server_send_notification(server,
 					notify->handle, notify->value,
@@ -3628,7 +3624,9 @@ static void add_profile(void *data, void *user_data)
 {
 	struct btd_adapter *adapter = user_data;
 
-	btd_profile_register(data);
+	if (btd_profile_register(data))
+		return;
+
 	adapter_add_profile(adapter, data);
 }
 
@@ -4146,6 +4144,8 @@ void btd_gatt_database_destroy(struct btd_gatt_database *database)
 	g_dbus_unregister_interface(btd_get_dbus_connection(),
 					adapter_get_path(database->adapter),
 					GATT_MANAGER_IFACE);
+
+	queue_remove(dbs, database);
 
 	gatt_database_free(database);
 }

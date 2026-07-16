@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 AC_PREREQ(2.60)
-AC_INIT(bluez, 5.86)
+AC_INIT(bluez, 5.87)
 
 AM_INIT_AUTOMAKE([foreign subdir-objects color-tests silent-rules
 					tar-pax no-dist-gzip dist-xz])
@@ -306,7 +306,9 @@ fi
 AC_ARG_ENABLE(obex, AS_HELP_STRING([--disable-obex],
 		[disable OBEX profile support]), [enable_obex=${enableval}])
 if (test "${enable_obex}" != "no"); then
-	PKG_CHECK_MODULES(ICAL, libical)
+	PKG_CHECK_MODULES(ICAL, [libicalvcal >= 4.0.0], [],
+                [PKG_CHECK_MODULES(ICAL, [libical])]
+        )
 fi
 AM_CONDITIONAL(OBEX, test "${enable_obex}" != "no")
 
@@ -319,6 +321,13 @@ AC_ARG_ENABLE([external_ell], AS_HELP_STRING([--enable-external-ell],
 					[enable_external_ell=${enableval}])
 if (test "${enable_external_ell}" = "yes"); then
 	PKG_CHECK_MODULES(ELL, ell >= 0.39)
+fi
+if (test "${enable_external_ell}" != "yes" &&
+		(test "${enable_btpclient}" = "yes" || test "${enable_mesh}" = "yes")); then
+	if (test ! -f ${srcdir}/ell/ell.h) &&
+			(test ! -f ${srcdir}/../ell/ell/ell.h); then
+				AC_MSG_ERROR(ELL source is required or use --enable-external-ell)
+	fi
 fi
 AM_CONDITIONAL(EXTERNAL_ELL, test "${enable_external_ell}" = "yes" ||
 				(test "${enable_btpclient}" != "yes" &&

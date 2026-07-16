@@ -26,6 +26,7 @@
 #define BTP_GATT_SERVICE	2
 #define BTP_L2CAP_SERVICE	3
 #define BTP_MESH_NODE_SERVICE	4
+#define BTP_BAP_SERVICE		14
 
 struct btp_hdr {
 	uint8_t service;
@@ -81,6 +82,8 @@ struct btp_gap_read_index_rp {
 #define BTP_GAP_SETTING_PRIVACY			0x00002000
 #define BTP_GAP_SETTING_CONTROLLER_CONF		0x00004000
 #define BTP_GAP_SETTING_STATIC_ADDRESS		0x00008000
+#define BTP_GAP_SETTINGS_SC_ONLY		0x00010000
+#define BTP_GAP_SETTINGS_EXTENDED_ADVERTISING	0x00020000
 
 #define BTP_OP_GAP_READ_CONTROLLER_INFO		0x03
 struct btp_gap_read_info_rp {
@@ -223,6 +226,11 @@ struct btp_gap_passkey_confirm_rsp_cp {
 	uint8_t match;
 } __packed;
 
+#define BTP_OP_GAP_SET_EXTENDED_ADVERTISING	0x21
+struct btp_gap_set_extended_advertising_cp {
+	uint8_t settings;
+} __packed;
+
 #define BTP_EV_GAP_NEW_SETTINGS			0x80
 struct btp_new_settings_ev {
 	uint32_t current_settings;
@@ -283,6 +291,142 @@ struct btp_gap_identity_resolved_ev {
 	bdaddr_t address;
 	uint8_t identity_address_type;
 	bdaddr_t identity_address;
+} __packed;
+
+struct btp_gatt_service {
+	uint16_t start_handle;
+	uint16_t end_handle;
+	uint8_t uuid_length;
+	uint8_t uuid[];
+} __packed;
+
+struct btp_gatt_characteristic {
+	uint16_t characteristic_handle;
+	uint16_t value_handle;
+	uint8_t properties;
+	uint8_t uuid_length;
+	uint8_t uuid[];
+} __packed;
+
+struct btp_gatt_descriptor {
+	uint16_t descriptor_handle;
+	uint8_t uuid_length;
+	uint8_t uuid[];
+} __packed;
+
+struct btp_gatt_char_value {
+	uint16_t handle;
+	uint8_t data_len;
+	uint8_t data[];
+} __packed;
+
+#define BTP_OP_GATT_READ_SUPPORTED_COMMANDS	0x01
+
+#define BTP_OP_GATT_DISC_PRIM_UUID		0x0c
+struct btp_gatt_disc_prim_uuid_cp {
+	uint8_t address_type;
+	bdaddr_t address;
+	uint8_t uuid_length;
+	uint8_t uuid[];
+} __packed;
+
+struct btp_gatt_disc_prim_rp {
+	uint8_t services_count;
+	struct btp_gatt_service services[];
+} __packed;
+
+struct btp_gatt_disc_chrc_rp {
+	uint8_t characteristics_count;
+	struct btp_gatt_characteristic characteristics[];
+} __packed;
+
+#define BTP_OP_GATT_DISC_CHRC_UUID		0x0f
+struct btp_gatt_disc_chrc_uuid_cp {
+	uint8_t address_type;
+	bdaddr_t address;
+	uint16_t start_handle;
+	uint16_t end_handle;
+	uint8_t uuid_length;
+	uint8_t uuid[];
+} __packed;
+
+#define BTP_OP_GATT_DISC_ALL_DESC		0x10
+struct btp_gatt_disc_all_desc_cp {
+	uint8_t address_type;
+	bdaddr_t address;
+	uint16_t start_handle;
+	uint16_t end_handle;
+} __packed;
+
+struct btp_gatt_disc_all_desc_rp {
+	uint8_t descriptors_count;
+	struct btp_gatt_descriptor descriptors[];
+} __packed;
+
+#define BTP_OP_GATT_READ			0x11
+struct btp_gatt_read_cp {
+	uint8_t address_type;
+	bdaddr_t address;
+	uint16_t handle;
+} __packed;
+
+struct btp_gatt_read_rp {
+	uint8_t response;
+	uint16_t len;
+	uint8_t data[];
+} __packed;
+
+#define BTP_OP_GATT_READ_UUID			0x12
+struct btp_gatt_read_uuid_cp {
+	uint8_t address_type;
+	bdaddr_t address;
+	uint16_t start_handle;
+	uint16_t end_handle;
+	uint8_t uuid_len;
+	uint8_t uuid[];
+} __packed;
+
+struct btp_gatt_read_uuid_rp {
+	uint8_t att_response;
+	uint8_t values_count;
+	struct btp_gatt_char_value values[];
+} __packed;
+
+#define BTP_OP_GATT_WRITE_WITHOUT_RSP		0x15
+struct btp_gatt_write_without_rsp_cp {
+	uint8_t address_type;
+	bdaddr_t address;
+	uint16_t handle;
+	uint16_t len;
+	uint8_t data[];
+} __packed;
+
+#define BTP_OP_GATT_WRITE			0x17
+struct btp_gatt_write_cp {
+	uint8_t address_type;
+	bdaddr_t address;
+	uint16_t handle;
+	uint16_t len;
+	uint8_t data[];
+} __packed;
+
+struct btp_gatt_write_rp {
+	uint8_t att_response;
+} __packed;
+
+#define BTP_OP_BAP_READ_SUPPORTED_COMMANDS	0x01
+
+#define BTP_OP_BAP_DISCOVER			0x02
+struct btp_bap_discover_cp {
+	uint8_t address_type;
+	bdaddr_t address;
+} __packed;
+
+#define BTP_EV_BAP_DISCOVERY_COMPLETED		0x80
+struct btp_bap_discovery_completed_ev {
+	uint8_t address_type;
+	bdaddr_t address;
+	uint8_t status;
 } __packed;
 
 struct btp;

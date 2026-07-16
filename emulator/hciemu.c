@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <errno.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
@@ -59,6 +60,18 @@ struct hciemu {
 
 	unsigned int flush_id;
 };
+
+static void hciemu_debug(struct hciemu *hciemu, const char *format, ...)
+{
+	va_list ap;
+
+	if (!hciemu || !format || !hciemu->debug_callback)
+		return;
+
+	va_start(ap, format);
+	util_debug_va(hciemu->debug_callback, hciemu->debug_data, format, ap);
+	va_end(ap);
+}
 
 struct hciemu_command_hook {
 	hciemu_command_func_t function;
@@ -118,8 +131,35 @@ static void writev_callback(const struct iovec *iov, int iovlen,
 	fd = g_io_channel_unix_get_fd(channel);
 
 	written = writev(fd, iov, iovlen);
-	if (written < 0)
-		return;
+	if (written < 0) {
+		ssize_t ret;
+		int size, data_len;
+		socklen_t len = sizeof(size);
+		int i;
+
+		if (errno != EAGAIN)
+			return;
+
+		data_len = 0;
+
+		for (i = 0; i < iovlen; i++)
+			data_len += iov[i].iov_len;
+
+		/* Automatically bump the send buffer size if the data to be
+		 * sent is larger than the current buffer size. This is needed
+		 * for btdev which doesn't flush the socket buffer until all
+		 * data has been sent.
+		 */
+		ret = getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, &len);
+		if (!ret) {
+			size += data_len;
+			setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, len);
+		}
+
+		written = writev(fd, iov, iovlen);
+		if (written < 0)
+			return;
+	}
 }
 
 static gboolean receive_bthost(GIOChannel *channel, GIOCondition condition,
@@ -222,8 +262,10 @@ static bool create_vhci(struct hciemu *hciemu)
 	struct vhci *vhci;
 
 	vhci = vhci_open(hciemu->btdev_type);
-	if (!vhci)
+	if (!vhci) {
+		hciemu_debug(hciemu, "Failed to open vhci");
 		return false;
+	}
 
 	btdev_set_command_handler(vhci_get_btdev(vhci),
 					central_command_callback, hciemu);
@@ -316,12 +358,14 @@ static struct hciemu_client *hciemu_client_new(struct hciemu *hciemu,
 
 	client->dev = btdev_create(hciemu->btdev_type, id++);
 	if (!client->dev) {
+		hciemu_debug(hciemu, "Failed to create btdev");
 		free(client);
 		return NULL;
 	}
 
 	client->host = bthost_create();
 	if (!client->host) {
+		hciemu_debug(hciemu, "Failed to create bthost");
 		btdev_destroy(client->dev);
 		free(client);
 		return NULL;
@@ -331,6 +375,8 @@ static struct hciemu_client *hciemu_client_new(struct hciemu *hciemu,
 
 	if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC,
 								0, sv) < 0) {
+		hciemu_debug(hciemu, "Failed to create socketpair: %s",
+							strerror(errno));
 		bthost_destroy(client->host);
 		btdev_destroy(client->dev);
 		return NULL;
@@ -350,7 +396,9 @@ static struct hciemu_client *hciemu_client_new(struct hciemu *hciemu,
 	return client;
 }
 
-struct hciemu *hciemu_new_num(enum hciemu_type type, uint8_t num)
+struct hciemu *hciemu_new_num_debug(enum hciemu_type type, uint8_t num,
+			hciemu_debug_func_t callback, void *user_data,
+			hciemu_destroy_func_t destroy)
 {
 
 	struct hciemu *hciemu;
@@ -362,6 +410,10 @@ struct hciemu *hciemu_new_num(enum hciemu_type type, uint8_t num)
 	hciemu = new0(struct hciemu, 1);
 	if (!hciemu)
 		return NULL;
+
+	hciemu->debug_callback = callback;
+	hciemu->debug_destroy = destroy;
+	hciemu->debug_data = user_data;
 
 	switch (type) {
 	case HCIEMU_TYPE_BREDRLE:
@@ -408,7 +460,9 @@ struct hciemu *hciemu_new_num(enum hciemu_type type, uint8_t num)
 
 		if (!client) {
 			queue_destroy(hciemu->clients, hciemu_client_destroy);
-			break;
+			queue_destroy(hciemu->post_command_hooks, NULL);
+			free(hciemu);
+			return NULL;
 		}
 
 		queue_push_tail(hciemu->clients, client);
@@ -417,9 +471,21 @@ struct hciemu *hciemu_new_num(enum hciemu_type type, uint8_t num)
 	return hciemu_ref(hciemu);
 }
 
+struct hciemu *hciemu_new_num(enum hciemu_type type, uint8_t num)
+{
+	return hciemu_new_num_debug(type, num, NULL, NULL, NULL);
+}
+
 struct hciemu *hciemu_new(enum hciemu_type type)
 {
 	return hciemu_new_num(type, 1);
+}
+
+struct hciemu *hciemu_new_debug(enum hciemu_type type,
+			hciemu_debug_func_t callback, void *user_data,
+			hciemu_destroy_func_t destroy)
+{
+	return hciemu_new_num_debug(type, 1, callback, user_data, destroy);
 }
 
 struct hciemu *hciemu_ref(struct hciemu *hciemu)

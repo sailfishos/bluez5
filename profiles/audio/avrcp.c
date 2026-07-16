@@ -263,6 +263,8 @@ struct avrcp_data {
 	int features;
 	uint16_t obex_port;
 	GSList *players;
+	uint16_t registered_events;
+	uint8_t transaction_events[AVRCP_EVENT_LAST + 1];
 };
 
 struct avrcp {
@@ -280,9 +282,7 @@ struct avrcp {
 	unsigned int browsing_id;
 	unsigned int browsing_timer;
 	uint16_t supported_events;
-	uint16_t registered_events;
 	uint8_t transaction;
-	uint8_t transaction_events[AVRCP_EVENT_LAST + 1];
 	struct pending_pdu *pending_pdu;
 };
 
@@ -850,13 +850,14 @@ done:
 
 	for (l = player->sessions; l; l = l->next) {
 		struct avrcp *session = l->data;
+		struct avrcp_data *target = session->target;
 		int err;
 
-		if (!(session->registered_events & (1 << id)))
+		if (!target || !(target->registered_events & (1 << id)))
 			continue;
 
 		err = avctp_send_vendordep(session->conn,
-					session->transaction_events[id],
+					target->transaction_events[id],
 					code, AVC_SUBUNIT_PANEL,
 					buf, size + AVRCP_HEADER_LENGTH);
 
@@ -864,7 +865,7 @@ done:
 			continue;
 
 		/* Unregister event as per AVRCP 1.3 spec, section 5.4.2 */
-		session->registered_events ^= 1 << id;
+		target->registered_events ^= 1 << id;
 	}
 
 	return;
@@ -1666,6 +1667,12 @@ static uint8_t avrcp_handle_register_notification(struct avrcp *session,
 	if (!(session->supported_events & (1 << pdu->params[0])))
 		goto err;
 
+	if (!session->target) {
+		pdu->params_len = cpu_to_be16(1);
+		pdu->params[0] = AVRCP_STATUS_INVALID_COMMAND;
+		return AVC_CTYPE_REJECTED;
+	}
+
 	switch (pdu->params[0]) {
 	case AVRCP_EVENT_STATUS_CHANGED:
 		len = 2;
@@ -1708,8 +1715,8 @@ static uint8_t avrcp_handle_register_notification(struct avrcp *session,
 	}
 
 	/* Register event and save the transaction used */
-	session->registered_events |= (1 << pdu->params[0]);
-	session->transaction_events[pdu->params[0]] = transaction;
+	session->target->registered_events |= (1 << pdu->params[0]);
+	session->target->transaction_events[pdu->params[0]] = transaction;
 
 	pdu->params_len = cpu_to_be16(len);
 
@@ -2488,6 +2495,24 @@ static void avrcp_parse_attribute_list(struct avrcp_player *player,
 	}
 }
 
+static void avrcp_abort_continuing(struct avrcp *session, uint8_t pdu_id)
+{
+	uint8_t buf[AVRCP_HEADER_LENGTH + 1];
+	struct avrcp_header *pdu = (void *) buf;
+
+	memset(buf, 0, sizeof(buf));
+
+	set_company_id(pdu->company_id, IEEEID_BTSIG);
+	pdu->pdu_id = AVRCP_ABORT_CONTINUING;
+	pdu->packet_type = AVRCP_PACKET_TYPE_SINGLE;
+	pdu->params_len = cpu_to_be16(1);
+	pdu->params[0] = pdu_id;
+
+	avctp_send_vendordep_req(session->conn, AVC_CTYPE_CONTROL,
+					AVC_SUBUNIT_PANEL, buf, sizeof(buf),
+					NULL, session);
+}
+
 static gboolean avrcp_get_element_attributes_rsp(struct avctp *conn,
 						uint8_t code, uint8_t subunit,
 						uint8_t transaction,
@@ -2504,6 +2529,13 @@ static gboolean avrcp_get_element_attributes_rsp(struct avctp *conn,
 
 	if (code == AVC_CTYPE_REJECTED)
 		return FALSE;
+
+	/* Abort fragmented responses as reassembly is not supported */
+	if (pdu->packet_type == AVRCP_PACKET_TYPE_START ||
+			pdu->packet_type == AVRCP_PACKET_TYPE_CONTINUING) {
+		avrcp_abort_continuing(session, AVRCP_GET_ELEMENT_ATTRIBUTES);
+		return FALSE;
+	}
 
 	count = pdu->params[0];
 
@@ -3965,10 +3997,14 @@ static gboolean avrcp_handle_event(struct avctp *conn, uint8_t code,
 					void *user_data)
 {
 	struct avrcp *session = user_data;
+	struct avrcp_data *controller = session->controller;
 	struct avrcp_header *pdu = (void *) operands;
 	uint8_t event;
 
 	if (!pdu)
+		return FALSE;
+
+	if (!controller)
 		return FALSE;
 
 	if ((code != AVC_CTYPE_INTERIM && code != AVC_CTYPE_CHANGED)) {
@@ -3978,7 +4014,7 @@ static gboolean avrcp_handle_event(struct avctp *conn, uint8_t code,
 
 			/* Lookup event by transaction */
 			for (i = 0; i <= AVRCP_EVENT_LAST; i++) {
-				if (session->transaction_events[i] ==
+				if (controller->transaction_events[i] ==
 								transaction) {
 					event = i;
 					goto changed;
@@ -4030,14 +4066,14 @@ static gboolean avrcp_handle_event(struct avctp *conn, uint8_t code,
 		break;
 	}
 
-	session->registered_events |= (1 << event);
-	session->transaction_events[event] = transaction;
+	controller->registered_events |= (1 << event);
+	controller->transaction_events[event] = transaction;
 
 	return TRUE;
 
 changed:
-	session->registered_events ^= (1 << event);
-	session->transaction_events[event] = 0;
+	controller->registered_events ^= (1 << event);
+	controller->transaction_events[event] = 0;
 	avrcp_register_notification(session, event);
 	return FALSE;
 }
@@ -4318,9 +4354,16 @@ static void target_init(struct avrcp *session)
 	if (target->version < 0x0104)
 		return;
 
-	if (avrcp_volume_supported(target))
+	if (avrcp_volume_supported(target)) {
 		session->supported_events |=
 				(1 << AVRCP_EVENT_VOLUME_CHANGED);
+		/* Check if transport volume hasn't been initialized then set it
+		 * to max so it works properly if the controller attempts to
+		 * subscribe to AVRCP_EVENT_VOLUME_CHANGED.
+		 */
+		if (media_transport_get_a2dp_volume(session->dev) < 0)
+			media_transport_set_a2dp_volume(session->dev, 127);
+	}
 
 	session->supported_events |=
 				(1 << AVRCP_EVENT_ADDRESSED_PLAYER_CHANGED) |
@@ -4682,7 +4725,7 @@ static int avrcp_event(struct avrcp *session, uint8_t id, const void *data)
 	int err;
 
 	/* Verify that the event is registered */
-	if (!(session->registered_events & (1 << id)))
+	if (!session ||	!(session->target->registered_events & (1 << id)))
 		return -ENOENT;
 
 	memset(buf, 0, sizeof(buf));
@@ -4707,21 +4750,22 @@ static int avrcp_event(struct avrcp *session, uint8_t id, const void *data)
 	pdu->params_len = cpu_to_be16(size);
 
 	err = avctp_send_vendordep(session->conn,
-					session->transaction_events[id],
+					session->target->transaction_events[id],
 					code, AVC_SUBUNIT_PANEL,
 					buf, size + AVRCP_HEADER_LENGTH);
 	if (err < 0)
 		return err;
 
 	/* Unregister event as per AVRCP 1.3 spec, section 5.4.2 */
-	session->registered_events ^= 1 << id;
+	session->target->registered_events ^= 1 << id;
 
 	return err;
 }
 
-static bool avrcp_event_registered(struct avrcp *session, uint8_t event)
+static bool avrcp_target_event_registered(struct avrcp *session, uint8_t event)
 {
-	return session->registered_events & (1 << event);
+	return session->target &&
+			session->target->registered_events & (1 << event);
 }
 
 int avrcp_set_volume(struct btd_device *dev, int8_t volume, bool notify)
@@ -4756,7 +4800,8 @@ int avrcp_set_volume(struct btd_device *dev, int8_t volume, bool notify)
 		 * for it), allow the call to pass through if the remote
 		 * controller registered for a volume changed event.
 		 */
-		if (!session->controller && !avrcp_event_registered(session,
+		if (!session->controller &&
+				!avrcp_target_event_registered(session,
 						AVRCP_EVENT_VOLUME_CHANGED))
 			return -ENOTSUP;
 	} else if (!avrcp_volume_supported(session->controller)) {
@@ -4989,8 +5034,17 @@ static struct btd_profile avrcp_controller_profile = {
 
 static int avrcp_init(void)
 {
-	btd_profile_register(&avrcp_controller_profile);
-	btd_profile_register(&avrcp_target_profile);
+	int err;
+
+	err = btd_profile_register(&avrcp_controller_profile);
+	if (err)
+		return err;
+
+	err = btd_profile_register(&avrcp_target_profile);
+	if (err) {
+		btd_profile_unregister(&avrcp_controller_profile);
+		return err;
+	}
 
 	populate_default_features();
 

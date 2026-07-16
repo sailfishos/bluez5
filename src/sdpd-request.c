@@ -40,8 +40,6 @@ typedef struct {
 
 #define SDP_CONT_STATE_SIZE (sizeof(uint8_t) + sizeof(sdp_cont_state_t))
 
-#define MIN(x, y) ((x) < (y)) ? (x): (y)
-
 typedef struct sdp_cont_info sdp_cont_info_t;
 
 struct sdp_cont_info {
@@ -265,6 +263,7 @@ static int extract_des(uint8_t *buf, int len, sdp_list_t **svcReqSeq, uint8_t *p
 			pSeq = sdp_list_append(pSeq, pElem);
 			numberOfElements++;
 			SDPDBG("No of elements : %d", numberOfElements);
+			(void)numberOfElements;
 
 			if (seqlen == data_size)
 				break;

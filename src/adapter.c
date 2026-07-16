@@ -42,7 +42,6 @@
 #include "log.h"
 #include "textfile.h"
 
-#include "src/shared/mgmt.h"
 #include "src/shared/util.h"
 #include "src/shared/queue.h"
 #include "src/shared/att.h"
@@ -3687,14 +3686,6 @@ struct device_connect_data {
 	DBusMessage *msg;
 };
 
-static void device_browse_cb(struct btd_device *dev, int err, void *user_data)
-{
-	DBG("err %d (%s)", err, strerror(-err));
-
-	if (!err)
-		btd_device_connect_services(dev, NULL);
-}
-
 static void device_connect_cb(GIOChannel *io, GError *gerr, gpointer user_data)
 {
 	struct device_connect_data *data = user_data;
@@ -3726,8 +3717,7 @@ static void device_connect_cb(GIOChannel *io, GError *gerr, gpointer user_data)
 		device_attach_att(device, io);
 	}
 
-	device_discover_services(device);
-	device_wait_for_svc_complete(device, device_browse_cb, NULL);
+	device_discover_services(device, data->dst_type, NULL);
 
 	g_io_channel_unref(io);
 	dbus_message_unref(data->msg);
@@ -3768,7 +3758,7 @@ static void device_connect(struct btd_adapter *adapter, const bdaddr_t *dst,
 				BT_IO_OPT_SOURCE_TYPE, adapter->bdaddr_type,
 				BT_IO_OPT_DEST_BDADDR, dst,
 				BT_IO_OPT_DEST_TYPE, dst_type,
-				BT_IO_OPT_CID, ATT_CID,
+				BT_IO_OPT_CID, BT_ATT_CID,
 				BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_LOW,
 				BT_IO_OPT_INVALID);
 
@@ -4965,8 +4955,11 @@ static void load_defaults(struct btd_adapter *adapter)
 	if (!load_le_defaults(adapter, list, &btd_opts.defaults.le))
 		goto done;
 
-	if (mgmt_tlv_list_size(list) == 0)
-		goto done;
+	/* No changes from defaults */
+	if (mgmt_tlv_list_size(list) == 0) {
+		mgmt_tlv_list_free(list);
+		return;
+	}
 
 	err = mgmt_send_tlv(adapter->mgmt, MGMT_OP_SET_DEF_SYSTEM_CONFIG,
 			adapter->dev_id, list, NULL, NULL, NULL);
@@ -7170,20 +7163,21 @@ static void confirm_name(struct btd_adapter *adapter, const bdaddr_t *bdaddr,
 
 static void adapter_msd_notify(struct btd_adapter *adapter,
 							struct btd_device *dev,
-							GSList *msd_list)
+							struct queue *msd_list)
 {
 	GSList *cb_l, *cb_next;
-	GSList *msd_l, *msd_next;
+	const struct queue_entry *msd_l, *msd_next;
 
 	for (cb_l = adapter->msd_callbacks; cb_l != NULL; cb_l = cb_next) {
 		btd_msd_cb_t cb = cb_l->data;
 
 		cb_next = g_slist_next(cb_l);
 
-		for (msd_l = msd_list; msd_l != NULL; msd_l = msd_next) {
+		for (msd_l = queue_get_entries(msd_list); msd_l != NULL;
+						msd_l = msd_next) {
 			const struct eir_msd *msd = msd_l->data;
 
-			msd_next = g_slist_next(msd_l);
+			msd_next = msd_l->next;
 
 			cb(adapter, dev, msd->company, msd->data,
 								msd->data_len);
@@ -7222,7 +7216,7 @@ static bool is_filter_match(GSList *discovery_filter, struct eir_data *eir_data,
 				/* m->data contains string representation of
 				 * uuid.
 				 */
-				if (g_slist_find_custom(eir_data->services,
+				if (queue_find(eir_data->services,
 							m->data,
 							g_strcmp) != NULL)
 					got_match = true;
@@ -7295,7 +7289,7 @@ static bool device_is_discoverable(struct btd_adapter *adapter,
 			return true;
 		}
 
-		if (!strncmp(filter->pattern, addr, pattern_len)) {
+		if (!strncasecmp(filter->pattern, addr, pattern_len)) {
 			*auto_connect = filter->auto_connect;
 			return true;
 		}
@@ -7367,6 +7361,14 @@ void btd_adapter_device_found(struct btd_adapter *adapter,
 	discoverable = device_is_discoverable(adapter, &eir_data, addr,
 						bdaddr_type, &auto_connect);
 
+	/* Monitor Devices advertising Broadcast Announcements if the
+	 * adapter is capable of synchronizing to it.
+	 */
+	if (eir_get_service_data(&eir_data, BCAA_SERVICE_UUID) &&
+					btd_adapter_has_settings(adapter,
+					MGMT_SETTING_ISO_SYNC_RECEIVER))
+		monitoring = true;
+
 	dev = btd_adapter_find_device(adapter, bdaddr, bdaddr_type);
 	if (!dev) {
 		/* In case of being just a scan response don't attempt to create
@@ -7376,14 +7378,6 @@ void btd_adapter_device_found(struct btd_adapter *adapter,
 			eir_data_free(&eir_data);
 			return;
 		}
-
-		/* Monitor Devices advertising Broadcast Announcements if the
-		 * adapter is capable of synchronizing to it.
-		 */
-		if (eir_get_service_data(&eir_data, BCAA_SERVICE_UUID) &&
-				btd_adapter_has_settings(adapter,
-				MGMT_SETTING_ISO_SYNC_RECEIVER))
-			monitoring = true;
 
 		/* If ISO  Socket is enabled, monitor Devices advertising RSI
 		 * since those can be coordinated sets not marked as visible but
@@ -8551,7 +8545,8 @@ static void pair_device_complete(uint8_t status, uint16_t length,
 }
 
 int adapter_create_bonding(struct btd_adapter *adapter, const bdaddr_t *bdaddr,
-					uint8_t addr_type, uint8_t io_cap)
+					uint8_t addr_type,
+					enum mgmt_io_capability io_cap)
 {
 	suspend_discovery(adapter);
 
@@ -8560,7 +8555,8 @@ int adapter_create_bonding(struct btd_adapter *adapter, const bdaddr_t *bdaddr,
 
 /* Starts a new bonding attempt in a fresh new bonding_req or a retried one. */
 int adapter_bonding_attempt(struct btd_adapter *adapter, const bdaddr_t *bdaddr,
-					uint8_t addr_type, uint8_t io_cap)
+						uint8_t addr_type,
+						enum mgmt_io_capability io_cap)
 {
 	struct mgmt_cp_pair_device cp;
 	char addr[18];
@@ -8629,7 +8625,9 @@ static void dev_disconnected(struct btd_adapter *adapter,
 		disconnect_notify(device, reason);
 	}
 
-	bonding_attempt_complete(adapter, &addr->bdaddr, addr->type,
+	/* device could be still connected to different bearer */
+	if (!device || !btd_device_is_connected(device))
+		bonding_attempt_complete(adapter, &addr->bdaddr, addr->type,
 						MGMT_STATUS_DISCONNECTED);
 }
 
@@ -9167,12 +9165,13 @@ static void new_conn_param(uint16_t index, uint16_t length,
 					ev->latency, ev->timeout);
 }
 
-int adapter_set_io_capability(struct btd_adapter *adapter, uint8_t io_cap)
+int adapter_set_io_capability(struct btd_adapter *adapter,
+						enum mgmt_io_capability io_cap)
 {
 	struct mgmt_cp_set_io_capability cp;
 
 	if (!btd_opts.pairable) {
-		if (io_cap == IO_CAPABILITY_INVALID) {
+		if (io_cap == MGMT_IO_CAPABILITY_INVALID) {
 			if (adapter->current_settings & MGMT_SETTING_BONDABLE)
 				set_mode(adapter, MGMT_OP_SET_BONDABLE, 0x00);
 
@@ -9181,8 +9180,8 @@ int adapter_set_io_capability(struct btd_adapter *adapter, uint8_t io_cap)
 
 		if (!(adapter->current_settings & MGMT_SETTING_BONDABLE))
 			set_mode(adapter, MGMT_OP_SET_BONDABLE, 0x01);
-	} else if (io_cap == IO_CAPABILITY_INVALID)
-		io_cap = IO_CAPABILITY_NOINPUTNOOUTPUT;
+	} else if (io_cap == MGMT_IO_CAPABILITY_INVALID)
+		io_cap = MGMT_IO_CAPABILITY_NOINPUTNOOUTPUT;
 
 	memset(&cp, 0, sizeof(cp));
 	cp.io_capability = io_cap;
@@ -9416,7 +9415,7 @@ static int adapter_register(struct btd_adapter *adapter)
 
 	agent = agent_get(NULL);
 	if (agent) {
-		uint8_t io_cap = agent_get_io_capability(agent);
+		enum mgmt_io_capability io_cap = agent_get_io_capability(agent);
 		adapter_set_io_capability(adapter, io_cap);
 		agent_unref(agent);
 	}
@@ -11038,4 +11037,32 @@ void btd_adapter_cancel_service_auth(struct btd_adapter *adapter,
 
 		service_auth_cancel(auth);
 	}
+}
+
+unsigned int btd_adapter_send_cmd_event_sync(struct btd_adapter *adapter,
+					uint16_t opcode,
+					uint16_t length, const void *param,
+					uint8_t event,
+					btd_adapter_reply_event_t callback,
+					void *user_data,
+					btd_adapter_destroy_func_t destroy,
+					uint8_t timeout)
+{
+	struct {
+		struct mgmt_cp_hci_cmd_sync cp;
+		uint8_t data[UINT8_MAX];
+	} pkt;
+
+	memset(&pkt, 0, sizeof(pkt));
+	pkt.cp.opcode = cpu_to_le16(opcode);
+	pkt.cp.event = event;
+	pkt.cp.timeout = timeout;
+	pkt.cp.params_len = cpu_to_le16(length);
+
+	if (length)
+		memcpy(pkt.data, param, length);
+
+	return mgmt_send(adapter->mgmt, MGMT_OP_HCI_CMD_SYNC,
+				adapter->dev_id, sizeof(pkt.cp) + length,
+				&pkt, callback, user_data, destroy);
 }

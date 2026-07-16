@@ -1390,8 +1390,19 @@ static void add_client_complete(struct btd_adv_client *client, uint8_t status)
 		queue_remove(client->manager->clients, client);
 		g_idle_add(client_free_idle_cb, client);
 
-	} else
+	} else {
+		DBusMessageIter iter;
+
+		/* Check if the attribute has the Instance property */
+		if (g_dbus_proxy_get_property(client->proxy, "Instance",
+								&iter)) {
+			g_dbus_proxy_set_property_basic(client->proxy,
+				"Instance", DBUS_TYPE_BYTE, &client->instance,
+				NULL, NULL, NULL);
+		}
+
 		reply = dbus_message_new_method_return(client->reg);
+	}
 
 	g_dbus_send_message(btd_get_dbus_connection(), reply);
 	dbus_message_unref(client->reg);
@@ -1487,8 +1498,7 @@ static void add_adv_params_callback(uint8_t status, uint16_t length,
 		}
 	}
 
-	param_len = sizeof(struct mgmt_cp_add_advertising) + adv_data_len +
-							scan_rsp_len;
+	param_len = sizeof(*cp) + adv_data_len + scan_rsp_len;
 
 	cp = malloc0(param_len);
 	if (!cp) {

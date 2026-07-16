@@ -13,6 +13,12 @@
 #include <config.h>
 #endif
 
+#if defined(__GNUC__)
+/* Speed up compilation */
+#pragma GCC optimize ("O0")
+#undef _FORTIFY_SOURCE
+#endif
+
 #define _GNU_SOURCE
 #include <unistd.h>
 #include <string.h>
@@ -322,7 +328,8 @@ static const struct iovec setup_data[] = {
 	 *   Value UUID: Source ASE (0x2bc5)
 	 *   Handle: 0x0021
 	 *   Value: 182200c62b
-	 *   Properties: 0x18
+	 *   Properties: 0x1c
+	 *     Write Without Response (0x04)
 	 *     Write (0x08)
 	 *     Notify (0x10)
 	 *   Value Handle: 0x0022
@@ -331,7 +338,7 @@ static const struct iovec setup_data[] = {
 	IOV_DATA(0x09, 0x07,
 		0x1b, 0x00, 0x12, 0x1c, 0x00, 0xc5, 0x2b,
 		0x1e, 0x00, 0x12, 0x1f, 0x00, 0xc5, 0x2b,
-		0x21, 0x00, 0x18, 0x22, 0x00, 0xc6, 0x2b),
+		0x21, 0x00, 0x1c, 0x22, 0x00, 0xc6, 0x2b),
 	/* ATT: Read By Type Request (0x08) len 6
 	 *   Handle range: 0x0022-0x0023
 	 *   Attribute type: Characteristic (0x2803)
@@ -480,7 +487,8 @@ static const struct iovec setup_data_no_location[] = {
 	 *   Value UUID: Source ASE (0x2bc5)
 	 *   Handle: 0x0021
 	 *   Value: 182200c62b
-	 *   Properties: 0x18
+	 *   Properties: 0x1c
+	 *     Write Without Response (0x04)
 	 *     Write (0x08)
 	 *     Notify (0x10)
 	 *   Value Handle: 0x0022
@@ -494,7 +502,7 @@ static const struct iovec setup_data_no_location[] = {
 		0x11, 0x00, 0x12, 0x12, 0x00, 0xce, 0x2b,
 		0x15, 0x00, 0x12, 0x16, 0x00, 0xc4, 0x2b,
 		0x1b, 0x00, 0x12, 0x1c, 0x00, 0xc5, 0x2b,
-		0x21, 0x00, 0x18, 0x22, 0x00, 0xc6, 0x2b),
+		0x21, 0x00, 0x1c, 0x22, 0x00, 0xc6, 0x2b),
 	/* ATT: Read By Type Request (0x08) len 6
 	 *   Handle range: 0x0022-0x0023
 	 *   Attribute type: Characteristic (0x2803)
@@ -1479,6 +1487,37 @@ static void test_server(const void *user_data)
 	tester_io_set_complete_func(test_complete_cb);
 
 	data->id = bt_bap_register(bap_attached, NULL, data);
+	g_assert(data->id);
+
+	tester_io_send();
+}
+
+static void bap_attached_state(struct bt_bap *bap, void *user_data)
+{
+	struct test_data *data = user_data;
+
+	data->bap = bap;
+
+	bt_bap_set_debug(data->bap, print_debug, "bt_bap:", NULL);
+
+	bt_bap_state_register(data->bap, data->cfg->state_func, NULL, data,
+									NULL);
+}
+
+/* Like test_server() but registers the config's state callback so the test can
+ * drive autonomous server transitions (e.g. loss of the CIS).
+ */
+static void test_server_state(const void *user_data)
+{
+	struct test_data *data = (void *)user_data;
+	struct io *io;
+
+	io = tester_setup_io(data->iov, data->iovcnt);
+	g_assert(io);
+
+	tester_io_set_complete_func(test_complete_cb);
+
+	data->id = bt_bap_register(bap_attached_state, NULL, data);
 	g_assert(data->id);
 
 	tester_io_send();
@@ -4349,6 +4388,69 @@ static void test_scc_metadata(void)
 	test_usr_scc_metadata();
 }
 
+#define ASE_CP_RSP(_op, _ase, _code, _reason) \
+	IOV_DATA(0x1b, CP_HND, _op, 0x01, _ase, _code, _reason)
+
+#define ASE_CP_RSP_TRUNCATED(_op) \
+	IOV_DATA(0x1b, CP_HND, _op, 0xff, 0x00, 0x02, 0x00)
+
+#define SPE_CP_TRUNCATED(_op) \
+	IOV_DATA(0x52, CP_HND, _op), \
+	ASE_CP_RSP_TRUNCATED(_op)
+
+#define SPE_CP_ZERO_ASES(_op) \
+	IOV_DATA(0x52, CP_HND, _op, 0x00), \
+	ASE_CP_RSP_TRUNCATED(_op)
+
+#define SPE_METADATA_TRUNCATED(_ase) \
+	IOV_DATA(0x52, CP_HND, 0x07, 0x01, _ase), \
+	ASE_CP_RSP_TRUNCATED(0x07)
+
+#define SPE_METADATA_UNSUPPORTED(_ase) \
+	SCC_SRC_ENABLE, \
+	IOV_DATA(0x52, CP_HND, 0x07, 0x01, _ase, 0x02, 0x01, 0xfc), \
+	ASE_CP_RSP(0x07, _ase, 0x0a, 0xfc)
+
+#define SPE_METADATA_INVALID_CONTEXT(_ase) \
+	SCC_SRC_ENABLE, \
+	IOV_DATA(0x52, CP_HND, 0x07, 0x01, _ase, 0x04, 0x03, 0x02, \
+			0x00, 0x10), \
+	ASE_CP_RSP(0x07, _ase, 0x0c, 0x02)
+
+/* Unicast Server Rejects Invalid ASE Control Point Procedures
+ *
+ * Test Purpose:
+ * Verify the behavior of a Unicast Server IUT when a Unicast Client writes
+ * invalid ASE Control Point parameters.
+ *
+ * Pass verdict:
+ * The IUT sends a notification of the ASE Control Point characteristic with
+ * the expected Response_Code and Reason values.
+ */
+static void test_usr_spe(void)
+{
+	define_test("BAP/USR/SPE/BI-01-C [USR ASE Control Point truncated]",
+			test_setup_server, test_server, NULL,
+			SPE_CP_TRUNCATED(0x03));
+	define_test("BAP/USR/SPE/BI-02-C [USR ASE Control Point zero ASEs]",
+			test_setup_server, test_server, NULL,
+			SPE_CP_ZERO_ASES(0x03));
+	define_test("BAP/USR/SPE/BI-03-C [USR Update Metadata truncated]",
+			test_setup_server, test_server, NULL,
+			SPE_METADATA_TRUNCATED(SRC_ID(0)));
+	define_test("BAP/USR/SPE/BI-04-C [USR Update Metadata unsupported]",
+			test_setup_server, test_server, &cfg_src_enable,
+			SPE_METADATA_UNSUPPORTED(SRC_ID(0)));
+	define_test("BAP/USR/SPE/BI-05-C [USR Update Metadata invalid context]",
+			test_setup_server, test_server, &cfg_src_enable,
+			SPE_METADATA_INVALID_CONTEXT(SRC_ID(0)));
+}
+
+static void test_spe(void)
+{
+	test_usr_spe();
+}
+
 #define SNK_ENABLE \
 	IOV_DATA(0x52, 0x22, 0x00, 0x03, 0x01, 0x01, 0x04, 0x03, 0x02, 0x01, \
 			00), \
@@ -4361,6 +4463,48 @@ static void test_scc_metadata(void)
 	IOV_NULL, \
 	IOV_DATA(0x1b, 0x16, 0x00, 0x01, 0x04, 0x00, 0x00, 0x04, 0x03, 0x02, \
 			0x01, 0x00)
+
+static void state_cis_loss(struct bt_bap_stream *stream, uint8_t old_state,
+					uint8_t new_state, void *user_data)
+{
+	struct test_data *data = user_data;
+	int fds[2];
+	int err;
+
+	if (new_state != data->cfg->state)
+		return;
+
+	/* Attach a CIS and tear it down to simulate its loss. */
+	err = socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, fds);
+	g_assert(err == 0);
+	g_assert(bt_bap_stream_io_connecting(stream, fds[0]) == 0);
+	close(fds[1]);
+}
+
+static struct test_config cfg_src_enabling_cis_loss = {
+	.cc = LC3_CONFIG_16_2,
+	.qos = LC3_QOS_16_2_1,
+	.src = true,
+	.state = BT_BAP_STREAM_STATE_ENABLING,
+	.state_func = state_cis_loss,
+};
+
+/* On loss of the CIS a Source ASE in Enabling moves to QoS Configured, not
+ * Disabling.
+ */
+#define SCC_SRC_ENABLING_CIS_LOSS \
+	SCC_SRC_16_2_1, \
+	ENABLE_ASE(SRC_ID(0)), \
+	QOS_SRC_NOTIFY(0, 0, 0x10, 0x27, 0x00, 0x00, 0x02, 0x28, 0x00, \
+			0x02, 0x0a, 0x00, 0x40, 0x9c, 0x00)
+
+static void test_usr_scc_cis_loss(void)
+{
+	define_test("BAP/USR/SCC/BV-167-C [USR SRC QoS Configured on CIS loss]",
+			test_setup_server, test_server_state,
+			&cfg_src_enabling_cis_loss,
+			SCC_SRC_ENABLING_CIS_LOSS);
+}
 
 static struct test_config str_snk_ac2_8_1_1 = {
 	.cc = LC3_CONFIG_8_1_AC(1),
@@ -7222,6 +7366,7 @@ static void test_scc(void)
 	test_scc_enable();
 	test_scc_disable();
 	test_scc_release();
+	test_usr_scc_cis_loss();
 	test_scc_metadata();
 	test_str_1_1_1_lc3();
 }
@@ -9829,7 +9974,7 @@ static int streaming_ucl_create_io(struct bt_bap_stream *stream,
 
 	i = qos[0] ? qos[0]->ucast.cis_id : qos[1]->ucast.cis_id;
 
-	if (i == BT_ISO_QOS_CIG_UNSET) {
+	if (i == BT_ISO_QOS_CIS_UNSET) {
 		for (i = 0; i < ARRAY_SIZE(data->fds); ++i) {
 			if (data->fds[i][0] > 0)
 				continue;
@@ -9935,7 +10080,7 @@ static void test_select_cb(struct bt_bap_pac *pac, int err,
 
 	if (!data->cfg->streams) {
 		qos->ucast.cig_id = BT_ISO_QOS_CIG_UNSET;
-		qos->ucast.cis_id = BT_ISO_QOS_CIG_UNSET;
+		qos->ucast.cis_id = BT_ISO_QOS_CIS_UNSET;
 	} else {
 		/* All streams to separate CIS.
 		 *
@@ -10259,6 +10404,7 @@ int main(int argc, char *argv[])
 	tester_init(&argc, &argv);
 
 	test_disc();
+	test_spe();
 	test_scc();
 	test_bsrc_scc();
 	test_bsnk_scc();

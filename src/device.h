@@ -9,6 +9,8 @@
  *
  */
 
+#include "src/shared/queue.h"
+
 #define DEVICE_INTERFACE	"org.bluez.Device1"
 
 struct btd_device;
@@ -78,12 +80,12 @@ void btd_device_gatt_set_service_changed(struct btd_device *device,
 						uint16_t start, uint16_t end);
 bool device_attach_att(struct btd_device *dev, GIOChannel *io);
 void btd_device_add_uuid(struct btd_device *device, const char *uuid);
-void device_add_eir_uuids(struct btd_device *dev, GSList *uuids);
-void device_set_manufacturer_data(struct btd_device *dev, GSList *list,
+void device_add_eir_uuids(struct btd_device *dev, struct queue *uuids);
+void device_set_manufacturer_data(struct btd_device *dev, struct queue *queue,
 							bool duplicate);
-void device_set_service_data(struct btd_device *dev, GSList *list,
+void device_set_service_data(struct btd_device *dev, struct queue *queue,
 							bool duplicate);
-void device_set_data(struct btd_device *dev, GSList *list,
+void device_set_data(struct btd_device *dev, struct queue *queue,
 							bool duplicate);
 void device_probe_profile(gpointer a, gpointer b);
 void device_remove_profile(gpointer a, gpointer b);
@@ -211,7 +213,8 @@ bool device_remove_svc_complete_callback(struct btd_device *dev,
 struct btd_service *btd_device_get_service(struct btd_device *dev,
 						const char *remote_uuid);
 
-int device_discover_services(struct btd_device *device);
+int device_discover_services(struct btd_device *device,
+			uint8_t bdaddr_type, DBusMessage *msg);
 int btd_device_connect_services(struct btd_device *dev, GSList *services);
 
 bool btd_device_flags_enabled(struct btd_device *dev, uint32_t flags);

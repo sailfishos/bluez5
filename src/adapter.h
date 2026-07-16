@@ -16,6 +16,8 @@
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/sdp.h>
 
+#include "shared/mgmt.h"
+
 #define ADAPTER_INTERFACE	"org.bluez.Adapter1"
 
 #define MAX_NAME_LENGTH		248
@@ -207,15 +209,18 @@ int btd_adapter_passkey_reply(struct btd_adapter *adapter,
 				uint32_t passkey);
 
 int adapter_create_bonding(struct btd_adapter *adapter, const bdaddr_t *bdaddr,
-					uint8_t addr_type, uint8_t io_cap);
+						uint8_t addr_type,
+						enum mgmt_io_capability io_cap);
 
 int adapter_bonding_attempt(struct btd_adapter *adapter, const bdaddr_t *bdaddr,
-					uint8_t addr_type, uint8_t io_cap);
+						uint8_t addr_type,
+						enum mgmt_io_capability io_cap);
 
 int adapter_cancel_bonding(struct btd_adapter *adapter, const bdaddr_t *bdaddr,
 							uint8_t addr_type);
 
-int adapter_set_io_capability(struct btd_adapter *adapter, uint8_t io_cap);
+int adapter_set_io_capability(struct btd_adapter *adapter,
+						enum mgmt_io_capability io_cap);
 
 int btd_adapter_read_local_oob_data(struct btd_adapter *adapter);
 
@@ -302,6 +307,19 @@ void btd_adapter_store_conn_param(struct btd_adapter *adapter,
 				uint16_t latency, uint16_t timeout);
 void btd_adapter_cancel_service_auth(struct btd_adapter *adapter,
 				struct btd_device *device);
+
+typedef void (*btd_adapter_reply_event_t)(uint8_t status, uint16_t length,
+					const void *param, void *user_data);
+typedef void (*btd_adapter_destroy_func_t)(void *user_data);
+
+unsigned int btd_adapter_send_cmd_event_sync(struct btd_adapter *adapter,
+					uint16_t opcode,
+					uint16_t length, const void *param,
+					uint8_t event,
+					btd_adapter_reply_event_t callback,
+					void *user_data,
+					btd_adapter_destroy_func_t destroy,
+					uint8_t timeout);
 
 int btd_adapter_set_did(struct btd_adapter *adapter, uint16_t vendor,
 			uint16_t product, uint16_t version, uint16_t source);

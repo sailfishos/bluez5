@@ -432,11 +432,11 @@ static gboolean get_qos(const GDBusPropertyTable *property,
 	dict_append_entry(&dict, "Retransmissions", DBUS_TYPE_BYTE, &qos->rtn);
 	dict_append_entry(&dict, "MaximumLatency", DBUS_TYPE_UINT16,
 					&qos->latency);
-	dict_append_entry(&dict, "MimimumDelay", DBUS_TYPE_UINT32,
+	dict_append_entry(&dict, "MinimumDelay", DBUS_TYPE_UINT32,
 					&qos->pd_min);
 	dict_append_entry(&dict, "MaximumDelay", DBUS_TYPE_UINT32,
 					&qos->pd_max);
-	dict_append_entry(&dict, "PreferredMimimumDelay", DBUS_TYPE_UINT32,
+	dict_append_entry(&dict, "PreferredMinimumDelay", DBUS_TYPE_UINT32,
 					&qos->ppd_min);
 	dict_append_entry(&dict, "PreferredMaximumDelay", DBUS_TYPE_UINT32,
 					&qos->ppd_max);
@@ -1474,7 +1474,10 @@ static void iso_bcast_confirm_cb(GIOChannel *io, GError *err, void *user_data)
 	int fd;
 	struct bap_data *bap_data = setup->data;
 
-	DBG("BIG Sync completed");
+	if (err)
+		error("BIG Sync failed: %s", err->message);
+	else
+		DBG("BIG Sync completed");
 
 	/* The order of the BIS fds notified from kernel corresponds
 	 * to the order of the BISes that were enqueued before
@@ -1502,6 +1505,7 @@ static void iso_bcast_confirm_cb(GIOChannel *io, GError *err, void *user_data)
 
 static void create_stream_for_bis(struct bap_data *bap_data,
 				struct bt_bap_pac *lpac, uint8_t sid,
+				uint8_t bis, uint8_t sgrp,
 				struct bt_bap_qos *qos, struct iovec *caps,
 				struct iovec *meta, char *path)
 {
@@ -1512,6 +1516,8 @@ static void create_stream_for_bis(struct bap_data *bap_data,
 
 	/* Create an internal copy for bcode */
 	setup->qos.bcast.bcode = util_iov_dup(qos->bcast.bcode, 1);
+	setup->qos.bcast.big = sgrp;
+	setup->qos.bcast.bis = bis;
 
 	setup->data = bap_data;
 
@@ -1550,7 +1556,8 @@ static void bis_handler(uint8_t sid, uint8_t bis, uint8_t sgrp,
 			sid, bis) < 0)
 		return;
 
-	create_stream_for_bis(data, lpac, sid, qos, caps, meta, path);
+	create_stream_for_bis(data, lpac, sid, bis, sgrp, qos, caps, meta,
+									path);
 }
 
 static gboolean big_info_report_cb(GIOChannel *io, GIOCondition cond,
@@ -3808,6 +3815,7 @@ static void bap_bcast_remove(struct btd_service *service)
 {
 	struct btd_device *device = btd_service_get_device(service);
 	struct bap_data *data;
+	struct queue *bcast_snks;
 	char addr[18];
 
 	ba2str(device_get_address(device), addr);
@@ -3820,6 +3828,13 @@ static void bap_bcast_remove(struct btd_service *service)
 	if (!data) {
 		error("BAP service not handled by profile");
 		return;
+	}
+
+	/* Clean up before bis_remove and data_remove */
+	if (data->bcast_snks) {
+		bcast_snks = data->bcast_snks;
+		data->bcast_snks = NULL;
+		queue_destroy(bcast_snks, setup_free);
 	}
 
 	bt_bap_bis_remove(data->bap);
@@ -3929,6 +3944,7 @@ static int bap_disconnect(struct btd_service *service)
 static int bap_bcast_disconnect(struct btd_service *service)
 {
 	struct bap_data *data;
+	struct queue *bcast_snks;
 
 	/* Lookup the bap session for this service since in case of
 	 * bass_delegator its user data is set by bass plugin.
@@ -3937,6 +3953,12 @@ static int bap_bcast_disconnect(struct btd_service *service)
 	if (!data) {
 		error("BAP service not handled by profile");
 		return -EINVAL;
+	}
+	/* Clean up broadcast sinks before detach (like unicast does) */
+	if (data->bcast_snks) {
+		bcast_snks = data->bcast_snks;
+		data->bcast_snks = NULL;
+		queue_destroy(bcast_snks, setup_free);
 	}
 
 	bt_bap_detach(data->bap);

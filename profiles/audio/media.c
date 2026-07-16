@@ -71,7 +71,11 @@
 #define MEDIA_ENDPOINT_INTERFACE "org.bluez.MediaEndpoint1"
 #define MEDIA_PLAYER_INTERFACE "org.mpris.MediaPlayer2.Player"
 
-#define REQUEST_TIMEOUT (3 * 1000)		/* 3 seconds */
+/* Timeout should be less than avdtp request timeout (4 seconds) */
+#define A2DP_REQUEST_TIMEOUT_MSEC	(3 * 1000)
+
+/* Timeout should be less than ATT timeout (30 seconds) */
+#define BAP_REQUEST_TIMEOUT_MSEC	(3 * 1000)
 
 #define MPRIS_SEEK (1000000) /* 1 second */
 
@@ -468,16 +472,16 @@ static gboolean media_endpoint_async_call(DBusMessage *msg,
 					struct media_transport *transport,
 					media_endpoint_cb_t cb,
 					void *user_data,
-					GDestroyNotify destroy)
+					GDestroyNotify destroy,
+					int timeout_msec)
 {
 	struct endpoint_request *request;
 
 	request = g_new0(struct endpoint_request, 1);
 
-	/* Timeout should be less than avdtp request timeout (4 seconds) */
 	if (g_dbus_send_message_with_reply(btd_get_dbus_connection(),
 						msg, &request->call,
-						REQUEST_TIMEOUT) == FALSE) {
+						timeout_msec) == FALSE) {
 		error("D-Bus send failed");
 		g_free(request);
 		return FALSE;
@@ -524,7 +528,7 @@ static gboolean select_configuration(struct media_endpoint *endpoint,
 					DBUS_TYPE_INVALID);
 
 	return media_endpoint_async_call(msg, endpoint, NULL,
-						cb, user_data, destroy);
+						cb, user_data, destroy, -1);
 }
 
 static int transport_device_cmp(gconstpointer data, gconstpointer user_data)
@@ -607,7 +611,8 @@ static gboolean set_configuration(struct media_endpoint *endpoint,
 	g_dbus_get_properties(conn, path, "org.bluez.MediaTransport1", &iter);
 
 	return media_endpoint_async_call(msg, endpoint, transport,
-						cb, user_data, destroy);
+						cb, user_data, destroy,
+						A2DP_REQUEST_TIMEOUT_MSEC);
 }
 #endif
 
@@ -1096,7 +1101,7 @@ static int pac_select(struct bt_bap_pac *lpac, struct bt_bap_pac *rpac,
 	dbus_message_iter_close_container(&iter, &dict);
 
 	if (!media_endpoint_async_call(msg, endpoint, NULL, pac_select_cb,
-								data, free))
+								data, free, -1))
 		return -EIO;
 
 	return 0;
@@ -1236,6 +1241,7 @@ static int pac_config(struct bt_bap_stream *stream, struct iovec *cfg,
 	DBusMessage *msg;
 	DBusMessageIter iter;
 	const char *path;
+	int timeout_msec;
 
 	DBG("endpoint %p stream %p", endpoint, stream);
 
@@ -1246,9 +1252,16 @@ static int pac_config(struct bt_bap_stream *stream, struct iovec *cfg,
 	switch (bt_bap_stream_get_type(stream)) {
 	case BT_BAP_STREAM_TYPE_UCAST:
 		transport = pac_ucast_config(stream, cfg, endpoint);
+		timeout_msec = BAP_REQUEST_TIMEOUT_MSEC;
 		break;
 	case BT_BAP_STREAM_TYPE_BCAST:
 		transport = pac_bcast_config(stream, cfg, endpoint);
+
+		/* If we are sink, BASS remote may be waiting: custom timeout */
+		if (bt_bap_stream_get_dir(stream) == BT_BAP_SOURCE)
+			timeout_msec = BAP_REQUEST_TIMEOUT_MSEC;
+		else
+			timeout_msec = -1;
 		break;
 	default:
 		transport = NULL;
@@ -1282,7 +1295,8 @@ static int pac_config(struct bt_bap_stream *stream, struct iovec *cfg,
 	g_dbus_get_properties(conn, path, "org.bluez.MediaTransport1", &iter);
 
 	if (!media_endpoint_async_call(msg, endpoint, transport,
-						pac_config_cb, data, free))
+						pac_config_cb, data, free,
+						timeout_msec))
 		return -EIO;
 
 	return 0;
@@ -1364,17 +1378,16 @@ static bool endpoint_init_pac(struct media_endpoint *endpoint, uint8_t type,
 		metadata->iov_len = endpoint->metadata_size;
 	}
 
-	endpoint->pac = bt_bap_add_vendor_pac(db, name, type, endpoint->codec,
-				endpoint->cid, endpoint->vid, &endpoint->qos,
-				&data, metadata);
+	endpoint->pac = bt_bap_add_vendor_pac_full(db, name, type,
+				endpoint->codec, endpoint->cid, endpoint->vid,
+				&endpoint->qos, &data, metadata,
+				&pac_ops, endpoint);
 	if (!endpoint->pac) {
 		error("Unable to create PAC");
 		free(name);
 		free(metadata);
 		return false;
 	}
-
-	bt_bap_pac_set_ops(endpoint->pac, &pac_ops, endpoint);
 
 	DBG("PAC %s registered", name);
 

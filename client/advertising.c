@@ -20,6 +20,9 @@
 #include <string.h>
 #include <errno.h>
 
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/uuid.h"
+
 #include "gdbus/gdbus.h"
 #include "src/shared/util.h"
 #include "src/shared/shell.h"
@@ -27,6 +30,10 @@
 
 #define AD_PATH "/org/bluez/advertising"
 #define AD_IFACE "org.bluez.LEAdvertisement1"
+#define AD_PUBLIC_BROADCAST_UUID "0x1856"
+#define AD_TYPE_PUBLIC_BROADCAST_NAME 0x30
+#define AD_PUBLIC_BROADCAST_SQ BIT(1)
+#define AD_PUBLIC_BROADCAST_HQ BIT(2)
 
 struct ad_data {
 	uint8_t data[245];
@@ -60,6 +67,7 @@ static struct ad {
 	uint16_t duration;
 	uint16_t timeout;
 	uint16_t discoverable_to;
+	uint8_t instance;
 	char **uuids[AD_TYPE_COUNT];
 	size_t uuids_len[AD_TYPE_COUNT];
 	char **solicit[AD_TYPE_COUNT];
@@ -226,6 +234,9 @@ static void print_ad(void)
 	if (ad.min_interval)
 		bt_shell_printf("Interval: %u-%u msec\n", ad.min_interval,
 					ad.max_interval);
+
+	if (ad.instance)
+		bt_shell_printf("Instance: %u\n", ad.instance);
 }
 
 static void register_reply(DBusMessage *message, void *user_data)
@@ -633,6 +644,32 @@ static gboolean get_secondary(const GDBusPropertyTable *property,
 	return TRUE;
 }
 
+static gboolean get_instance(const GDBusPropertyTable *property,
+				DBusMessageIter *iter, void *user_data)
+{
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_BYTE, &ad.instance);
+
+	return TRUE;
+}
+
+static void set_instance(const GDBusPropertyTable *property,
+				DBusMessageIter *iter,
+				GDBusPendingPropertySet id, void *user_data)
+{
+	uint8_t value;
+
+	if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_BYTE) {
+		g_dbus_pending_property_error(id,
+					"org.bluez.Error.InvalidArguments",
+					"Invalid argument type");
+		return;
+	}
+
+	dbus_message_iter_get_basic(iter, &value);
+	ad.instance = value;
+	g_dbus_pending_property_success(id);
+}
+
 static gboolean min_interval_exists(const GDBusPropertyTable *property,
 							void *data)
 {
@@ -693,6 +730,7 @@ static const GDBusPropertyTable ad_props[] = {
 	{ "MinInterval", "u", get_min_interval, NULL, min_interval_exists },
 	{ "MaxInterval", "u", get_max_interval, NULL, max_interval_exists },
 	{ "SecondaryChannel", "s", get_secondary, NULL, secondary_exists },
+	{ "Instance", "y", get_instance, set_instance, NULL },
 	{ }
 };
 
@@ -1005,6 +1043,130 @@ static void ad_clear_data(int type)
 	memset(&ad.data[type], 0, sizeof(ad.data[type]));
 }
 
+static bool ad_is_public_broadcast_uuid(const char *uuid)
+{
+	return uuid && !bt_uuid_strcmp(uuid, AD_PUBLIC_BROADCAST_UUID);
+}
+
+static bool ad_broadcast_in_use(void)
+{
+	return ad_is_public_broadcast_uuid(ad.service[AD_TYPE_AD].uuid);
+}
+
+static bool ad_has_public_broadcast_name(void)
+{
+	return ad.data[AD_TYPE_AD].valid &&
+		ad.data[AD_TYPE_AD].type == AD_TYPE_PUBLIC_BROADCAST_NAME &&
+		ad.data[AD_TYPE_AD].data.len > 0;
+}
+
+static void ad_print_public_broadcast_name(void)
+{
+	if (!ad_has_public_broadcast_name()) {
+		bt_shell_printf("Public Broadcast Name not set\n");
+		return;
+	}
+
+	bt_shell_printf("Public Broadcast Name: %.*s\n",
+			(int) ad.data[AD_TYPE_AD].data.len,
+			(char *) ad.data[AD_TYPE_AD].data.data);
+}
+
+static bool ad_set_public_broadcast_name(DBusConnection *conn,
+						const char *name)
+{
+	struct ad_data data;
+	size_t len;
+
+	if (!name || !strlen(name)) {
+		bt_shell_printf("Public Broadcast Name cannot be empty\n");
+		return false;
+	}
+
+	len = strlen(name);
+	if (len > sizeof(data.data)) {
+		bt_shell_printf("Public Broadcast Name too long\n");
+		return false;
+	}
+
+	memset(&data, 0, sizeof(data));
+	memcpy(data.data, name, len);
+	data.len = len;
+
+	ad_clear_data(AD_TYPE_AD);
+	ad.data[AD_TYPE_AD].valid = true;
+	ad.data[AD_TYPE_AD].type = AD_TYPE_PUBLIC_BROADCAST_NAME;
+	ad.data[AD_TYPE_AD].data = data;
+
+	g_dbus_emit_property_changed(conn, AD_PATH, AD_IFACE,
+					prop_names.data[AD_TYPE_AD]);
+
+	return true;
+}
+
+static const char *ad_public_broadcast_state(void)
+{
+	if (!ad_is_public_broadcast_uuid(ad.service[AD_TYPE_AD].uuid))
+		return NULL;
+
+	if (ad.service[AD_TYPE_AD].data.len != 2)
+		return NULL;
+
+	if (ad.service[AD_TYPE_AD].data.data[0] == AD_PUBLIC_BROADCAST_SQ &&
+			ad.service[AD_TYPE_AD].data.data[1] == 0x00)
+		return "sq";
+
+	if (ad.service[AD_TYPE_AD].data.data[0] == AD_PUBLIC_BROADCAST_HQ &&
+			ad.service[AD_TYPE_AD].data.data[1] == 0x00)
+		return "hq";
+
+	return NULL;
+}
+
+void ad_advertise_public_broadcast(DBusConnection *conn, int argc, char *argv[])
+{
+	struct ad_data data = {
+		.data = { 0x00, 0x00 },
+		.len = 2,
+	};
+	const char *state;
+
+	if (argc < 2) {
+		state = ad_public_broadcast_state();
+		if (state)
+			bt_shell_printf("Public Broadcast: %s\n", state);
+		else
+			bt_shell_printf("Public Broadcast not set\n");
+
+		return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+	}
+
+	if (!strlen(argv[1])) {
+		bt_shell_printf("Public broadcast value cannot be empty\n");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	if (!strcasecmp(argv[1], "sq"))
+		data.data[0] = AD_PUBLIC_BROADCAST_SQ;
+	else if (!strcasecmp(argv[1], "hq"))
+		data.data[0] = AD_PUBLIC_BROADCAST_HQ;
+	else {
+		bt_shell_printf("Invalid argument: accepted values are "
+				"sq or hq\n");
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	ad_clear_service(AD_TYPE_AD);
+
+	ad.service[AD_TYPE_AD].uuid = g_strdup(AD_PUBLIC_BROADCAST_UUID);
+	ad.service[AD_TYPE_AD].data = data;
+
+	g_dbus_emit_property_changed(conn, AD_PATH, AD_IFACE,
+					prop_names.service[AD_TYPE_AD]);
+
+	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
 void ad_advertise_data(DBusConnection *conn, int type, int argc, char *argv[])
 {
 	char *endptr = NULL;
@@ -1129,6 +1291,23 @@ void ad_advertise_name(DBusConnection *conn, bool value)
 
 void ad_advertise_local_name(DBusConnection *conn, const char *name)
 {
+	if (ad_broadcast_in_use()) {
+		if (!name) {
+			ad_print_public_broadcast_name();
+			return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+		}
+
+		if (ad_has_public_broadcast_name() &&
+		    ad.data[AD_TYPE_AD].data.len == strlen(name) &&
+		    !memcmp(ad.data[AD_TYPE_AD].data.data, name, strlen(name)))
+			return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+
+		if (!ad_set_public_broadcast_name(conn, name))
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+
+		return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+	}
+
 	if (!name) {
 		if (ad.local_name)
 			bt_shell_printf("LocalName: %s\n", ad.local_name);
@@ -1295,6 +1474,13 @@ void ad_advertise_rsi(DBusConnection *conn, dbus_bool_t *value)
 	ad.rsi = *value;
 
 	g_dbus_emit_property_changed(conn, AD_PATH, AD_IFACE, "Includes");
+
+	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
+}
+
+void ad_advertise_instance(void)
+{
+	bt_shell_printf("Instance: %u\n", ad.instance);
 
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }

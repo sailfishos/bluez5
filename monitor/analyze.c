@@ -53,12 +53,6 @@ struct hci_dev {
 	struct queue *conn_list;
 };
 
-#define CONN_BR_ACL	0x01
-#define CONN_BR_SCO	0x02
-#define CONN_BR_ESCO	0x03
-#define CONN_LE_ACL	0x04
-#define CONN_LE_ISO	0x05
-
 struct hci_stats {
 	size_t bytes;
 	size_t num;
@@ -67,6 +61,14 @@ struct hci_stats {
 	struct queue *plot;
 	uint16_t min;
 	uint16_t max;
+	/* Wall-clock throughput tracking */
+	struct timeval first_ts;
+	struct timeval last_ts;
+	/* Windowed throughput (1-second windows) */
+	struct timeval window_start;
+	size_t window_bytes;
+	long long speed_min;	/* Kb/s, 0 = not set */
+	long long speed_max;	/* Kb/s */
 };
 
 struct hci_conn {
@@ -74,8 +76,12 @@ struct hci_conn {
 	uint16_t link;
 	uint8_t type;
 	uint8_t bdaddr[6];
+	uint8_t bdaddr_type;
 	bool setup_seen;
 	bool terminated;
+	uint8_t disconnect_reason;
+	unsigned long frame_connected;
+	unsigned long frame_disconnected;
 	struct queue *tx_queue;
 	struct timeval last_rx;
 	struct queue *chan_list;
@@ -96,6 +102,9 @@ struct plot {
 struct l2cap_chan {
 	uint16_t cid;
 	uint16_t psm;
+	uint16_t mtu;
+	uint16_t mps;
+	uint8_t mode;
 	bool out;
 	struct timeval last_rx;
 	struct hci_stats rx;
@@ -140,6 +149,8 @@ static void plot_draw(struct queue *queue, const char *title)
 
 static void print_stats(struct hci_stats *stats, const char *label)
 {
+	long long duration_ms;
+
 	if (!stats->num)
 		return;
 
@@ -151,24 +162,115 @@ static void print_stats(struct hci_stats *stats, const char *label)
 	print_field("%s size: %u-%u octets (~%zd octets)", label,
 			stats->min, stats->max, stats->bytes / stats->num);
 
-	if (TV_MSEC(stats->latency.total))
-		print_field("%s speed: ~%lld Kb/s", label,
-			stats->bytes * 8 / TV_MSEC(stats->latency.total));
+	/* Compute wall-clock speed from first/last packet timestamps */
+	duration_ms = TV_MSEC(stats->last_ts) - TV_MSEC(stats->first_ts);
+	if (duration_ms > 0) {
+		long long avg_speed = stats->bytes * 8 / duration_ms;
+
+		/* Close the last window for min/max if it has data */
+		if (stats->window_bytes > 0 && stats->num > 1) {
+			struct timeval delta;
+			long long last_win_ms;
+
+			timersub(&stats->last_ts, &stats->window_start,
+								&delta);
+			last_win_ms = TV_MSEC(delta);
+			if (last_win_ms > 0) {
+				long long speed;
+
+				speed = stats->window_bytes * 8 /
+								last_win_ms;
+				if (!stats->speed_min ||
+						speed < stats->speed_min)
+					stats->speed_min = speed;
+				if (speed > stats->speed_max)
+					stats->speed_max = speed;
+			}
+		}
+
+		if (stats->speed_min && stats->speed_max)
+			print_field("%s speed: ~%lld Kb/s "
+				"(min ~%lld Kb/s max ~%lld Kb/s)",
+				label, avg_speed,
+				stats->speed_min, stats->speed_max);
+		else
+			print_field("%s speed: ~%lld Kb/s", label,
+								avg_speed);
+	}
 
 	plot_draw(stats->plot, label);
+}
+
+static const char *fixed_channel_name(uint16_t cid)
+{
+	switch (cid) {
+	case 0x0001:
+		return "L2CAP Signaling (BR/EDR)";
+	case 0x0002:
+		return "Connectionless";
+	case 0x0003:
+		return "AMP Manager";
+	case 0x0004:
+		return "ATT";
+	case 0x0005:
+		return "L2CAP Signaling (LE)";
+	case 0x0006:
+		return "SMP (LE)";
+	case 0x0007:
+		return "SMP (BR/EDR)";
+	default:
+		return NULL;
+	}
+}
+
+static const char *l2cap_mode_name(uint8_t mode)
+{
+	switch (mode) {
+	case 0x00:
+		return "Basic";
+	case 0x01:
+		return "Retransmission";
+	case 0x02:
+		return "Flow Control";
+	case 0x03:
+		return "ERTM";
+	case 0x04:
+		return "Streaming";
+	case 0x80:
+		return "LE Credit";
+	case 0x81:
+		return "Enhanced Credit";
+	default:
+		return "Unknown";
+	}
 }
 
 static void chan_destroy(void *data)
 {
 	struct l2cap_chan *chan = data;
+	const char *fixed;
 
 	if (!chan->rx.num && !chan->tx.num)
 		goto done;
 
-	printf("  Found %s L2CAP channel with CID %u\n",
+	fixed = fixed_channel_name(chan->cid);
+	if (fixed)
+		printf("  Found %s L2CAP channel with CID %u (%s)\n",
+					chan->out ? "TX" : "RX", chan->cid,
+					fixed);
+	else
+		printf("  Found %s L2CAP channel with CID %u\n",
 					chan->out ? "TX" : "RX", chan->cid);
+
 	if (chan->psm)
-		print_field("PSM %u", chan->psm);
+		print_field("PSM %u (0x%04x)", chan->psm, chan->psm);
+	if (!fixed) {
+		print_field("Mode: %s", l2cap_mode_name(chan->mode));
+		if (chan->mtu)
+			print_field("MTU: %u", chan->mtu);
+		if (chan->mps)
+			print_field("MPS: %u", chan->mps);
+	}
 
 	print_stats(&chan->rx, "RX");
 	print_stats(&chan->tx, "TX");
@@ -223,20 +325,23 @@ static void conn_destroy(void *data)
 	const char *str;
 
 	switch (conn->type) {
-	case CONN_BR_ACL:
+	case BTMON_CONN_ACL:
 		str = "BR-ACL";
 		break;
-	case CONN_BR_SCO:
-		str = "BR-SCO";
-		break;
-	case CONN_BR_ESCO:
-		str = "BR-ESCO";
-		break;
-	case CONN_LE_ACL:
+	case BTMON_CONN_LE:
 		str = "LE-ACL";
 		break;
-	case CONN_LE_ISO:
-		str = "LE-ISO";
+	case BTMON_CONN_SCO:
+		str = "BR-SCO";
+		break;
+	case BTMON_CONN_ESCO:
+		str = "BR-ESCO";
+		break;
+	case BTMON_CONN_CIS:
+		str = "LE-CIS";
+		break;
+	case BTMON_CONN_BIS:
+		str = "LE-BIS";
 		break;
 	default:
 		str = "unknown";
@@ -244,12 +349,21 @@ static void conn_destroy(void *data)
 	}
 
 	printf("  Found %s connection with handle %u\n", str, conn->handle);
-	/* TODO: Store address type */
-	packet_print_addr("Address", conn->bdaddr, 0x00);
+	packet_print_addr("Address", conn->bdaddr, conn->bdaddr_type);
 	if (!conn->setup_seen)
 		print_field("Connection setup missing");
 	print_stats(&conn->rx, "RX");
 	print_stats(&conn->tx, "TX");
+
+	if (conn->setup_seen) {
+		print_field("Connected: #%lu", conn->frame_connected);
+		if (conn->terminated) {
+			print_field("Disconnected: #%lu",
+					conn->frame_disconnected);
+			print_field("Disconnect Reason: 0x%02x",
+						conn->disconnect_reason);
+		}
+	}
 
 	queue_destroy(conn->rx.plot, free);
 	queue_destroy(conn->tx.plot, free);
@@ -423,6 +537,159 @@ static void l2cap_sig(struct hci_conn *conn, bool out,
 				chan->psm = psm;
 		}
 		break;
+	case BT_L2CAP_PDU_CONFIG_REQ:
+	{
+		const struct bt_l2cap_pdu_config_req *pdu = data + 4;
+		const uint8_t *opts;
+		uint16_t opts_len;
+
+		dcid = le16_to_cpu(pdu->dcid);
+		/* Options start after the 4-byte config req header */
+		opts = data + 4 + sizeof(*pdu);
+		opts_len = size - 4 - sizeof(*pdu);
+
+		chan = chan_lookup(conn, dcid, !out);
+		if (!chan)
+			break;
+
+		while (opts_len >= 2) {
+			uint8_t type = opts[0];
+			uint8_t len = opts[1];
+
+			if (opts_len < (uint16_t)(2 + len))
+				break;
+
+			switch (type) {
+			case 0x01: /* MTU */
+				if (len >= 2)
+					chan->mtu = get_le16(opts + 2);
+				break;
+			case 0x04: /* Retransmission and Flow Control */
+				if (len >= 1)
+					chan->mode = opts[2];
+				break;
+			}
+
+			opts += 2 + len;
+			opts_len -= 2 + len;
+		}
+		break;
+	}
+	case BT_L2CAP_PDU_CONFIG_RSP:
+	{
+		const struct bt_l2cap_pdu_config_rsp *pdu = data + 4;
+		const uint8_t *opts;
+		uint16_t opts_len;
+
+		scid = le16_to_cpu(pdu->scid);
+		/* Options start after the 6-byte config rsp header */
+		opts = data + 4 + sizeof(*pdu);
+		opts_len = size - 4 - sizeof(*pdu);
+
+		chan = chan_lookup(conn, scid, out);
+		if (!chan)
+			break;
+
+		while (opts_len >= 2) {
+			uint8_t type = opts[0];
+			uint8_t len = opts[1];
+
+			if (opts_len < (uint16_t)(2 + len))
+				break;
+
+			switch (type) {
+			case 0x01: /* MTU */
+				if (len >= 2)
+					chan->mtu = get_le16(opts + 2);
+				break;
+			case 0x04: /* Retransmission and Flow Control */
+				if (len >= 1)
+					chan->mode = opts[2];
+				break;
+			}
+
+			opts += 2 + len;
+			opts_len -= 2 + len;
+		}
+		break;
+	}
+	}
+}
+
+static void l2cap_le_sig(struct hci_conn *conn, bool out,
+					const void *data, uint16_t size)
+{
+	const struct bt_l2cap_hdr_sig *hdr = data;
+	struct l2cap_chan *chan;
+	uint16_t psm, scid, dcid;
+
+	switch (hdr->code) {
+	case BT_L2CAP_PDU_LE_CONN_REQ:
+	{
+		const struct bt_l2cap_pdu_le_conn_req *pdu = data + 4;
+
+		psm = le16_to_cpu(pdu->psm);
+		scid = le16_to_cpu(pdu->scid);
+		chan = chan_lookup(conn, scid, out);
+		if (chan) {
+			chan->psm = psm;
+			chan->mtu = le16_to_cpu(pdu->mtu);
+			chan->mps = le16_to_cpu(pdu->mps);
+			chan->mode = 0x80; /* LE Credit */
+		}
+		break;
+	}
+	case BT_L2CAP_PDU_LE_CONN_RSP:
+	{
+		const struct bt_l2cap_pdu_le_conn_rsp *pdu = data + 4;
+
+		dcid = le16_to_cpu(pdu->dcid);
+
+		/* The response's dcid is the responder's CID.  Its MTU/MPS
+		 * belong to the responder, so set them on the channel for
+		 * that direction (out).  Also propagate PSM from the
+		 * requester's channel (!out) if available.
+		 */
+		chan = chan_lookup(conn, dcid, out);
+		if (chan) {
+			struct l2cap_chan *req_chan;
+
+			chan->mtu = le16_to_cpu(pdu->mtu);
+			chan->mps = le16_to_cpu(pdu->mps);
+			chan->mode = 0x80; /* LE Credit */
+
+			/* Propagate PSM from the request channel */
+			req_chan = queue_find(conn->chan_list,
+					chan_match_cid,
+					UINT_TO_PTR(dcid |
+						(!out ? 0x10000 : 0)));
+			if (req_chan && req_chan->psm)
+				chan->psm = req_chan->psm;
+		}
+		break;
+	}
+	case BT_L2CAP_PDU_ECRED_CONN_REQ:
+	{
+		const struct bt_l2cap_pdu_ecred_conn_req *pdu = data + 4;
+		uint16_t req_len = le16_to_cpu(hdr->len);
+		int num_cids;
+		int i;
+
+		psm = le16_to_cpu(pdu->psm);
+		num_cids = (req_len - sizeof(*pdu)) / sizeof(uint16_t);
+
+		for (i = 0; i < num_cids; i++) {
+			scid = le16_to_cpu(pdu->scid[i]);
+			chan = chan_lookup(conn, scid, out);
+			if (chan) {
+				chan->psm = psm;
+				chan->mtu = le16_to_cpu(pdu->mtu);
+				chan->mps = le16_to_cpu(pdu->mps);
+				chan->mode = 0x81; /* Enhanced Credit */
+			}
+		}
+		break;
+	}
 	}
 }
 
@@ -468,6 +735,7 @@ static void command_pkt(struct timeval *tv, uint16_t index,
 }
 
 static void evt_conn_complete(struct hci_dev *dev, struct timeval *tv,
+					unsigned long frame,
 					const void *data, uint16_t size)
 {
 	const struct bt_hci_evt_conn_complete *evt = data;
@@ -476,15 +744,17 @@ static void evt_conn_complete(struct hci_dev *dev, struct timeval *tv,
 	if (evt->status)
 		return;
 
-	conn = conn_lookup_type(dev, le16_to_cpu(evt->handle), CONN_BR_ACL);
+	conn = conn_lookup_type(dev, le16_to_cpu(evt->handle), BTMON_CONN_ACL);
 	if (!conn)
 		return;
 
 	memcpy(conn->bdaddr, evt->bdaddr, 6);
+	conn->frame_connected = frame;
 	conn->setup_seen = true;
 }
 
 static void evt_disconnect_complete(struct hci_dev *dev, struct timeval *tv,
+					unsigned long frame,
 					const void *data, uint16_t size)
 {
 	const struct bt_hci_evt_disconnect_complete *evt = data;
@@ -497,6 +767,8 @@ static void evt_disconnect_complete(struct hci_dev *dev, struct timeval *tv,
 	if (!conn)
 		return;
 
+	conn->frame_disconnected = frame;
+	conn->disconnect_reason = evt->reason;
 	conn->terminated = true;
 }
 
@@ -558,6 +830,7 @@ static void plot_add(struct queue *queue, struct timeval *latency,
 }
 
 static void evt_le_conn_complete(struct hci_dev *dev, struct timeval *tv,
+					unsigned long frame,
 					struct iovec *iov)
 {
 	const struct bt_hci_evt_le_conn_complete *evt;
@@ -567,15 +840,18 @@ static void evt_le_conn_complete(struct hci_dev *dev, struct timeval *tv,
 	if (!evt || evt->status)
 		return;
 
-	conn = conn_lookup_type(dev, le16_to_cpu(evt->handle), CONN_LE_ACL);
+	conn = conn_lookup_type(dev, le16_to_cpu(evt->handle), BTMON_CONN_LE);
 	if (!conn)
 		return;
 
 	memcpy(conn->bdaddr, evt->peer_addr, 6);
+	conn->bdaddr_type = evt->peer_addr_type;
+	conn->frame_connected = frame;
 	conn->setup_seen = true;
 }
 
 static void evt_le_enh_conn_complete(struct hci_dev *dev, struct timeval *tv,
+					unsigned long frame,
 					struct iovec *iov)
 {
 	const struct bt_hci_evt_le_enhanced_conn_complete *evt;
@@ -585,33 +861,37 @@ static void evt_le_enh_conn_complete(struct hci_dev *dev, struct timeval *tv,
 	if (!evt || evt->status)
 		return;
 
-	conn = conn_lookup_type(dev, le16_to_cpu(evt->handle), CONN_LE_ACL);
+	conn = conn_lookup_type(dev, le16_to_cpu(evt->handle), BTMON_CONN_LE);
 	if (!conn)
 		return;
 
 	memcpy(conn->bdaddr, evt->peer_addr, 6);
+	conn->bdaddr_type = evt->peer_addr_type;
+	conn->frame_connected = frame;
 	conn->setup_seen = true;
 }
 
 static void evt_num_completed_packets(struct hci_dev *dev, struct timeval *tv,
 					const void *data, uint16_t size)
 {
-	uint8_t num_handles = get_u8(data);
+	struct iovec iov = { .iov_base = (void *)data, .iov_len = size };
+	uint8_t num_handles;
 	int i;
 
-	data += sizeof(num_handles);
-	size -= sizeof(num_handles);
+	if (!util_iov_pull_u8(&iov, &num_handles))
+		return;
 
 	for (i = 0; i < num_handles; i++) {
-		uint16_t handle = get_le16(data);
-		uint16_t count = get_le16(data + 2);
+		uint16_t handle, count;
 		struct hci_conn *conn;
 		struct timeval res;
 		struct hci_conn_tx *last_tx;
 		int j;
 
-		data += 4;
-		size -= 4;
+		if (!util_iov_pull_le16(&iov, &handle))
+			return;
+		if (!util_iov_pull_le16(&iov, &count))
+			return;
 
 		conn = conn_lookup(dev, handle);
 		if (!conn)
@@ -643,6 +923,7 @@ static void evt_num_completed_packets(struct hci_dev *dev, struct timeval *tv,
 }
 
 static void evt_sync_conn_complete(struct hci_dev *dev, struct timeval *tv,
+					unsigned long frame,
 					const void *data, uint16_t size)
 {
 	const struct bt_hci_evt_sync_conn_complete *evt = data;
@@ -656,10 +937,12 @@ static void evt_sync_conn_complete(struct hci_dev *dev, struct timeval *tv,
 		return;
 
 	memcpy(conn->bdaddr, evt->bdaddr, 6);
+	conn->frame_connected = frame;
 	conn->setup_seen = true;
 }
 
 static void evt_le_cis_established(struct hci_dev *dev, struct timeval *tv,
+					unsigned long frame,
 					struct iovec *iov)
 {
 	const struct bt_hci_evt_le_cis_established *evt;
@@ -670,10 +953,11 @@ static void evt_le_cis_established(struct hci_dev *dev, struct timeval *tv,
 		return;
 
 	conn = conn_lookup_type(dev, le16_to_cpu(evt->conn_handle),
-						CONN_LE_ISO);
+						BTMON_CONN_CIS);
 	if (!conn)
 		return;
 
+	conn->frame_connected = frame;
 	conn->setup_seen = true;
 
 	link = link_lookup(dev, conn->handle);
@@ -699,6 +983,7 @@ static void evt_le_cis_req(struct hci_dev *dev, struct timeval *tv,
 }
 
 static void evt_le_big_complete(struct hci_dev *dev, struct timeval *tv,
+					unsigned long frame,
 					struct iovec *iov)
 {
 	const struct bt_hci_evt_le_big_complete *evt;
@@ -715,13 +1000,16 @@ static void evt_le_big_complete(struct hci_dev *dev, struct timeval *tv,
 		if (!util_iov_pull_le16(iov, &handle))
 			return;
 
-		conn = conn_lookup_type(dev, handle, CONN_LE_ISO);
-		if (conn)
+		conn = conn_lookup_type(dev, handle, BTMON_CONN_BIS);
+		if (conn) {
 			conn->setup_seen = true;
+			conn->frame_connected = frame;
+		}
 	}
 }
 
 static void evt_le_big_sync_established(struct hci_dev *dev, struct timeval *tv,
+					unsigned long frame,
 					struct iovec *iov)
 {
 	const struct bt_hci_evt_le_big_sync_estabilished *evt;
@@ -738,13 +1026,16 @@ static void evt_le_big_sync_established(struct hci_dev *dev, struct timeval *tv,
 		if (!util_iov_pull_le16(iov, &handle))
 			return;
 
-		conn = conn_lookup_type(dev, handle, CONN_LE_ISO);
-		if (conn)
+		conn = conn_lookup_type(dev, handle, BTMON_CONN_BIS);
+		if (conn) {
 			conn->setup_seen = true;
+			conn->frame_connected = frame;
+		}
 	}
 }
 
 static void evt_le_meta_event(struct hci_dev *dev, struct timeval *tv,
+					unsigned long frame,
 					const void *data, uint16_t size)
 {
 	struct iovec iov = {
@@ -758,27 +1049,28 @@ static void evt_le_meta_event(struct hci_dev *dev, struct timeval *tv,
 
 	switch (subevt) {
 	case BT_HCI_EVT_LE_CONN_COMPLETE:
-		evt_le_conn_complete(dev, tv, &iov);
+		evt_le_conn_complete(dev, tv, frame, &iov);
 		break;
 	case BT_HCI_EVT_LE_ENHANCED_CONN_COMPLETE:
-		evt_le_enh_conn_complete(dev, tv, &iov);
+		evt_le_enh_conn_complete(dev, tv, frame, &iov);
 		break;
 	case BT_HCI_EVT_LE_CIS_ESTABLISHED:
-		evt_le_cis_established(dev, tv, &iov);
+		evt_le_cis_established(dev, tv, frame, &iov);
 		break;
 	case BT_HCI_EVT_LE_CIS_REQ:
 		evt_le_cis_req(dev, tv, &iov);
 		break;
 	case BT_HCI_EVT_LE_BIG_COMPLETE:
-		evt_le_big_complete(dev, tv, &iov);
+		evt_le_big_complete(dev, tv, frame, &iov);
 		break;
 	case BT_HCI_EVT_LE_BIG_SYNC_ESTABILISHED:
-		evt_le_big_sync_established(dev, tv, &iov);
+		evt_le_big_sync_established(dev, tv, frame, &iov);
 		break;
 	}
 }
 
 static void event_pkt(struct timeval *tv, uint16_t index,
+					unsigned long frame,
 					const void *data, uint16_t size)
 {
 	const struct bt_hci_evt_hdr *hdr = data;
@@ -796,10 +1088,10 @@ static void event_pkt(struct timeval *tv, uint16_t index,
 
 	switch (hdr->evt) {
 	case BT_HCI_EVT_CONN_COMPLETE:
-		evt_conn_complete(dev, tv, data, size);
+		evt_conn_complete(dev, tv, frame, data, size);
 		break;
 	case BT_HCI_EVT_DISCONNECT_COMPLETE:
-		evt_disconnect_complete(dev, tv, data, size);
+		evt_disconnect_complete(dev, tv, frame, data, size);
 		break;
 	case BT_HCI_EVT_CMD_COMPLETE:
 		evt_cmd_complete(dev, tv, data, size);
@@ -808,15 +1100,16 @@ static void event_pkt(struct timeval *tv, uint16_t index,
 		evt_num_completed_packets(dev, tv, data, size);
 		break;
 	case BT_HCI_EVT_SYNC_CONN_COMPLETE:
-		evt_sync_conn_complete(dev, tv, data, size);
+		evt_sync_conn_complete(dev, tv, frame, data, size);
 		break;
 	case BT_HCI_EVT_LE_META_EVENT:
-		evt_le_meta_event(dev, tv, data, size);
+		evt_le_meta_event(dev, tv, frame, data, size);
 		break;
 	}
 }
 
-static void stats_add(struct hci_stats *stats, uint16_t size)
+static void stats_add(struct hci_stats *stats, struct timeval *tv,
+							uint16_t size)
 {
 	stats->num++;
 	stats->bytes += size;
@@ -825,6 +1118,39 @@ static void stats_add(struct hci_stats *stats, uint16_t size)
 		stats->min = size;
 	if (!stats->max || size > stats->max)
 		stats->max = size;
+
+	/* Wall-clock timestamp tracking */
+	if (!timerisset(&stats->first_ts))
+		stats->first_ts = *tv;
+	stats->last_ts = *tv;
+
+	/* Windowed throughput: 1-second windows */
+	if (!timerisset(&stats->window_start)) {
+		stats->window_start = *tv;
+		stats->window_bytes = size;
+	} else {
+		struct timeval delta;
+
+		timersub(tv, &stats->window_start, &delta);
+		if (TV_MSEC(delta) >= 1000) {
+			/* Close current window, compute speed */
+			long long speed;
+
+			speed = stats->window_bytes * 8 /
+						TV_MSEC(delta);
+
+			if (!stats->speed_min || speed < stats->speed_min)
+				stats->speed_min = speed;
+			if (speed > stats->speed_max)
+				stats->speed_max = speed;
+
+			/* Start new window */
+			stats->window_start = *tv;
+			stats->window_bytes = size;
+		} else {
+			stats->window_bytes += size;
+		}
+	}
 }
 
 static void conn_pkt_tx(struct hci_conn *conn, struct timeval *tv,
@@ -837,10 +1163,10 @@ static void conn_pkt_tx(struct hci_conn *conn, struct timeval *tv,
 	last_tx->chan = chan;
 	queue_push_tail(conn->tx_queue, last_tx);
 
-	stats_add(&conn->tx, size);
+	stats_add(&conn->tx, tv, size);
 
 	if (chan)
-		stats_add(&chan->tx, size);
+		stats_add(&chan->tx, tv, size);
 }
 
 static void conn_pkt_rx(struct hci_conn *conn, struct timeval *tv,
@@ -856,7 +1182,7 @@ static void conn_pkt_rx(struct hci_conn *conn, struct timeval *tv,
 
 	conn->last_rx = *tv;
 
-	stats_add(&conn->rx, size);
+	stats_add(&conn->rx, tv, size);
 	conn->rx.num_comp++;
 
 	if (chan) {
@@ -868,7 +1194,7 @@ static void conn_pkt_rx(struct hci_conn *conn, struct timeval *tv,
 
 		chan->last_rx = *tv;
 
-		stats_add(&chan->rx, size);
+		stats_add(&chan->rx, tv, size);
 		chan->rx.num_comp++;
 	}
 }
@@ -903,6 +1229,8 @@ static void acl_pkt(struct timeval *tv, uint16_t index, bool out,
 		chan = chan_lookup(conn, cid, out);
 		if (cid == 1)
 			l2cap_sig(conn, out, data + 4, size - 4);
+		else if (cid == 5)
+			l2cap_le_sig(conn, out, data + 4, size - 4);
 		break;
 	}
 
@@ -928,9 +1256,13 @@ static void sco_pkt(struct timeval *tv, uint16_t index, bool out,
 	dev->num_sco++;
 
 	conn = conn_lookup_type(dev, le16_to_cpu(hdr->handle) & 0x0fff,
-								CONN_BR_SCO);
-	if (!conn)
-		return;
+							BTMON_CONN_SCO);
+	if (!conn) {
+		conn = conn_lookup_type(dev, le16_to_cpu(hdr->handle) & 0x0fff,
+							BTMON_CONN_ESCO);
+		if (!conn)
+			return;
+	}
 
 	if (out) {
 		conn_pkt_tx(conn, tv, size - sizeof(*hdr), NULL);
@@ -1015,9 +1347,13 @@ static void iso_pkt(struct timeval *tv, uint16_t index, bool out,
 	dev->num_iso++;
 
 	conn = conn_lookup_type(dev, le16_to_cpu(hdr->handle) & 0x0fff,
-								CONN_LE_ISO);
-	if (!conn)
-		return;
+							BTMON_CONN_CIS);
+	if (!conn) {
+		conn = conn_lookup_type(dev, le16_to_cpu(hdr->handle) & 0x0fff,
+							BTMON_CONN_BIS);
+		if (!conn)
+			return;
+	}
 
 	if (out) {
 		conn_pkt_tx(conn, tv, size - sizeof(*hdr), NULL);
@@ -1042,6 +1378,7 @@ void analyze_trace(const char *path)
 {
 	struct btsnoop *btsnoop_file;
 	unsigned long num_packets = 0;
+	unsigned long num_frames = 0;
 	uint32_t format;
 
 	btsnoop_file = btsnoop_open(path, BTSNOOP_FLAG_PKLG_SUPPORT);
@@ -1079,21 +1416,27 @@ void analyze_trace(const char *path)
 			del_index(&tv, index, buf, pktlen);
 			break;
 		case BTSNOOP_OPCODE_COMMAND_PKT:
+			num_frames++;
 			command_pkt(&tv, index, buf, pktlen);
 			break;
 		case BTSNOOP_OPCODE_EVENT_PKT:
-			event_pkt(&tv, index, buf, pktlen);
+			num_frames++;
+			event_pkt(&tv, index, num_frames, buf, pktlen);
 			break;
 		case BTSNOOP_OPCODE_ACL_TX_PKT:
+			num_frames++;
 			acl_pkt(&tv, index, true, buf, pktlen);
 			break;
 		case BTSNOOP_OPCODE_ACL_RX_PKT:
+			num_frames++;
 			acl_pkt(&tv, index, false, buf, pktlen);
 			break;
 		case BTSNOOP_OPCODE_SCO_TX_PKT:
+			num_frames++;
 			sco_pkt(&tv, index, true, buf, pktlen);
 			break;
 		case BTSNOOP_OPCODE_SCO_RX_PKT:
+			num_frames++;
 			sco_pkt(&tv, index, false, buf, pktlen);
 			break;
 		case BTSNOOP_OPCODE_OPEN_INDEX:
@@ -1118,9 +1461,11 @@ void analyze_trace(const char *path)
 			ctrl_msg(&tv, index, buf, pktlen);
 			break;
 		case BTSNOOP_OPCODE_ISO_TX_PKT:
+			num_frames++;
 			iso_pkt(&tv, index, true, buf, pktlen);
 			break;
 		case BTSNOOP_OPCODE_ISO_RX_PKT:
+			num_frames++;
 			iso_pkt(&tv, index, false, buf, pktlen);
 			break;
 		default:

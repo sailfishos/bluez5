@@ -8,6 +8,8 @@
  *
  */
 
+#pragma once
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -89,3 +91,15 @@ bool mgmt_unregister_index(struct mgmt *mgmt, uint16_t index);
 bool mgmt_unregister_all(struct mgmt *mgmt);
 
 uint16_t mgmt_get_mtu(struct mgmt *mgmt);
+
+enum mgmt_io_capability {
+	MGMT_IO_CAPABILITY_DISPLAYONLY		= 0x00,
+	MGMT_IO_CAPABILITY_DISPLAYYESNO		= 0x01,
+	MGMT_IO_CAPABILITY_KEYBOARDONLY		= 0x02,
+	MGMT_IO_CAPABILITY_NOINPUTNOOUTPUT	= 0x03,
+	MGMT_IO_CAPABILITY_KEYBOARDDISPLAY	= 0x04,
+	MGMT_IO_CAPABILITY_INVALID		= 0xFF,
+};
+
+char *mgmt_iocap_generator(const char *text, int state);
+enum mgmt_io_capability mgmt_parse_io_capability(const char *capability);

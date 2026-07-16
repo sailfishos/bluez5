@@ -100,14 +100,21 @@
 
 #define COLOR_PHY_PACKET		COLOR_BLUE
 
-#define UNKNOWN_MANUFACTURER 0xffff
+#define COMPANY_ID_INTEL	0x0002
+#define COMPANY_ID_BROADCOM	0x000F
+#define COMPANY_ID_QUALCOMM	0x001D
+#define COMPANY_ID_MEDIATEK	0x0046
+#define COMPANY_ID_APPLE	0x004C
+#define COMPANY_ID_REALTEK	0x005D
+#define COMPANY_ID_LINUX	0x05F1
+#define COMPANY_ID_UNKNOWN	0xFFFF
 
 static time_t time_offset = ((time_t) -1);
 static int priority_level = BTSNOOP_PRIORITY_DEBUG;
 static unsigned long filter_mask = 0;
 static bool index_filter = false;
 static uint16_t index_current = 0;
-static uint16_t fallback_manufacturer = UNKNOWN_MANUFACTURER;
+static uint16_t fallback_manufacturer = COMPANY_ID_UNKNOWN;
 
 #define CTRL_RAW  0x0000
 #define CTRL_USER 0x0001
@@ -221,21 +228,23 @@ static struct index_buf_pool *get_pool(uint16_t index, uint8_t type)
 		return NULL;
 
 	switch (type) {
-	case 0x00:
+	case BTMON_CONN_ACL:
 		if (index_list[index].acl.total)
 			return &index_list[index].acl;
 		break;
-	case 0x01:
+	case BTMON_CONN_LE:
 		if (index_list[index].le.total)
 			return &index_list[index].le;
 		break;
-	case 0x05:
-		if (index_list[index].iso.total)
-			return &index_list[index].iso;
-		break;
-	default:
+	case BTMON_CONN_SCO:
+	case BTMON_CONN_ESCO:
 		if (index_list[index].sco.total)
 			return &index_list[index].sco;
+		break;
+	case BTMON_CONN_CIS:
+	case BTMON_CONN_BIS:
+		if (index_list[index].iso.total)
+			return &index_list[index].iso;
 		break;
 	}
 
@@ -322,6 +331,43 @@ static void assign_handle(uint16_t index, uint16_t handle, uint8_t type,
 		memcpy(conn->dst, dst, sizeof(conn->dst));
 		conn->dst_type = dst_type;
 	}
+
+	switch (conn->dst_type) {
+	case 0x00:
+	case 0x02:
+		/* If address public set dst_oui */
+		hwdb_get_company(conn->dst, &conn->dst_oui);
+		break;
+	case 0x01:
+	case 0x03:
+		/* Attempt to resolve the identity if resolvable */
+		if ((conn->dst[5] & 0xc0) == 0x40) {
+			keys_resolve_identity(conn->dst, conn->dst,
+						&conn->dst_type);
+			/* If identity address is public set dst_out */
+			if (conn->dst_type == 0x00 || conn->dst_type == 0x02) {
+				hwdb_get_company(conn->dst, &conn->dst_oui);
+				break;
+			}
+		}
+
+		/* Set the random type */
+		switch ((conn->dst[5] & 0xc0) >> 6) {
+		case 0x00:
+			conn->dst_rtype = strdup("Non-Resolvable");
+			break;
+		case 0x01:
+			conn->dst_rtype = strdup("Resolvable");
+			break;
+		case 0x03:
+			conn->dst_rtype = strdup("Static");
+			break;
+		default:
+			conn->dst_rtype = strdup("Reserved");
+			break;
+		}
+		break;
+	}
 }
 
 struct packet_conn_data *packet_get_conn_data(uint16_t handle)
@@ -329,7 +375,7 @@ struct packet_conn_data *packet_get_conn_data(uint16_t handle)
 	int i;
 
 	for (i = 0; i < MAX_CONN; i++) {
-		if (conn_list[i].handle == handle)
+		if (conn_list[i].handle == acl_handle(handle))
 			return &conn_list[i];
 	}
 
@@ -404,8 +450,10 @@ void packet_set_fallback_manufacturer(uint16_t manufacturer)
 
 void packet_set_msft_evt_prefix(const uint8_t *prefix, uint8_t len)
 {
-	if (index_current < MAX_INDEX && len < 8)
+	if (index_current < MAX_INDEX && len < 8) {
 		memcpy(index_list[index_current].msft_evt_prefix, prefix, len);
+		index_list[index_current].msft_evt_len = len;
+	}
 }
 
 static void cred_pid(struct ucred *cred, char *str, size_t len)
@@ -885,10 +933,30 @@ static void print_lt_addr(uint8_t lt_addr)
 	print_field("LT address: %d", lt_addr);
 }
 
+static const char *conn_type_str(uint8_t type)
+{
+	switch (type) {
+	case BTMON_CONN_ACL:
+		return "BR-ACL";
+	case BTMON_CONN_LE:
+		return "LE-ACL";
+	case BTMON_CONN_SCO:
+		return "BR-SCO";
+	case BTMON_CONN_ESCO:
+		return "BR-ESCO";
+	case BTMON_CONN_CIS:
+		return "LE-CIS";
+	case BTMON_CONN_BIS:
+		return "LE-BIS";
+	default:
+		return "unknown";
+	}
+}
+
 static void print_handle_native(uint16_t handle)
 {
 	struct packet_conn_data *conn;
-	char label[25];
+	char label[32];
 
 	conn = packet_get_conn_data(handle);
 	if (!conn) {
@@ -896,7 +964,8 @@ static void print_handle_native(uint16_t handle)
 		return;
 	}
 
-	sprintf(label, "Handle: %d Address", handle);
+	sprintf(label, "Handle: %d (%s) Address", handle,
+				conn_type_str(conn->type));
 	print_addr(label, conn->dst, conn->dst_type);
 }
 
@@ -2348,6 +2417,12 @@ static void print_rssi(int8_t rssi)
 	packet_print_rssi("RSSI", rssi);
 }
 
+static void print_slot_125u(const char *label, uint16_t value)
+{
+	 print_field("%s: %.3f msec (0x%4.4x)", label,
+				le16_to_cpu(value) * 0.125, le16_to_cpu(value));
+}
+
 static void print_slot_625(const char *label, uint16_t value)
 {
 	 print_field("%s: %.3f msec (0x%4.4x)", label,
@@ -2827,6 +2902,13 @@ static const struct bitfield_data features_le_0[] = {
 static const struct bitfield_data features_le_1[] = {
 	{ 0, "Monitoring Advertisers"				},
 	{ 1, "Frame Space Update"				},
+	{ 2, "UTP OTA Mode"					},
+	{ 3, "UTP HCI Pairing"					},
+	{ 4, "LL_OTA_UTP_IND maximum length"			},
+	{ 5, "LL_OTA_UTP_IND maximum length"			},
+	{ 8, "Shorter Connection Intervals"			},
+	{ 9, "Shorter Connection Intervals (Host Support)"	},
+	{ 10, "LE Flushable ACL Data"				},
 };
 
 static const struct bitfield_data features_msft[] = {
@@ -2835,7 +2917,9 @@ static const struct bitfield_data features_msft[] = {
 	{  2, "RSSI Monitoring of LE advertisements"		},
 	{  3, "Advertising Monitoring of LE advertisements"	},
 	{  4, "Verifying the validity of P-192 and P-256 keys"	},
-	{  5, "Continuous Advertising Monitoring"		},
+	{  5, "Continuous Advertising Monitoring (v1)"		},
+	{  7, "AVDTP offload"					},
+	{ 10, "Continuous Advertising Monitoring (v2)"		},
 	{ }
 };
 
@@ -3267,6 +3351,8 @@ static const struct bitfield_data events_le_table[] = {
 	{ 50, "LE CS Test End Complete"			},
 	{ 51, "LE Monitored Advertisers Report"		},
 	{ 52, "LE Frame Space Update Complete"		},
+	{ 53, "LE UTP Received"				},
+	{ 54, "LE Connection Rate Change"		},
 	{ }
 };
 
@@ -3427,7 +3513,7 @@ static void print_manufacturer_data(const void *data, uint8_t data_len)
 	packet_print_company("Company", company);
 
 	switch (company) {
-	case 76:
+	case COMPANY_ID_APPLE:
 	case 19456:
 		print_manufacturer_apple(data + 2, data_len - 2);
 		break;
@@ -3548,7 +3634,7 @@ static void print_ltv(const char *str, void *user_data)
 	print_field("%s: %s", label, str);
 }
 
-static void print_base_annoucement(const uint8_t *data, uint8_t data_len)
+static void print_base_announcement(const uint8_t *data, uint8_t data_len)
 {
 	struct iovec iov;
 	struct bt_hci_le_pa_base_data *base_data;
@@ -3647,7 +3733,7 @@ done:
 		print_hex_field("  Data", iov.iov_base, iov.iov_len);
 }
 
-static void print_broadcast_annoucement(const uint8_t *data, uint8_t data_len)
+static void print_broadcast_announcement(const uint8_t *data, uint8_t data_len)
 {
 	uint32_t bid;
 
@@ -3660,12 +3746,57 @@ static void print_broadcast_annoucement(const uint8_t *data, uint8_t data_len)
 	print_field("Broadcast ID: %u (0x%06x)", bid, bid);
 }
 
+static const struct bitfield_data pbp_feat_table[] = {
+	{ 0, "Encryption"					},
+	{ 1, "Standard Quality"					},
+	{ 2, "High Quality"					},
+	{}
+};
+
+static void print_pbp_announcement(const uint8_t *data, uint8_t data_len)
+{
+	struct iovec iov, meta;
+	uint8_t feat;
+	uint8_t len;
+	uint8_t mask;
+
+	iov.iov_base = (void *) data;
+	iov.iov_len = data_len;
+
+	if (util_iov_pull_u8(&iov, &feat)) {
+		print_text(COLOR_ERROR, "  invalid features");
+		return;
+	}
+
+	print_field("Features: 0x%02x", feat);
+	mask = print_bitfield(4, feat, pbp_feat_table);
+
+	if (mask)
+		print_text(COLOR_UNKNOWN_SERVICE_CLASS,
+					"  Unknown feature (0x%2.2x)", mask);
+
+	if (util_iov_pull_u8(&iov, &len)) {
+		print_text(COLOR_ERROR, "  invalid metadata length");
+		return;
+	}
+
+	if (!len)
+		return;
+
+	meta.iov_base = util_iov_pull_mem(&iov, len);
+	meta.iov_len = len;
+
+	bt_bap_debug_metadata(meta.iov_base, meta.iov_len, print_ltv,
+						"    Metadata");
+}
+
 static const struct service_data_decoder {
 	uint16_t uuid;
 	void (*func)(const uint8_t *data, uint8_t data_len);
 } service_data_decoders[] = {
-	{ 0x1851, print_base_annoucement },
-	{ 0x1852, print_broadcast_annoucement }
+	{ 0x1851, print_base_announcement },
+	{ 0x1852, print_broadcast_announcement },
+	{ 0x1856, print_pbp_announcement }
 };
 
 static void print_service_data(const uint8_t *data, uint8_t data_len)
@@ -4292,6 +4423,41 @@ static int addr2str(const uint8_t *addr, char *str)
 			addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
 }
 
+static int get_msft_opcode(uint16_t manufacturer)
+{
+	switch (manufacturer) {
+	case COMPANY_ID_INTEL:
+		return 0xFC1E;
+	case COMPANY_ID_QUALCOMM:
+		return 0xFD70;
+	case COMPANY_ID_MEDIATEK:
+		return 0xFD30;
+	case COMPANY_ID_REALTEK:
+		return 0xFCF0;
+	case COMPANY_ID_LINUX:
+		return 0xFC1E;
+	default:
+		return BT_HCI_CMD_NOP;
+	}
+}
+
+static bool msft_event_prefix_match(const void *data, int size)
+{
+	const void *prefix = index_list[index_current].msft_evt_prefix;
+	int prefix_len = index_list[index_current].msft_evt_len;
+
+	/*
+	 * MSFT event has one byte of event code following the MSFT prefix.
+	 * We need to check the event code is valid, as it's possible for
+	 * a vendor to use the same MSFT prefix but for other events.
+	 */
+	if (size >= prefix_len + 1 && !memcmp(prefix, data, prefix_len))
+		return msft_event_code_valid(
+				((const uint8_t *) data)[prefix_len]);
+
+	return false;
+}
+
 void packet_monitor(struct timeval *tv, struct ucred *cred,
 					uint16_t index, uint16_t opcode,
 					const void *data, uint16_t size)
@@ -4384,50 +4550,8 @@ void packet_monitor(struct timeval *tv, struct ucred *cred,
 		if (index < MAX_INDEX) {
 			memcpy(index_list[index].bdaddr, ii->bdaddr, 6);
 			index_list[index].manufacturer = manufacturer;
-
-			switch (manufacturer) {
-			case 2:
-				/*
-				 * Intel controllers that support the
-				 * Microsoft vendor extension are using
-				 * 0xFC1E for VsMsftOpCode.
-				 */
-				index_list[index].msft_opcode = 0xFC1E;
-				break;
-			case 29:
-				/*
-				 * Qualcomm controllers that support the
-				 * Microsoft vendor extensions are using
-				 * 0xFD70 for VsMsftOpCode.
-				 */
-				index_list[index].msft_opcode = 0xFD70;
-				break;
-			case 70:
-				/*
-				 * Mediatek controllers that support the
-				 * Microsoft vendor extensions are using
-				 * 0xFD30 for VsMsftOpCode.
-				 */
-				index_list[index].msft_opcode = 0xFD30;
-				break;
-			case 93:
-				/*
-				 * Realtek controllers that support the
-				 * Microsoft vendor extensions are using
-				 * 0xFCF0 for VsMsftOpCode.
-				 */
-				index_list[index].msft_opcode = 0xFCF0;
-				break;
-			case 1521:
-				/*
-				 * Emulator controllers use Linux Foundation as
-				 * manufacturer and support the
-				 * Microsoft vendor extensions using
-				 * 0xFC1E for VsMsftOpCode.
-				 */
-				index_list[index].msft_opcode = 0xFC1E;
-				break;
-			}
+			index_list[index].msft_opcode =
+				get_msft_opcode(manufacturer);
 		}
 
 		addr2str(ii->bdaddr, str);
@@ -4442,7 +4566,7 @@ void packet_monitor(struct timeval *tv, struct ucred *cred,
 		packet_vendor_diag(tv, index, manufacturer, data, size);
 		break;
 	case BTSNOOP_OPCODE_SYSTEM_NOTE:
-		packet_system_note(tv, cred, index, data);
+		packet_system_note(tv, cred, index, data, size);
 		break;
 	case BTSNOOP_OPCODE_USER_LOGGING:
 		ul = data;
@@ -6463,12 +6587,16 @@ static void read_local_version_rsp(uint16_t index, const void *data,
 		}
 
 		index_list[index_current].manufacturer = manufacturer;
+		if (index_list[index_current].msft_opcode == BT_HCI_CMD_NOP) {
+			index_list[index_current].msft_opcode =
+				get_msft_opcode(manufacturer);
+		}
 	}
 
 	print_manufacturer(rsp->manufacturer);
 
 	switch (manufacturer) {
-	case 15:
+	case COMPANY_ID_BROADCOM:
 		print_manufacturer_broadcom(rsp->lmp_subver, rsp->hci_rev);
 		break;
 	}
@@ -9694,6 +9822,33 @@ static void le_cs_test_cmd(uint16_t index, const void *data, uint8_t size)
 		cmd->override_parameters_length);
 }
 
+static void le_set_host_feature_v2_cmd(uint16_t index, const void *data,
+							uint8_t size)
+{
+	const struct bt_hci_cmd_le_set_host_feature_v2 *cmd = data;
+	uint8_t page;
+	uint8_t features[24] = {};
+	uint16_t bit_number = le16_to_cpu(cmd->bit_number);
+
+	print_field("Bit Number: %u", bit_number);
+
+	if (bit_number < 64) {
+		features[bit_number / 8] |= (1 << (bit_number % 8));
+		print_features(0, features, 0x01);
+	} else {
+		uint16_t bit;
+
+		page = (bit_number - 64) / 24 + 1;
+		/* Adjust the bit number to be relative to the page */
+		bit = (bit_number - 64) % 24;
+		/* Set the bit in the features array */
+		features[bit / 8] |= (1 << ((bit % 8)));
+		print_features(page, features, 0x01);
+	}
+
+	print_field("Bit Value: %u", cmd->bit_value);
+}
+
 static void le_cs_test_rsp(uint16_t index, const void *data, uint8_t size)
 {
 	const struct bt_hci_rsp_le_cs_test *rsp = data;
@@ -9735,6 +9890,89 @@ static void le_fsu_cmd(uint16_t index, const void *data, uint8_t size)
 				le16_to_cpu(cmd->frame_space_max));
 	print_le_phys("PHYs", cmd->phys);
 	print_fsu_types(cmd->types);
+}
+
+static void le_conn_rate_cmd(uint16_t index, const void *data, uint8_t size)
+{
+	const struct bt_hci_cmd_le_conn_rate *cmd = data;
+
+	print_handle(cmd->handle);
+	print_slot_125u("Connection Interval Min", cmd->interval_min);
+	print_slot_125u("Connection Interval Max", cmd->interval_max);
+	print_field("Subrate Min: %u (0x%4.4x)",
+				le16_to_cpu(cmd->subrate_min),
+				le16_to_cpu(cmd->subrate_min));
+	print_field("Subrate Max: %u (0x%4.4x)",
+				le16_to_cpu(cmd->subrate_max),
+				le16_to_cpu(cmd->subrate_max));
+	print_field("Max Latency: %u (0x%4.4x)",
+				le16_to_cpu(cmd->max_latency),
+				le16_to_cpu(cmd->max_latency));
+	print_field("Continuation Number: %u (0x%4.4x)",
+				le16_to_cpu(cmd->cont_num),
+				le16_to_cpu(cmd->cont_num));
+	print_field("Supervision Timeout: %d ms (0x%4.4x)",
+				le16_to_cpu(cmd->supv_timeout) * 10,
+				le16_to_cpu(cmd->supv_timeout));
+	print_slot_125u("Minimum CE Length", cmd->min_ce_len);
+	print_slot_125u("Maximum CE Length", cmd->max_ce_len);
+}
+
+static void le_set_def_rate_cmd(uint16_t index, const void *data, uint8_t size)
+{
+	const struct bt_hci_cmd_le_set_def_rate *cmd = data;
+
+	print_slot_125u("Connection Interval Min", cmd->interval_min);
+	print_slot_125u("Connection Interval Max", cmd->interval_max);
+	print_field("Subrate Min: %u (0x%4.4x)",
+				le16_to_cpu(cmd->subrate_min),
+				le16_to_cpu(cmd->subrate_min));
+	print_field("Subrate Max: %u (0x%4.4x)",
+				le16_to_cpu(cmd->subrate_max),
+				le16_to_cpu(cmd->subrate_max));
+	print_field("Max Latency: %u (0x%4.4x)",
+				le16_to_cpu(cmd->max_latency),
+				le16_to_cpu(cmd->max_latency));
+	print_field("Continuation Number: %u (0x%4.4x)",
+				le16_to_cpu(cmd->cont_num),
+				le16_to_cpu(cmd->cont_num));
+	print_field("Supervision Timeout: %d ms (0x%4.4x)",
+				le16_to_cpu(cmd->supv_timeout) * 10,
+				le16_to_cpu(cmd->supv_timeout));
+	print_slot_125u("Minimum CE Length", cmd->min_ce_len);
+	print_slot_125u("Maximum CE Length", cmd->max_ce_len);
+}
+
+static void le_read_conn_interval_rsp(uint16_t index, const void *data,
+					uint8_t size)
+{
+	const struct bt_hci_rsp_le_read_conn_interval *rsp = data;
+	struct iovec iov;
+	uint8_t i;
+
+	print_status(rsp->status);
+	print_field("Number of Groups: %u", rsp->num_grps);
+
+	if (!rsp->num_grps)
+		return;
+
+	iov.iov_base = (void *)rsp->grps;
+	iov.iov_len = size - sizeof(*rsp);
+
+	for (i = 0; i < rsp->num_grps; i++) {
+		const struct bt_hci_le_conn_interval_group *grp;
+
+		grp = util_iov_pull(&iov, sizeof(*grp));
+		if (!grp) {
+			print_text(COLOR_ERROR, "  invalid group");
+			break;
+		}
+
+		print_field("Group %u:", i);
+		print_slot_125u("  Interval Min", grp->min);
+		print_slot_125u("  Interval Max", grp->max);
+		print_slot_125u("  Interval Stride", grp->stride);
+	}
 }
 
 struct opcode_data {
@@ -10804,10 +11042,30 @@ static const struct opcode_data opcode_table[] = {
 				true},
 	{ BT_HCI_CMD_LE_CS_TEST_END, BT_HCI_BIT_LE_CS_TEST_END,
 				"LE CS Test End" },
+	{ BT_HCI_CMD_LE_SET_HOST_FEATURE_V2, BT_HCI_BIT_LE_SET_HOST_FEATURE_V2,
+			"LE Set Host Feature V2",
+			le_set_host_feature_v2_cmd,
+			sizeof(struct bt_hci_cmd_le_set_host_feature_v2),
+			true, status_rsp, 1, true },
 	{ BT_HCI_CMD_LE_FSU, BT_HCI_BIT_LE_FSU,
 				"LE Frame Space Update", le_fsu_cmd,
 				sizeof(struct bt_hci_cmd_le_fsu),
 				true, status_rsp, 1, true },
+	{ BT_HCI_CMD_LE_CONN_RATE, BT_HCI_BIT_LE_CONN_RATE,
+				"LE Connection Rate Request", le_conn_rate_cmd,
+				sizeof(struct bt_hci_cmd_le_conn_rate),
+				true, status_rsp, 1, true },
+	{ BT_HCI_CMD_LE_SET_DEF_RATE, BT_HCI_BIT_LE_SET_DEF_RATE,
+				"LE Set Default Rate Parameteres",
+				le_set_def_rate_cmd,
+				sizeof(struct bt_hci_cmd_le_set_def_rate),
+				true, status_rsp, 1, true },
+	{ BT_HCI_CMD_LE_READ_CONN_INTERVAL,
+				BT_HCI_BIT_LE_READ_CONN_INTERVAL,
+				"LE Read Minimum Supported Connection Interval",
+				null_cmd, 0, true, le_read_conn_interval_rsp,
+				sizeof(struct bt_hci_rsp_le_read_conn_interval),
+				true },
 	{ }
 };
 
@@ -10840,11 +11098,11 @@ static const char *current_vendor_str(uint16_t ocf)
 		return "Microsoft";
 
 	switch (manufacturer) {
-	case 2:
+	case COMPANY_ID_INTEL:
 		return "Intel";
-	case 15:
+	case COMPANY_ID_BROADCOM:
 		return "Broadcom";
-	case 93:
+	case COMPANY_ID_REALTEK:
 		return "Realtek";
 	}
 
@@ -10868,9 +11126,9 @@ static const struct vendor_ocf *current_vendor_ocf(uint16_t ocf)
 		return msft_vendor_ocf();
 
 	switch (manufacturer) {
-	case 2:
+	case COMPANY_ID_INTEL:
 		return intel_vendor_ocf(ocf);
-	case 15:
+	case COMPANY_ID_BROADCOM:
 		return broadcom_vendor_ocf(ocf);
 	}
 
@@ -10878,10 +11136,15 @@ static const struct vendor_ocf *current_vendor_ocf(uint16_t ocf)
 }
 
 static const struct vendor_evt *current_vendor_evt(const void *data,
-							int *consumed_size)
+					uint8_t size, int *consumed_size)
 {
 	uint16_t manufacturer;
 	uint8_t evt = *((const uint8_t *) data);
+
+	if (msft_event_prefix_match(data, size)) {
+		*consumed_size = index_list[index_current].msft_evt_len;
+		return msft_vendor_evt();
+	}
 
 	/* A regular vendor event consumes 1 byte. */
 	*consumed_size = 1;
@@ -10892,18 +11155,21 @@ static const struct vendor_evt *current_vendor_evt(const void *data,
 		manufacturer = fallback_manufacturer;
 
 	switch (manufacturer) {
-	case 2:
+	case COMPANY_ID_INTEL:
 		return intel_vendor_evt(data, consumed_size);
-	case 15:
+	case COMPANY_ID_BROADCOM:
 		return broadcom_vendor_evt(evt);
 	}
 
 	return NULL;
 }
 
-static const char *current_vendor_evt_str(void)
+static const char *current_vendor_evt_str(const void *data, uint8_t size)
 {
 	uint16_t manufacturer;
+
+	if (msft_event_prefix_match(data, size))
+		return "Microsoft";
 
 	if (index_current < MAX_INDEX)
 		manufacturer = index_list[index_current].manufacturer;
@@ -10911,11 +11177,11 @@ static const char *current_vendor_evt_str(void)
 		manufacturer = fallback_manufacturer;
 
 	switch (manufacturer) {
-	case 2:
+	case COMPANY_ID_INTEL:
 		return "Intel";
-	case 15:
+	case COMPANY_ID_BROADCOM:
 		return "Broadcom";
-	case 93:
+	case COMPANY_ID_REALTEK:
 		return "Realtek";
 	}
 
@@ -10959,7 +11225,7 @@ static void conn_complete_evt(struct timeval *tv, uint16_t index,
 	print_enable("Encryption", evt->encr_mode);
 
 	if (evt->status == 0x00)
-		assign_handle(index, le16_to_cpu(evt->handle), 0x00,
+		assign_handle(index, le16_to_cpu(evt->handle), BTMON_CONN_ACL,
 					(void *)evt->bdaddr, BDADDR_BREDR);
 }
 
@@ -11056,7 +11322,7 @@ static void remote_version_complete_evt(struct timeval *tv, uint16_t index,
 	print_manufacturer(evt->manufacturer);
 
 	switch (le16_to_cpu(evt->manufacturer)) {
-	case 15:
+	case COMPANY_ID_BROADCOM:
 		print_manufacturer_broadcom(evt->lmp_subver, 0xffff);
 		break;
 	}
@@ -11546,7 +11812,9 @@ static void sync_conn_complete_evt(struct timeval *tv, uint16_t index,
 	print_air_mode(evt->air_mode);
 
 	if (evt->status == 0x00)
-		assign_handle(index, le16_to_cpu(evt->handle), evt->link_type,
+		assign_handle(index, le16_to_cpu(evt->handle),
+					evt->link_type ? BTMON_CONN_ESCO :
+					BTMON_CONN_SCO,
 					(void *)evt->bdaddr, BDADDR_BREDR);
 }
 
@@ -11959,6 +12227,17 @@ static void auth_payload_timeout_expired_evt(struct timeval *tv, uint16_t index,
 	print_handle(evt->handle);
 }
 
+static void encrypt_change_evt_v2(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
+{
+	const struct bt_hci_evt_encrypt_change_v2 *evt = data;
+
+	print_status(evt->status);
+	print_handle(evt->handle);
+	print_encr_mode_change(evt->encr_mode, evt->handle);
+	print_key_size(evt->encr_key_size);
+}
+
 static void le_conn_complete_evt(struct timeval *tv, uint16_t index,
 					const void *data, uint8_t size)
 {
@@ -11977,7 +12256,7 @@ static void le_conn_complete_evt(struct timeval *tv, uint16_t index,
 	print_field("Central clock accuracy: 0x%2.2x", evt->clock_accuracy);
 
 	if (evt->status == 0x00)
-		assign_handle(index, le16_to_cpu(evt->handle), 0x01,
+		assign_handle(index, le16_to_cpu(evt->handle), BTMON_CONN_LE,
 				(void *)evt->peer_addr, evt->peer_addr_type);
 }
 
@@ -12108,7 +12387,7 @@ static void le_enhanced_conn_complete_evt(struct timeval *tv, uint16_t index,
 	print_field("Central clock accuracy: 0x%2.2x", evt->clock_accuracy);
 
 	if (evt->status == 0x00)
-		assign_handle(index, le16_to_cpu(evt->handle), 0x01,
+		assign_handle(index, le16_to_cpu(evt->handle), BTMON_CONN_LE,
 				(void *)evt->peer_addr, evt->peer_addr_type);
 }
 
@@ -12508,7 +12787,8 @@ static void le_cis_established_evt(struct timeval *tv, uint16_t index,
 	print_slot_125("ISO Interval", evt->interval);
 
 	if (!evt->status)
-		assign_handle(index, le16_to_cpu(evt->conn_handle), 0x05,
+		assign_handle(index, le16_to_cpu(evt->conn_handle),
+					BTMON_CONN_CIS,
 					NULL, BDADDR_LE_PUBLIC);
 }
 
@@ -12559,7 +12839,8 @@ static void le_big_complete_evt(struct timeval *tv, uint16_t index,
 
 		for (i = 0; i < evt->num_bis; i++)
 			assign_handle(index, le16_to_cpu(evt->bis_handle[i]),
-					0x05, NULL, BDADDR_LE_PUBLIC);
+					BTMON_CONN_BIS, NULL,
+					BDADDR_LE_PUBLIC);
 	}
 }
 
@@ -12594,7 +12875,7 @@ static void le_big_sync_estabilished_evt(struct timeval *tv, uint16_t index,
 
 		for (i = 0; i < evt->num_bis; i++)
 			assign_handle(index, le16_to_cpu(evt->bis[i]),
-					0x05, NULL, BDADDR_LE_PUBLIC);
+					BTMON_CONN_BIS, NULL, BDADDR_LE_PUBLIC);
 	}
 }
 
@@ -13297,6 +13578,26 @@ static void le_fsu_evt(struct timeval *tv, uint16_t index,
 	print_fsu_types(evt->types);
 }
 
+static void le_conn_rate_change_evt(struct timeval *tv, uint16_t index,
+					const void *data, uint8_t size)
+{
+	const struct bt_hci_evt_le_conn_rate_change *evt = data;
+
+	print_handle(evt->handle);
+	print_slot_125u("Connection Interval", le16_to_cpu(evt->interval));
+	print_field("Subrate Factor: %u (0x%4.4x)", le16_to_cpu(evt->subrate),
+					le16_to_cpu(evt->subrate));
+	print_field("Peripheral Latency: %u (0x%4.4x)",
+					le16_to_cpu(evt->latency),
+					le16_to_cpu(evt->latency));
+	print_field("Continuation Number: %u (0x%4.4x)",
+					le16_to_cpu(evt->cont_number),
+					le16_to_cpu(evt->cont_number));
+	print_field("Supervision Timeout: %u ms (0x%4.4X)",
+					le16_to_cpu(evt->supv_timeout),
+					le16_to_cpu(evt->supv_timeout));
+}
+
 struct subevent_data {
 	uint8_t subevent;
 	const char *str;
@@ -13463,6 +13764,10 @@ static const struct subevent_data le_meta_event_table[] = {
 	{ BT_HCI_EVT_LE_FSU_COMPLETE,
 		"LE Frame Space Update Complete",
 		le_fsu_evt, sizeof(struct bt_hci_evt_le_fsu_complete) },
+	{ BT_HCI_EVT_LE_CONN_RATE_CHANGE,
+		"LE Connection Rate Change",
+		le_conn_rate_change_evt,
+		sizeof(struct bt_hci_evt_le_conn_rate_change) },
 	{ }
 };
 
@@ -13496,17 +13801,20 @@ static void vendor_evt(struct timeval *tv, uint16_t index,
 	struct subevent_data vendor_data;
 	char vendor_str[150];
 	int consumed_size;
-	const struct vendor_evt *vnd = current_vendor_evt(data, &consumed_size);
+	const struct vendor_evt *vnd = current_vendor_evt(data, size,
+								&consumed_size);
 
 	if (vnd) {
-		const char *str = current_vendor_evt_str();
+		const char *str = current_vendor_evt_str(data, size);
 
 		if (str) {
 			snprintf(vendor_str, sizeof(vendor_str),
 						"%s %s", str, vnd->str);
 			vendor_data.str = vendor_str;
-		} else
+		} else {
 			vendor_data.str = vnd->str;
+		}
+
 		vendor_data.subevent = vnd->evt;
 		vendor_data.func = vnd->evt_func;
 		vendor_data.size = vnd->evt_size;
@@ -13686,6 +13994,8 @@ static const struct event_data event_table[] = {
 	{ 0x57, "Authenticated Payload Timeout Expired",
 				auth_payload_timeout_expired_evt, 2, true },
 	{ 0x58, "SAM Status Change" },
+	{ 0x59, "Encryption Change v2",
+				encrypt_change_evt_v2, 5, true },
 	{ 0xfe, "Testing" },
 	{ 0xff, "Vendor", vendor_evt, 0, false },
 	{ }
@@ -13744,7 +14054,7 @@ void packet_vendor_diag(struct timeval *tv, uint16_t index,
 					"Vendor Diagnostic", NULL, extra_str);
 
 	switch (manufacturer) {
-	case 15:
+	case COMPANY_ID_BROADCOM:
 		broadcom_lm_diag(data, size);
 		break;
 	default:
@@ -13753,11 +14063,16 @@ void packet_vendor_diag(struct timeval *tv, uint16_t index,
 	}
 }
 
-void packet_system_note(struct timeval *tv, struct ucred *cred,
-					uint16_t index, const void *message)
+void packet_system_note(struct timeval *tv, struct ucred *cred, uint16_t index,
+					const void *data, uint16_t size)
 {
-	print_packet(tv, cred, '=', index, NULL, COLOR_SYSTEM_NOTE,
-					"Note", message, NULL);
+	char *str = strndup(data, size);
+
+	if (str) {
+		print_packet(tv, cred, '=', index, NULL, COLOR_SYSTEM_NOTE,
+							"Note", str, NULL);
+		free(str);
+	}
 }
 
 struct monitor_l2cap_hdr {
@@ -14047,6 +14362,43 @@ static void packet_enqueue_tx(struct timeval *tv, uint16_t handle,
 	queue_push_tail(conn->tx_q, frame);
 }
 
+static void handle_str_append_addr(char *handle_str,
+					struct packet_conn_data *conn)
+{
+	if (!conn)
+		return;
+
+	switch (conn->dst_type) {
+	case 0x00:
+	case 0x02:
+		if (conn->dst_oui) {
+			sprintf(handle_str + strlen(handle_str),
+				" [%2.2X:%2.2X:%2.2X:%2.2X:%2.2X:%2.2X (%.16s)]",
+				conn->dst[5], conn->dst[4], conn->dst[3],
+				conn->dst[2], conn->dst[1], conn->dst[0],
+				conn->dst_oui);
+			return;
+		}
+		break;
+	case 0x01:
+	case 0x03:
+		if (conn->dst_rtype) {
+			sprintf(handle_str + strlen(handle_str),
+				" [%2.2X:%2.2X:%2.2X:%2.2X:%2.2X:%2.2X (%.16s)]",
+				conn->dst[5], conn->dst[4], conn->dst[3],
+				conn->dst[2], conn->dst[1], conn->dst[0],
+				conn->dst_rtype);
+			return;
+		}
+		break;
+	}
+
+	sprintf(handle_str + strlen(handle_str),
+			" [%2.2X:%2.2X:%2.2X:%2.2X:%2.2X:%2.2X]",
+			conn->dst[5], conn->dst[4], conn->dst[3],
+			conn->dst[2], conn->dst[1], conn->dst[0]);
+}
+
 void packet_hci_acldata(struct timeval *tv, struct ucred *cred, uint16_t index,
 				bool in, const void *data, uint16_t size)
 {
@@ -14054,7 +14406,8 @@ void packet_hci_acldata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	uint16_t handle = le16_to_cpu(hdr->handle);
 	uint16_t dlen = le16_to_cpu(hdr->dlen);
 	uint8_t flags = acl_flags(handle);
-	char handle_str[22], extra_str[32];
+	char label[8];
+	char handle_str[58], extra_str[32];
 	struct packet_conn_data *conn;
 	struct index_buf_pool *pool = &index_list[index].acl;
 
@@ -14089,11 +14442,17 @@ void packet_hci_acldata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	else
 		sprintf(handle_str, "Handle %d", acl_handle(handle));
 
+	handle_str_append_addr(handle_str, conn);
+
 	sprintf(extra_str, "flags 0x%2.2x dlen %d", flags, dlen);
 
+	if (conn)
+		sprintf(label, "%s", conn_type_str(conn->type));
+	else
+		sprintf(label, "ACL");
+
 	print_packet(tv, cred, in ? '>' : '<', index, NULL, COLOR_HCI_ACLDATA,
-				in ? "ACL Data RX" : "ACL Data TX",
-						handle_str, extra_str);
+				label, handle_str, extra_str);
 
 	if (!in)
 		packet_enqueue_tx(tv, acl_handle(handle),
@@ -14118,7 +14477,9 @@ void packet_hci_scodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	const hci_sco_hdr *hdr = data;
 	uint16_t handle = le16_to_cpu(hdr->handle);
 	uint8_t flags = acl_flags(handle);
-	char handle_str[22], extra_str[32];
+	char label[8];
+	char handle_str[42], extra_str[32];
+	struct packet_conn_data *conn;
 
 	if (index >= MAX_INDEX) {
 		print_field("Invalid index (%d).", index);
@@ -14140,6 +14501,7 @@ void packet_hci_scodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 
 	data += HCI_SCO_HDR_SIZE;
 	size -= HCI_SCO_HDR_SIZE;
+	conn = packet_get_conn_data(handle);
 
 	if (index_list[index].sco.total && !in)
 		sprintf(handle_str, "Handle %d [%u/%u]", acl_handle(handle),
@@ -14147,11 +14509,17 @@ void packet_hci_scodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	else
 		sprintf(handle_str, "Handle %d", acl_handle(handle));
 
+	handle_str_append_addr(handle_str, conn);
+
 	sprintf(extra_str, "flags 0x%2.2x dlen %d", flags, hdr->dlen);
 
+	if (conn)
+		sprintf(label, "%s", conn_type_str(conn->type));
+	else
+		sprintf(label, "SCO");
+
 	print_packet(tv, cred, in ? '>' : '<', index, NULL, COLOR_HCI_SCODATA,
-				in ? "SCO Data RX" : "SCO Data TX",
-						handle_str, extra_str);
+				label, handle_str, extra_str);
 
 	if (!in)
 		packet_enqueue_tx(tv, acl_handle(handle),
@@ -14175,8 +14543,10 @@ void packet_hci_isodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	const struct bt_hci_iso_data_start *start;
 	uint16_t handle = le16_to_cpu(hdr->handle);
 	uint8_t flags = acl_flags(handle);
-	char handle_str[36], extra_str[50], ts_str[16] = { 0 };
+	char label[8];
+	char handle_str[56], extra_str[50], ts_str[16] = { 0 };
 	struct index_buf_pool *pool = &index_list[index].iso;
+	struct packet_conn_data *conn;
 	size_t ts_size = 0;
 
 	if (index >= MAX_INDEX) {
@@ -14206,6 +14576,7 @@ void packet_hci_isodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 	}
 
 	start = data;
+	conn = packet_get_conn_data(handle);
 
 	if (!in && pool->total)
 		sprintf(handle_str, "Handle %d [%u/%u] SN %u",
@@ -14214,12 +14585,18 @@ void packet_hci_isodata(struct timeval *tv, struct ucred *cred, uint16_t index,
 		sprintf(handle_str, "Handle %u SN %u", acl_handle(handle),
 			start->sn);
 
+	handle_str_append_addr(handle_str, conn);
+
 	sprintf(extra_str, "flags 0x%2.2x dlen %u slen %u%s", flags, hdr->dlen,
 							start->slen, ts_str);
 
+	if (conn)
+		sprintf(label, "%s", conn_type_str(conn->type));
+	else
+		sprintf(label, "ISO");
+
 	print_packet(tv, cred, in ? '>' : '<', index, NULL, COLOR_HCI_ISODATA,
-				in ? "ISO Data RX" : "ISO Data TX",
-						handle_str, extra_str);
+				label, handle_str, extra_str);
 
 	if (!in)
 		packet_enqueue_tx(tv, acl_handle(handle),
@@ -16030,7 +16407,7 @@ static void mgmt_print_system_config_tlv(void *data, void *user_data)
 			value = get_u8(entry->value);
 		else if (entry->length == 2)
 			value = get_le16(entry->value);
-		else if (entry->length == 4)
+		else
 			value = get_le32(entry->value);
 		print_field("%s: %u", desc, value);
 	} else {

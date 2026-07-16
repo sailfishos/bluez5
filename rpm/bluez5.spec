@@ -1,7 +1,7 @@
 Name:       bluez5
 
 Summary:    Bluetooth daemon
-Version:    5.86
+Version:    5.87
 Release:    1
 License:    GPLv2+
 URL:        http://www.bluez.org/
@@ -32,6 +32,8 @@ BuildRequires:  automake
 BuildRequires:  autoconf
 BuildRequires:  libtool
 Conflicts: bluez
+Obsoletes: %{name}-hcidump <= %{version}-%{release}
+Provides:  %{name}-hcidump = %{version}-%{release}
 
 %description
 %{summary}.
@@ -50,13 +52,6 @@ Requires:   %{name} = %{version}-%{release}
 Requires:   cups
 Conflicts:  bluez-cups
 %description cups
-%{summary}.
-
-%package hcidump
-Summary:    Bluetooth (bluez5) packet analyzer
-Requires:   %{name} = %{version}-%{release}
-Conflicts:  bluez-hcidump
-%description hcidump
 %{summary}.
 
 %package libs
@@ -247,9 +242,6 @@ systemctl-user daemon-reload ||:
 
 %files cups
 %{_exec_prefix}/lib/cups/backend/bluetooth
-
-%files hcidump
-%{_bindir}/hcidump
 
 %files libs
 %license COPYING

@@ -687,6 +687,14 @@ static GDBusProxy *find_proxies_by_path(GList *source, const char *path)
 	return NULL;
 }
 
+static bool filter_match_pattern(const char *pattern)
+{
+	if (!filter.active || !filter.pattern || !pattern)
+		return false;
+
+	return !strcmp(filter.pattern, pattern);
+}
+
 static void property_changed(GDBusProxy *proxy, const char *name,
 					DBusMessageIter *iter, void *user_data)
 {
@@ -699,12 +707,11 @@ static void property_changed(GDBusProxy *proxy, const char *name,
 		if (default_ctrl && proxy_is_child(proxy,
 					default_ctrl->proxy) == TRUE) {
 			DBusMessageIter addr_iter;
+			const char *address = NULL;
 			char *str;
 
 			if (g_dbus_proxy_get_property(proxy, "Address",
 							&addr_iter) == TRUE) {
-				const char *address;
-
 				dbus_message_iter_get_basic(&addr_iter,
 								&address);
 				str = g_strdup_printf("[" COLORED_CHG
@@ -721,6 +728,19 @@ static void property_changed(GDBusProxy *proxy, const char *name,
 					set_default_device(proxy, NULL);
 				else if (!connected && default_dev == proxy)
 					set_default_device(NULL, NULL);
+
+				/* If the device is connected and the filter
+				 * is auto_connect and it matches the pattern,
+				 * stop discovery.
+				 */
+				if (connected && filter.auto_connect &&
+						filter_match_pattern(address))
+					g_dbus_proxy_method_call(
+							default_ctrl->proxy,
+							"StopDiscovery",
+							NULL, NULL,
+							GUINT_TO_POINTER(false),
+							NULL);
 			}
 
 			print_iter(str, name, iter);
@@ -2210,6 +2230,37 @@ static void connect_reply(DBusMessage *message, void *user_data)
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
+static void prompt_scan_connect(const char *input, void *user_data)
+{
+	char *address = user_data;
+
+	if (!strcmp(input, "yes") || !strcmp(input, "y")) {
+		dbus_bool_t enable = TRUE;
+
+		free(filter.pattern);
+		filter.pattern = address;
+		filter.auto_connect = true;
+
+		filter.set = false;
+		set_discovery_filter(false);
+
+		if (!g_dbus_proxy_method_call(default_ctrl->proxy,
+						"StartDiscovery",
+						NULL, start_discovery_reply,
+						GUINT_TO_POINTER(enable),
+						NULL)) {
+			bt_shell_printf("Failed to start discovery\n");
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+
+		return;
+	}
+
+	free(address);
+
+	return bt_shell_noninteractive_quit(EXIT_FAILURE);
+}
+
 static void cmd_connect(int argc, char *argv[])
 {
 	struct connection_data *data;
@@ -2223,7 +2274,9 @@ static void cmd_connect(int argc, char *argv[])
 	proxy = find_proxy_by_address(default_ctrl->devices, argv[1]);
 	if (!proxy) {
 		bt_shell_printf("Device %s not available\n", argv[1]);
-		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		bt_shell_prompt_input(argv[1], "Scan and connect (yes,no):",
+				      prompt_scan_connect, strdup(argv[1]));
+		return;
 	}
 
 	data = new0(struct connection_data, 1);
@@ -2867,6 +2920,17 @@ static char *scan_generator(const char *text, int state)
 	return argument_generator(text, state, scan_arguments);
 }
 
+static const char *public_broadcast_arguments[] = {
+	"sq",
+	"hq",
+	NULL
+};
+
+static char *public_broadcast_generator(const char *text, int state)
+{
+	return argument_generator(text, state, public_broadcast_arguments);
+}
+
 static void cmd_advertise(int argc, char *argv[])
 {
 	dbus_bool_t enable;
@@ -2915,6 +2979,11 @@ static void cmd_advertise_manufacturer(int argc, char *argv[])
 static void cmd_advertise_data(int argc, char *argv[])
 {
 	ad_advertise_data(dbus_conn, AD_TYPE_AD, argc, argv);
+}
+
+static void cmd_advertise_public_broadcast(int argc, char *argv[])
+{
+	ad_advertise_public_broadcast(dbus_conn, argc, argv);
 }
 
 static void cmd_advertise_sr_uuids(int argc, char *argv[])
@@ -3135,6 +3204,11 @@ static void cmd_advertise_rsi(int argc, char *argv[])
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 
 	ad_advertise_rsi(dbus_conn, &value);
+}
+
+static void cmd_advertise_instance(int argc, char *argv[])
+{
+	ad_advertise_instance();
 }
 
 static void ad_clear_uuids(void)
@@ -3600,6 +3674,9 @@ static const struct bt_shell_menu advertise_menu = {
 			"Set/Get advertise manufacturer data" },
 	{ "data", "[type] [data=xx xx ...]", cmd_advertise_data,
 			"Set/Get advertise data" },
+	{ "public-broadcast", "[sq/hq]", cmd_advertise_public_broadcast,
+			"Set/Get BLE Audio Public Broadcast Announcement",
+			public_broadcast_generator },
 	{ "sr-uuids", "[uuid1 uuid2 ...]", cmd_advertise_sr_uuids,
 			"Set/Get scan response uuids" },
 	{ "sr-solicit", "[uuid1 uuid2 ...]", cmd_advertise_sr_solicit,
@@ -3633,6 +3710,8 @@ static const struct bt_shell_menu advertise_menu = {
 			"Set/Get advertise interval range" },
 	{ "rsi", "[on/off]", cmd_advertise_rsi,
 			"Show/Enable/Disable RSI to be advertised", NULL },
+	{ "instance", NULL, cmd_advertise_instance,
+					"Show advertisement instance number" },
 	{ "clear", "[uuids/service/manufacturer/config-name...]", cmd_ad_clear,
 			"Clear advertise config" },
 	{ } },

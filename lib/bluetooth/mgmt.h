@@ -1199,6 +1199,7 @@ static const char *mgmt_op[] = {
 	"Read Mesh Features",
 	"Mesh Send",
 	"Mesh Send Cancel",
+	"HCI Cmd Sync",
 };
 
 static const char *mgmt_ev[] = {
@@ -1253,9 +1254,6 @@ static const char *mgmt_ev[] = {
 	"Advertisement Monitor Device Lost",
 	"Mesh Packet Found",
 	"Mesh Packet Complete",
-	"PA Sync Established",
-	"BIG Sync Established",
-	"BIG Sync Lost",
 };
 
 static const char *mgmt_status[] = {

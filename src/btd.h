@@ -94,11 +94,18 @@ struct btd_le_defaults {
 	uint8_t		enable_advmon_interleave_scan;
 };
 
+struct btd_le_bcs {
+	uint8_t role;
+	uint8_t cs_sync_ant_sel;
+	int8_t max_tx_power;
+};
+
 struct btd_defaults {
 	uint16_t	num_entries;
 
 	struct btd_br_defaults br;
 	struct btd_le_defaults le;
+	struct btd_le_bcs bcs;
 };
 
 struct btd_csis {
@@ -158,6 +165,7 @@ struct btd_opts {
 	uint8_t		gatt_channels;
 	bool		gatt_client;
 	enum bt_gatt_export_t gatt_export;
+	bool		gatt_seclevel;
 	enum mps_mode_t	mps;
 
 	struct btd_avdtp_opts avdtp;

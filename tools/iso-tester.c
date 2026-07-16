@@ -634,9 +634,15 @@ static void read_index_list_callback(uint8_t status, uint16_t length,
 					index_removed_callback, NULL, NULL);
 
 	data->hciemu = hciemu_new_num(HCIEMU_TYPE_BREDRLE52, data->client_num);
+	if (!data->hciemu)
+		data->hciemu = hciemu_new_num_debug(HCIEMU_TYPE_BREDRLE52,
+						data->client_num, hciemu_debug,
+						"hciemu: ", NULL);
 	if (!data->hciemu) {
 		tester_warn("Failed to setup HCI emulation");
 		tester_pre_setup_failed();
+		mgmt_unref(data->mgmt);
+		data->mgmt = NULL;
 		return;
 	}
 
@@ -3278,8 +3284,12 @@ fail:
 
 static gboolean test_listen_past(gpointer user_data)
 {
-	struct test_data *data = tester_get_data();
+	struct test_data *data = user_data;
 	struct bthost *host;
+
+	tester_print("Host initiates PAST");
+
+	data->io_id[3] = 0;
 
 	host = hciemu_client_get_host(data->hciemu);
 	bthost_past_set_info(host, data->acl_handle);
@@ -3343,7 +3353,8 @@ static void setup_listen_many(struct test_data *data, uint8_t n, uint8_t *num,
 		/* Wait for listen to take effect before initiating PAST
 		 * procedure.
 		 */
-		data->io_id[i] = g_timeout_add(250, test_listen_past, data);
+		g_assert(data->io_id[3] == 0);
+		data->io_id[3] = g_timeout_add(250, test_listen_past, data);
 	}
 }
 
@@ -3582,6 +3593,8 @@ static void test_connect2_seq(const void *test_data)
 static gboolean test_connect2_busy_done(gpointer user_data)
 {
 	struct test_data *data = tester_get_data();
+
+	data->io_id[1] = 0;
 
 	if (data->io_id[0] > 0) {
 		/* First connection still exists */

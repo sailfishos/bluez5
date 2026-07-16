@@ -36,6 +36,7 @@
 #include "dbus-common.h"
 #include "sdp-client.h"
 #include "sdp-xml.h"
+#include "btd.h"
 #include "adapter.h"
 #include "device.h"
 #include "profile.h"
@@ -54,6 +55,8 @@
 #define PBAP_DEFAULT_CHANNEL	15
 #define MAS_DEFAULT_CHANNEL	16
 #define MNS_DEFAULT_CHANNEL	17
+
+#define BT_RX_MTU		32767
 
 #define BTD_PROFILE_PSM_AUTO	-1
 #define BTD_PROFILE_CHAN_AUTO	-1
@@ -678,6 +681,7 @@ struct ext_profile {
 
 	uint16_t version;
 	uint16_t features;
+	uint16_t imtu;
 
 	GSList *records;
 	GSList *servers;
@@ -799,6 +803,14 @@ struct btd_profile *btd_profile_find_remote_uuid(const char *uuid)
 
 int btd_profile_register(struct btd_profile *profile)
 {
+	if ((profile->bearer == BTD_PROFILE_BEARER_LE &&
+				btd_opts.mode == BT_MODE_BREDR) ||
+			(profile->bearer == BTD_PROFILE_BEARER_BREDR &&
+				btd_opts.mode == BT_MODE_LE)) {
+		DBG("Bearer not enabled");
+		return -ENOTSUP;
+	}
+
 	if (profile->experimental && !(g_dbus_get_flags() &
 					G_DBUS_FLAG_ENABLE_EXPERIMENTAL)) {
 		DBG("D-Bus experimental not enabled");
@@ -1422,6 +1434,9 @@ static uint32_t ext_start_servers(struct ext_profile *ext,
 		} else {
 			if (psm == 0)
 				bt_io_get(io, NULL, BT_IO_OPT_PSM, &psm,
+							BT_IO_OPT_INVALID);
+			if (ext->imtu)
+				bt_io_set(io, NULL, BT_IO_OPT_IMTU, ext->imtu,
 							BT_IO_OPT_INVALID);
 			l2cap->io = io;
 			l2cap->proto = BTPROTO_L2CAP;
@@ -2075,6 +2090,7 @@ static struct default_settings {
 					struct ext_io *rfcomm);
 	uint16_t	version;
 	uint16_t	features;
+	uint16_t	imtu;
 } defaults[] = {
 	{
 		.uuid		= SPP_UUID,
@@ -2142,6 +2158,7 @@ static struct default_settings {
 		.authorize	= false,
 		.get_record	= get_opp_record,
 		.version	= 0x0102,
+		.imtu		= BT_RX_MTU,
 	}, {
 		.uuid		= OBEX_FTP_UUID,
 		.name		= "File Transfer",
@@ -2151,6 +2168,7 @@ static struct default_settings {
 		.authorize	= true,
 		.get_record	= get_ftp_record,
 		.version	= 0x0103,
+		.imtu		= BT_RX_MTU,
 	}, {
 		.uuid		= OBEX_SYNC_UUID,
 		.name		= "Synchronization",
@@ -2167,6 +2185,7 @@ static struct default_settings {
 		.authorize	= true,
 		.get_record	= get_pse_record,
 		.version	= 0x0101,
+		.imtu		= BT_RX_MTU,
 	}, {
 		.uuid		= OBEX_PCE_UUID,
 		.name		= "Phone Book Access Client",
@@ -2182,7 +2201,8 @@ static struct default_settings {
 		.mode		= BT_IO_MODE_ERTM,
 		.authorize	= true,
 		.get_record	= get_mas_record,
-		.version	= 0x0100
+		.version	= 0x0100,
+		.imtu		= BT_RX_MTU,
 	}, {
 		.uuid		= OBEX_MNS_UUID,
 		.name		= "Message Notification",
@@ -2191,7 +2211,8 @@ static struct default_settings {
 		.mode		= BT_IO_MODE_ERTM,
 		.authorize	= true,
 		.get_record	= get_mns_record,
-		.version	= 0x0104
+		.version	= 0x0104,
+		.imtu		= BT_RX_MTU,
 	},
 };
 
@@ -2248,6 +2269,9 @@ static void ext_set_defaults(struct ext_profile *ext)
 
 		if (settings->features)
 			ext->features = settings->features;
+
+		if (settings->imtu)
+			ext->imtu = settings->imtu;
 
 		if (settings->name)
 			ext->name = g_strdup(settings->name);
