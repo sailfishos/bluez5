@@ -8763,7 +8763,7 @@ static void auth_failed_callback(uint16_t index, uint16_t length,
 	device = btd_adapter_find_device(adapter, &ev->addr.bdaddr, ev->addr.type);
 	if (device && !device_is_retrying(device) && ev->status == MGMT_STATUS_NOT_PAIRED) {
 		adapter_remove_connection(adapter, device, ev->addr.type,
-						MGMT_DEV_DISCONN_AUTH_FAILURE);
+						MGMT_DEV_DISCONN_AUTH_FAILURE, NULL);
 		disconnect_notify(device, ev->status);
 		btd_adapter_remove_device(adapter, device);
 	}
