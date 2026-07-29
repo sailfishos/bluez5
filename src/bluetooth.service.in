@@ -36,6 +36,9 @@ NoNewPrivileges=true
 # Real-time
 RestrictRealtime=true
 
+# Android HAL sets /dev/uhid owner and group to uhid
+SupplementaryGroups=uhid
+
 [Install]
 WantedBy=bluetooth.target
 Alias=dbus-org.bluez.service
