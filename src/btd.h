@@ -153,6 +153,8 @@ struct btd_opts {
 	bool		filter_discoverable;
 	struct queue	*kernel;
 
+	uint16_t	acl_pkt_type;
+
 	uint16_t	did_source;
 	uint16_t	did_vendor;
 	uint16_t	did_product;

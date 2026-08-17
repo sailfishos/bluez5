@@ -92,6 +92,7 @@ static const char *supported_options[] = {
 	"KernelExperimental",
 	"RemoteNameRequestRetryDelay",
 	"FilterDiscoverable",
+	"ACLPacketTypeMask",
 	NULL
 };
 
@@ -1116,6 +1117,9 @@ static void parse_general(GKeyFile *config)
 					0, UINT32_MAX);
 	parse_config_bool(config, "General", "FilterDiscoverable",
 						&btd_opts.filter_discoverable);
+	parse_config_u16(config, "General", "ACLPacketTypeMask",
+						&btd_opts.acl_pkt_type,
+						0, UINT16_MAX);
 }
 
 static void parse_gatt_cache(GKeyFile *config)

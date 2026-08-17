@@ -9544,6 +9544,69 @@ static void disconnected_callback(uint16_t index, uint16_t length,
 	dev_disconnected(adapter, &ev->addr, reason);
 }
 
+/*
+ * Issue HCI Change Connection Packet Type to BR/EDR ACL.
+ *
+ * The value is passed to the controller as is, see src/main.conf for
+ * the bit layout and accepted values.
+ */
+static void set_acl_pkt_type_mask(struct btd_adapter *adapter,
+					const bdaddr_t *bdaddr, uint16_t mask)
+{
+	struct hci_conn_info_req *cr = NULL;
+	set_conn_ptype_cp cp;
+	int dd;
+	char addr[18];
+
+	if (!mask)
+		return;
+
+	dd = hci_open_dev(adapter->dev_id);
+	if (dd < 0) {
+		btd_error(adapter->dev_id,
+			"Unable to open hci%u for ACL packet-type update: %s",
+			adapter->dev_id, strerror(errno));
+		goto done;
+	}
+
+	cr = malloc(sizeof(*cr) + sizeof(struct hci_conn_info));
+	if (!cr) {
+		btd_error(adapter->dev_id,
+			"Failed to allocate memory for Change Connection Packet Type");
+		goto done;
+	}
+	memset(cr, 0, sizeof(*cr) + sizeof(struct hci_conn_info));
+	bacpy(&cr->bdaddr, bdaddr);
+	cr->type = ACL_LINK;
+
+	ba2str(bdaddr, addr);
+
+	if (ioctl(dd, HCIGETCONNINFO, (unsigned long) cr) < 0) {
+		DBG("HCIGETCONNINFO(%s) failed on hci%u: %s",
+			addr, adapter->dev_id, strerror(errno));
+		goto done;
+	}
+
+	memset(&cp, 0, sizeof(cp));
+	cp.handle = htobs(cr->conn_info->handle);
+	cp.pkt_type = htobs(mask);
+
+	if (hci_send_cmd(dd, OGF_LINK_CTL, OCF_SET_CONN_PTYPE,
+			SET_CONN_PTYPE_CP_SIZE, &cp) < 0) {
+		btd_error(adapter->dev_id,
+			"Change Connection Packet Type failed for %s (handle 0x%04x, mask 0x%04x): %s",
+			addr, cr->conn_info->handle, mask, strerror(errno));
+	} else {
+		DBG("Requested ACL packet-type mask 0x%04x on hci%u for %s (handle 0x%04x)",
+			mask, adapter->dev_id, addr, cr->conn_info->handle);
+	}
+
+done:
+	if (dd >= 0)
+		hci_close_dev(dd);
+	free(cr);
+}
+
 static void connected_callback(uint16_t index, uint16_t length,
 					const void *param, void *user_data)
 {
@@ -9587,6 +9650,12 @@ static void connected_callback(uint16_t index, uint16_t length,
 
 	adapter_add_connection(adapter, device, ev->addr.type,
 					le32_to_cpu(ev->flags));
+
+	/* Set packet type mask to inbound ACL if configured. */
+	if (btd_opts.acl_pkt_type && ev->addr.type == BDADDR_BREDR &&
+		!(le32_to_cpu(ev->flags) & MGMT_DEV_FOUND_INITIATED_CONN))
+		set_acl_pkt_type_mask(adapter, &ev->addr.bdaddr,
+			  btd_opts.acl_pkt_type);
 
 	name_known = device_name_known(device);
 
