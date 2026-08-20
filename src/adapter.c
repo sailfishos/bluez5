@@ -167,6 +167,7 @@ static GSList *adapter_drivers = NULL;
 
 static GSList *disconnect_list = NULL;
 static GSList *conn_fail_list = NULL;
+static GSList *connect_list = NULL;
 
 struct link_key_info {
 	bdaddr_t bdaddr;
@@ -7185,6 +7186,14 @@ static void adapter_msd_notify(struct btd_adapter *adapter,
 	}
 }
 
+static bool match_uuid(const void *data, const void *match_data)
+{
+	const char *uuid = data;
+	const char *match = match_data;
+
+	return strcmp(uuid, match) == 0;
+}
+
 static bool is_filter_match(GSList *discovery_filter, struct eir_data *eir_data,
 								int8_t rssi)
 {
@@ -7217,8 +7226,7 @@ static bool is_filter_match(GSList *discovery_filter, struct eir_data *eir_data,
 				 * uuid.
 				 */
 				if (queue_find(eir_data->services,
-							m->data,
-							g_strcmp) != NULL)
+							match_uuid, m->data))
 					got_match = true;
 			}
 		}
@@ -7409,8 +7417,17 @@ void btd_adapter_device_found(struct btd_adapter *adapter,
 	 * older kernels send separate adv_ind and scan_rsp. Newer
 	 * kernels send them merged, so once we know which mgmt version
 	 * supports this we can make the non-zero check conditional.
+	 *
+	 * Only infer BR/EDR support when the LE address is a Public Device
+	 * Address. A dual-mode device uses the same Public Device Address for
+	 * BR/EDR and LE, so in that case the advertised address is also a valid
+	 * BD_ADDR to page. A random address (static, resolvable or
+	 * non-resolvable) has no defined relationship to the device's BD_ADDR,
+	 * so recording BR/EDR support against it makes the device look pageable
+	 * at an address that can never be paged: SDP discovery then fails with
+	 * Page Timeout and takes the working LE link down with it.
 	 */
-	if (bdaddr_type != BDADDR_BREDR && eir_data.flags &&
+	if (bdaddr_type == BDADDR_LE_PUBLIC && eir_data.flags &&
 					!(eir_data.flags & EIR_BREDR_UNSUP)) {
 		device_set_bredr_support(dev);
 		/* Update last seen for BR/EDR in case its flag is set */
@@ -7613,11 +7630,15 @@ struct agent *adapter_get_agent(struct btd_adapter *adapter)
 static void adapter_remove_connection(struct btd_adapter *adapter,
 						struct btd_device *device,
 						uint8_t bdaddr_type,
-						uint8_t reason)
+						uint8_t reason,
+						bool *removed)
 {
 	bool remove_device = false;
 
 	DBG("");
+
+	if (removed)
+		*removed = false;
 
 	if (!g_slist_find(adapter->connections, device)) {
 		btd_error(adapter->dev_id, "No matching connection for device");
@@ -7639,6 +7660,9 @@ static void adapter_remove_connection(struct btd_adapter *adapter,
 
 		DBG("Removing temporary device %s", path);
 		btd_adapter_remove_device(adapter, device);
+
+		if (removed)
+			*removed = true;
 	}
 }
 
@@ -7668,10 +7692,10 @@ static void adapter_stop(struct btd_adapter *adapter)
 		uint8_t addr_type = btd_device_get_bdaddr_type(device);
 
 		adapter_remove_connection(adapter, device, BDADDR_BREDR,
-						MGMT_DEV_DISCONN_UNKNOWN);
+						MGMT_DEV_DISCONN_UNKNOWN, NULL);
 		if (addr_type != BDADDR_BREDR)
 			adapter_remove_connection(adapter, device, addr_type,
-						MGMT_DEV_DISCONN_UNKNOWN);
+						MGMT_DEV_DISCONN_UNKNOWN, NULL);
 	}
 
 	g_dbus_emit_property_changed(dbus_conn, adapter->path,
@@ -8598,6 +8622,17 @@ int adapter_bonding_attempt(struct btd_adapter *adapter, const bdaddr_t *bdaddr,
 	return 0;
 }
 
+static void connect_notify(struct btd_device *dev, uint8_t bdaddr_type)
+{
+	GSList *l;
+
+	for (l = connect_list; l; l = g_slist_next(l)) {
+		btd_connect_cb connect_cb = l->data;
+
+		connect_cb(dev, bdaddr_type);
+	}
+}
+
 static void disconnect_notify(struct btd_device *dev, uint8_t reason)
 {
 	GSList *l;
@@ -8621,7 +8656,17 @@ static void dev_disconnected(struct btd_adapter *adapter,
 
 	device = btd_adapter_find_device(adapter, &addr->bdaddr, addr->type);
 	if (device) {
-		adapter_remove_connection(adapter, device, addr->type, reason);
+		bool removed;
+
+		adapter_remove_connection(adapter, device, addr->type, reason,
+						&removed);
+		/* No need to continue if device was removed from the adapter,
+		 * as it will be freed and the disconnect notify will be called
+		 * in the device free callback.
+		 */
+		if (removed)
+			return;
+
 		disconnect_notify(device, reason);
 	}
 
@@ -8639,6 +8684,16 @@ void btd_add_disconnect_cb(btd_disconnect_cb func)
 void btd_remove_disconnect_cb(btd_disconnect_cb func)
 {
 	disconnect_list = g_slist_remove(disconnect_list, func);
+}
+
+void btd_add_connect_cb(btd_connect_cb func)
+{
+	connect_list = g_slist_append(connect_list, func);
+}
+
+void btd_remove_connect_cb(btd_connect_cb func)
+{
+	connect_list = g_slist_remove(connect_list, func);
 }
 
 static void disconnect_complete(uint8_t status, uint16_t length,
@@ -8708,7 +8763,7 @@ static void auth_failed_callback(uint16_t index, uint16_t length,
 	device = btd_adapter_find_device(adapter, &ev->addr.bdaddr, ev->addr.type);
 	if (device && !device_is_retrying(device) && ev->status == MGMT_STATUS_NOT_PAIRED) {
 		adapter_remove_connection(adapter, device, ev->addr.type,
-						MGMT_DEV_DISCONN_AUTH_FAILURE);
+						MGMT_DEV_DISCONN_AUTH_FAILURE, NULL);
 		disconnect_notify(device, ev->status);
 		btd_adapter_remove_device(adapter, device);
 	}
@@ -9668,6 +9723,8 @@ static void connected_callback(uint16_t index, uint16_t length,
 		adapter_msd_notify(adapter, device, eir_data.msd_list);
 
 	eir_data_free(&eir_data);
+
+	connect_notify(device, ev->addr.type);
 }
 
 static void controller_resume_notify(struct btd_adapter *adapter)
