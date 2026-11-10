@@ -488,7 +488,7 @@ struct phonebook_data {
 	GSList *contacts;
 	phonebook_cache_ready_cb ready_cb;
 	phonebook_entry_cb entry_cb;
-	int newmissedcalls;
+	uint8_t newmissedcalls;
 	GCancellable *query_canc;
 	char *req_name;
 	int vcard_part_count;
@@ -1420,14 +1420,14 @@ done:
 	 */
 }
 
-int phonebook_init(void)
+int phonebook_driver_init(void)
 {
 	g_type_init();
 
 	return 0;
 }
 
-void phonebook_exit(void)
+void phonebook_driver_exit(void)
 {
 }
 

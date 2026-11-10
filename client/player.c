@@ -1363,6 +1363,18 @@ static const struct capabilities {
 				LC3_DATA(LC3_FREQ_ANY, LC3_DURATION_ANY, 26,
 					240),
 				UTIL_IOV_INIT()),
+
+	/* SCO CVSD:
+	 */
+	CODEC_CAPABILITIES("hfp_ag/cvsd", HFP_AG_UUID, 1,
+				UTIL_IOV_INIT(),
+				UTIL_IOV_INIT()),
+
+	/* SCO mSBC:
+	 */
+	CODEC_CAPABILITIES("hfp_ag/msbc", HFP_AG_UUID, 2,
+				UTIL_IOV_INIT(),
+				UTIL_IOV_INIT()),
 };
 
 struct codec_preset {
@@ -3069,8 +3081,10 @@ static void endpoint_free(void *data)
 	if (ep->msg)
 		dbus_message_unref(ep->msg);
 
-	queue_destroy(ep->preset->custom, free);
-	ep->preset->custom = NULL;
+	if (ep->preset) {
+		queue_destroy(ep->preset->custom, free);
+		ep->preset->custom = NULL;
+	}
 
 	if (ep->codec == 0xff)
 		free(ep->preset);
@@ -3506,6 +3520,12 @@ static void endpoint_locations(const char *input, void *user_data)
 				endpoint_supported_context, ep);
 }
 
+static bool endpoint_is_a2dp(struct endpoint *ep)
+{
+	return !strcasecmp(ep->uuid, A2DP_SOURCE_UUID) ||
+			!strcasecmp(ep->uuid, A2DP_SINK_UUID);
+}
+
 static void endpoint_max_transports(const char *input, void *user_data)
 {
 	struct endpoint *ep = user_data;
@@ -3523,6 +3543,12 @@ static void endpoint_max_transports(const char *input, void *user_data)
 		}
 
 		ep->max_transports = value;
+	}
+
+	/* Locations, contexts and ISO settings only apply to LE Audio */
+	if (endpoint_is_a2dp(ep)) {
+		endpoint_register(ep);
+		return;
 	}
 
 	bt_shell_prompt_input(ep->path, "Locations:", endpoint_locations, ep);
@@ -3785,15 +3811,20 @@ static void config_endpoint_setup(DBusMessageIter *iter, void *user_data)
 	append_properties(iter, cfg);
 }
 
+static void config_endpoint_free(struct endpoint_config *cfg)
+{
+	util_iov_free(cfg->caps, 1);
+	util_iov_free(cfg->meta, 1);
+	free(cfg);
+}
+
 static void config_endpoint_reply(DBusMessage *message, void *user_data)
 {
 	struct endpoint_config *cfg = user_data;
 	struct endpoint *ep = cfg->ep;
 	DBusError error;
 
-	free(cfg->caps->iov_base);
-	free(cfg->caps);
-	free(cfg);
+	config_endpoint_free(cfg);
 
 	dbus_error_init(&error);
 
@@ -3815,6 +3846,7 @@ static void endpoint_set_config(struct endpoint_config *cfg)
 						config_endpoint_setup,
 						config_endpoint_reply,
 						cfg, NULL)) {
+		config_endpoint_free(cfg);
 		bt_shell_printf("Failed to config endpoint\n");
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
 	}
@@ -4038,8 +4070,10 @@ static void cmd_config_endpoint(int argc, char *argv[])
 
 		if (cfg->ep->broadcast)
 			endpoint_set_config_bcast(cfg);
-		else
+		else {
+			cfg->meta = util_iov_dup(&preset->meta, 1);
 			endpoint_set_config(cfg);
+		}
 
 		return;
 	}
@@ -4050,7 +4084,7 @@ static void cmd_config_endpoint(int argc, char *argv[])
 	return;
 
 fail:
-	g_free(cfg);
+	config_endpoint_free(cfg);
 	return bt_shell_noninteractive_quit(EXIT_FAILURE);
 }
 
@@ -4629,8 +4663,7 @@ static void endpoint_init_defaults(struct endpoint *ep)
 	ep->max_transports = UINT8_MAX;
 	ep->auto_accept = true;
 
-	if (!strcmp(ep->uuid, A2DP_SOURCE_UUID) ||
-			!strcmp(ep->uuid, A2DP_SOURCE_UUID))
+	if (endpoint_is_a2dp(ep))
 		return;
 
 	ep->iso_group = BT_ISO_QOS_GROUP_UNSET;

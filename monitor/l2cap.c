@@ -283,6 +283,30 @@ static int get_chan_data_index(const struct l2cap_frame *frame)
 	return -1;
 }
 
+/*
+ * Channel identifier for request and response matching. L2CAP CIDs are
+ * direction specific, so a dynamic channel is identified by its entry,
+ * which is the same for both directions. Fixed channels have no entry and
+ * use the CID, which is already direction independent.
+ */
+uint16_t l2cap_chan_key(uint16_t index, bool in, uint16_t handle, uint16_t cid)
+{
+	struct l2cap_frame frame;
+	int i;
+
+	memset(&frame, 0, sizeof(frame));
+	frame.index = index;
+	frame.in = in;
+	frame.handle = handle;
+	frame.cid = cid;
+
+	i = get_chan_data_index(&frame);
+	if (i >= 0)
+		return 0x8000 | i;
+
+	return cid;
+}
+
 static struct chan_data *get_chan(const struct l2cap_frame *frame)
 {
 	int i;
@@ -419,73 +443,74 @@ static char *mode2str(uint8_t mode)
 
 static void l2cap_ctrl_ext_parse(struct l2cap_frame *frame, uint32_t ctrl)
 {
-	printf("      %s:",
+	display_printf("      %s:",
 		ctrl & L2CAP_EXT_CTRL_FRAME_TYPE ? "S-frame" : "I-frame");
 
 	if (ctrl & L2CAP_EXT_CTRL_FRAME_TYPE) {
-		printf(" %s",
+		display_printf(" %s",
 		supervisory2str((ctrl & L2CAP_EXT_CTRL_SUPERVISE_MASK) >>
 						L2CAP_EXT_CTRL_SUPER_SHIFT));
 
 		if (ctrl & L2CAP_EXT_CTRL_POLL)
-			printf(" P-bit");
+			display_printf(" P-bit");
 	} else {
 		uint8_t sar = (ctrl & L2CAP_EXT_CTRL_SAR_MASK) >>
 						L2CAP_EXT_CTRL_SAR_SHIFT;
-		printf(" %s", sar2str(sar));
+		display_printf(" %s", sar2str(sar));
 		if (sar == L2CAP_SAR_START) {
 			uint16_t len;
 
 			if (!l2cap_frame_get_le16(frame, &len))
 				return;
 
-			printf(" (len %d)", len);
+			display_printf(" (len %d)", len);
 		}
-		printf(" TxSeq %d", (ctrl & L2CAP_EXT_CTRL_TXSEQ_MASK) >>
+		display_printf(" TxSeq %d",
+			(ctrl & L2CAP_EXT_CTRL_TXSEQ_MASK) >>
 						L2CAP_EXT_CTRL_TXSEQ_SHIFT);
 	}
 
-	printf(" ReqSeq %d", (ctrl & L2CAP_EXT_CTRL_REQSEQ_MASK) >>
+	display_printf(" ReqSeq %d", (ctrl & L2CAP_EXT_CTRL_REQSEQ_MASK) >>
 						L2CAP_EXT_CTRL_REQSEQ_SHIFT);
 
 	if (ctrl & L2CAP_EXT_CTRL_FINAL)
-		printf(" F-bit");
+		display_printf(" F-bit");
 }
 
 static void l2cap_ctrl_parse(struct l2cap_frame *frame, uint32_t ctrl)
 {
-	printf("      %s:",
+	display_printf("      %s:",
 			ctrl & L2CAP_CTRL_FRAME_TYPE ? "S-frame" : "I-frame");
 
 	if (ctrl & 0x01) {
-		printf(" %s",
+		display_printf(" %s",
 			supervisory2str((ctrl & L2CAP_CTRL_SUPERVISE_MASK) >>
 						L2CAP_CTRL_SUPER_SHIFT));
 
 		if (ctrl & L2CAP_CTRL_POLL)
-			printf(" P-bit");
+			display_printf(" P-bit");
 	} else {
 		uint8_t sar;
 
 		sar = (ctrl & L2CAP_CTRL_SAR_MASK) >> L2CAP_CTRL_SAR_SHIFT;
-		printf(" %s", sar2str(sar));
+		display_printf(" %s", sar2str(sar));
 		if (sar == L2CAP_SAR_START) {
 			uint16_t len;
 
 			if (!l2cap_frame_get_le16(frame, &len))
 				return;
 
-			printf(" (len %d)", len);
+			display_printf(" (len %d)", len);
 		}
-		printf(" TxSeq %d", (ctrl & L2CAP_CTRL_TXSEQ_MASK) >>
+		display_printf(" TxSeq %d", (ctrl & L2CAP_CTRL_TXSEQ_MASK) >>
 						L2CAP_CTRL_TXSEQ_SHIFT);
 	}
 
-	printf(" ReqSeq %d", (ctrl & L2CAP_CTRL_REQSEQ_MASK) >>
+	display_printf(" ReqSeq %d", (ctrl & L2CAP_CTRL_REQSEQ_MASK) >>
 						L2CAP_CTRL_REQSEQ_SHIFT);
 
 	if (ctrl & L2CAP_CTRL_FINAL)
-		printf(" F-bit");
+		display_printf(" F-bit");
 }
 
 #define MAX_INDEX 16
@@ -1578,6 +1603,32 @@ static const struct sig_opcode_data le_sig_opcode_table[] = {
 	{ },
 };
 
+/*
+ * L2CAP signalling responses use the request code plus one, and a Command
+ * Reject may answer any request. Requests are tracked per identifier, which
+ * is what pairs the two halves of a signalling transaction.
+ */
+static void sig_req_str(const struct l2cap_frame *frame, uint8_t code,
+						char *str, size_t len)
+{
+	uint16_t key;
+
+	str[0] = '\0';
+
+	key = l2cap_chan_key(frame->index, frame->in, frame->handle,
+								frame->cid);
+
+	if (code == BT_L2CAP_PDU_CMD_REJECT || (code & 0x01)) {
+		packet_req_str(frame->handle, key, PACKET_PROTO_L2CAP,
+				frame->ident, (struct timeval *)&frame->tv,
+				str, len);
+		return;
+	}
+
+	packet_req_add(frame->handle, key, PACKET_PROTO_L2CAP, frame->ident,
+			(struct timeval *)&frame->tv, frame->num);
+}
+
 static void l2cap_queue_frame(struct l2cap_frame *frame)
 {
 	struct packet_conn_data *conn;
@@ -1612,6 +1663,8 @@ void l2cap_frame_init(struct l2cap_frame *frame, uint16_t index, bool in,
 	frame->mode    = get_mode(frame);
 	frame->seq_num = psm ? 1 : get_seq_num(frame);
 
+	packet_get_context(&frame->tv, &frame->num);
+
 	if (!in)
 		l2cap_queue_frame(frame);
 }
@@ -1620,6 +1673,7 @@ static void bredr_sig_packet(uint16_t index, bool in, uint16_t handle,
 				uint16_t cid, const void *data, uint16_t size)
 {
 	struct l2cap_frame frame;
+	char req_str[32];
 
 	while (size > 0) {
 		const struct bt_l2cap_hdr_sig *hdr = data;
@@ -1666,10 +1720,15 @@ static void bredr_sig_packet(uint16_t index, bool in, uint16_t handle,
 			opcode_str = "Unknown";
 		}
 
+		l2cap_frame_init(&frame, index, in, handle, hdr->ident, cid,
+								0, data, len);
+		sig_req_str(&frame, hdr->code, req_str, sizeof(req_str));
+
 		print_indent(6, opcode_color, "L2CAP: ", opcode_str,
 					COLOR_OFF,
-					" (0x%2.2x) ident %d len %d",
-					hdr->code, hdr->ident, len);
+					" (0x%2.2x) ident %d len %d%s%s",
+					hdr->code, hdr->ident, len,
+					req_str[0] ? " " : "", req_str);
 
 		if (!opcode_data || !opcode_data->func) {
 			packet_hexdump(data, len);
@@ -1696,8 +1755,6 @@ static void bredr_sig_packet(uint16_t index, bool in, uint16_t handle,
 			}
 		}
 
-		l2cap_frame_init(&frame, index, in, handle, hdr->ident, cid, 0,
-								data, len);
 		opcode_data->func(&frame);
 
 		data += len;
@@ -1711,6 +1768,7 @@ static void le_sig_packet(uint16_t index, bool in, uint16_t handle,
 				uint16_t cid, const void *data, uint16_t size)
 {
 	struct l2cap_frame frame;
+	char req_str[32];
 	const struct bt_l2cap_hdr_sig *hdr = data;
 	const struct sig_opcode_data *opcode_data = NULL;
 	const char *opcode_color, *opcode_str;
@@ -1755,9 +1813,14 @@ static void le_sig_packet(uint16_t index, bool in, uint16_t handle,
 		opcode_str = "Unknown";
 	}
 
+	l2cap_frame_init(&frame, index, in, handle, hdr->ident, cid, 0,
+							data, len);
+	sig_req_str(&frame, hdr->code, req_str, sizeof(req_str));
+
 	print_indent(6, opcode_color, "LE L2CAP: ", opcode_str, COLOR_OFF,
-					" (0x%2.2x) ident %d len %d",
-					hdr->code, hdr->ident, len);
+					" (0x%2.2x) ident %d len %d%s%s",
+					hdr->code, hdr->ident, len,
+					req_str[0] ? " " : "", req_str);
 
 	if (!opcode_data || !opcode_data->func) {
 		packet_hexdump(data, len);
@@ -1778,8 +1841,6 @@ static void le_sig_packet(uint16_t index, bool in, uint16_t handle,
 		}
 	}
 
-	l2cap_frame_init(&frame, index, in, handle, hdr->ident, cid, 0,
-							data, len);
 	opcode_data->func(&frame);
 }
 
@@ -2672,7 +2733,7 @@ void l2cap_frame(uint16_t index, bool in, uint16_t handle, uint16_t cid,
 				l2cap_ctrl_parse(&frame, ctrl16);
 			}
 
-			printf("\n");
+			display_printf("\n");
 			break;
 		}
 
@@ -2853,9 +2914,11 @@ void l2cap_dequeue_frame(struct timeval *delta, struct packet_conn_data *conn)
 			frame->cid, frame->psm, mode2str(frame->mode),
 			frame->mode, frame->chan);
 
-	print_field("Channel Latency: %lld msec (%lld-%lld msec ~%lld msec)",
+	print_field("Channel Latency: %lld msec (%lld-%lld msec ~%lld msec "
+			"+/- %lld msec)",
 			TV_MSEC(*delta), TV_MSEC(chan->tx_l.min),
-			TV_MSEC(chan->tx_l.max), TV_MSEC(chan->tx_l.med));
+			TV_MSEC(chan->tx_l.max), TV_MSEC(chan->tx_l.med),
+			packet_latency_stddev(&chan->tx_l));
 
 	free(frame);
 }

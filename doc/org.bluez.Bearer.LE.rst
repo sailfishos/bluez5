@@ -21,8 +21,8 @@ Interface
 Methods
 -------
 
-void Connect() [experimental]
-`````````````````````````````
+void Connect()
+``````````````
 
 Connects all LE profiles the remote device supports that can be connected to and
 have been flagged as auto-connectable. If only subset of profiles is already
@@ -38,8 +38,8 @@ Possible errors:
 :org.bluez.Error.InProgress:
 :org.bluez.Error.AlreadyConnected:
 
-void Disconnect() [experimental]
-````````````````````````````````
+void Disconnect()
+`````````````````
 
 Disconnects all connected profiles and then terminates low-level ACL-LE
 connection.
@@ -60,8 +60,8 @@ Possible errors:
 Signals
 -------
 
-void Disconnected(string reason, string message) [experimental]
-```````````````````````````````````````````````````````````````
+void Disconnected(string reason, string message)
+````````````````````````````````````````````````
 
 This signal is launched when a device is disconnected, with the reason of the
 disconnection.
@@ -114,30 +114,104 @@ Possible reasons:
 Properties
 ----------
 
-object Adapter [readonly, experimental]
-```````````````````````````````````````
+object Adapter [readonly]
+`````````````````````````
 
 The object path of the adapter the set belongs to.
 
-boolean Paired [readonly, experimental]
-```````````````````````````````````````
+boolean Paired [readonly]
+`````````````````````````
 
 Indicates if the remote device is paired to LE bearer.
 
 Paired means the pairing process where devices exchange the information to
 establish an encrypted connection has been completed.
 
-boolean Bonded [readonly, experimental]
-```````````````````````````````````````
+boolean Bonded [readonly]
+`````````````````````````
 
 Indicates if the remote device is bonded to LE bearer.
 
 Bonded means the information exchanged on pairing process has been stored and
 will be persisted.
 
-boolean Connected [readonly, experimental]
-``````````````````````````````````````````
+boolean Connected [readonly]
+````````````````````````````
 
 Indicates if the remote device is currently connected to LE bearer.
+
+A PropertiesChanged signal indicate changes to this status.
+
+boolean Connectable [readonly, optional]
+````````````````````````````````````````
+
+Indicates if the remote device accepts connections on LE bearer, based on the
+most recent advertising report. It is false when the last advertising report
+was non-connectable, e.g. ADV_NONCONN_IND or ADV_SCAN_IND.
+
+The property is only present once the device has been discovered or connected
+over LE bearer.
+
+A PropertiesChanged signal indicate changes to this status.
+
+string Role [readonly, optional]
+````````````````````````````````
+
+Indicates the role of the remote device in the current connection on LE bearer.
+It is only present while the remote device is connected over LE bearer.
+
+It is the link layer role of the connection. It does not imply which side acts
+as GATT client or server, as GATT roles are independent of it and both may be
+used at the same time.
+
+Possible values:
+
+:"central":
+
+	The remote device initiated the connection, and the adapter is the
+	peripheral.
+
+:"peripheral":
+
+	The adapter initiated the connection, and the remote device is the
+	peripheral.
+
+A PropertiesChanged signal indicate changes to this status.
+
+uint32 Interval [readonly, optional]
+````````````````````````````````````
+
+Indicates the connection interval of the current connection on LE bearer, in
+microseconds. It is only present while the remote device is connected over LE
+bearer.
+
+A PropertiesChanged signal indicate changes to this status.
+
+uint16 Latency [readonly, optional]
+```````````````````````````````````
+
+Indicates the peripheral latency of the current connection on LE bearer, the
+number of consecutive connection events the peripheral may skip. When the
+connection is subrated, it counts subrated connection events. It is only present
+while the remote device is connected over LE bearer.
+
+A PropertiesChanged signal indicate changes to this status.
+
+uint16 SupervisionTimeout [readonly, optional]
+``````````````````````````````````````````````
+
+Indicates the supervision timeout of the current connection on LE bearer, in
+milliseconds. It is only present while the remote device is connected over LE
+bearer.
+
+A PropertiesChanged signal indicate changes to this status.
+
+uint16 Subrate [readonly, optional]
+```````````````````````````````````
+
+Indicates the subrate factor of the current connection on LE bearer: only one of
+every Subrate connection events is used. It is 1 when the connection is not
+subrated. It is only present while the remote device is connected over LE
+bearer.
 
 A PropertiesChanged signal indicate changes to this status.

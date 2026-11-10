@@ -46,6 +46,7 @@ typedef void (*bt_gatt_client_service_changed_callback_t)(uint16_t start_handle,
 							void *user_data);
 
 bool bt_gatt_client_is_ready(struct bt_gatt_client *client);
+bool bt_gatt_client_is_idle(struct bt_gatt_client *client);
 unsigned int bt_gatt_client_ready_register(struct bt_gatt_client *client,
 					bt_gatt_client_callback_t callback,
 					void *user_data,
@@ -118,6 +119,13 @@ unsigned int bt_gatt_client_write_execute(struct bt_gatt_client *client,
 
 unsigned int bt_gatt_client_register_notify(struct bt_gatt_client *client,
 				uint16_t chrc_value_handle,
+				bt_gatt_client_register_callback_t callback,
+				bt_gatt_client_notify_callback_t notify,
+				void *user_data,
+				bt_gatt_client_destroy_func_t destroy);
+unsigned int bt_gatt_client_register_notify_with_ccc(
+				struct bt_gatt_client *client,
+				uint16_t chrc_value_handle, uint16_t ccc_value,
 				bt_gatt_client_register_callback_t callback,
 				bt_gatt_client_notify_callback_t notify,
 				void *user_data,

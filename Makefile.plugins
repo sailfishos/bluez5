@@ -41,6 +41,8 @@ builtin_modules += avrcp
 builtin_sources += profiles/audio/control.h profiles/audio/control.c \
 			profiles/audio/avctp.h profiles/audio/avctp.c \
 			profiles/audio/avrcp.h profiles/audio/avrcp.c \
+			profiles/audio/avrcp-parse.h \
+			profiles/audio/avrcp-parse.c \
 			profiles/audio/avrcp-player.c
 endif
 
@@ -64,10 +66,6 @@ endif
 if HOG
 builtin_modules += hog
 builtin_sources += profiles/input/hog.c \
-			profiles/input/hog-lib.c profiles/input/hog-lib.h \
-			profiles/deviceinfo/dis.c profiles/deviceinfo/dis.h \
-			profiles/battery/bas.c profiles/battery/bas.h \
-			profiles/scanparam/scpp.c profiles/scanparam/scpp.h \
 			profiles/input/suspend.h profiles/input/suspend-none.c
 endif
 
@@ -91,6 +89,11 @@ endif
 
 builtin_modules += battery
 builtin_sources += profiles/battery/battery.c
+
+builtin_modules += fastpair
+builtin_sources += profiles/fastpair/fastpair.c \
+			profiles/fastpair/message-stream.h \
+			profiles/fastpair/message-stream.c
 
 builtin_modules += rap
 builtin_sources += profiles/ranging/rap.c \
@@ -154,5 +157,9 @@ endif
 
 if HFP
 builtin_modules += hfp
-builtin_sources += profiles/audio/telephony.h profiles/audio/telephony.c profiles/audio/hfp-hf.c
+builtin_sources += profiles/audio/telephony.h \
+			profiles/audio/telephony.c \
+			profiles/audio/hfp-hf.c \
+			profiles/audio/hfp-hf.h
+
 endif

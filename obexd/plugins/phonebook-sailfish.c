@@ -526,7 +526,7 @@ done:
 	}
 }
 
-int phonebook_init(void)
+int phonebook_driver_init(void)
 {
 	DBG("");
 
@@ -537,7 +537,7 @@ int phonebook_init(void)
 	return 0;
 }
 
-void phonebook_exit(void)
+void phonebook_driver_exit(void)
 {
 	DBG("");
 

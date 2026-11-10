@@ -73,12 +73,18 @@ bool local_player_have_track(struct local_player *lp);
 bool local_player_play(struct local_player *lp);
 bool local_player_stop(struct local_player *lp);
 bool local_player_pause(struct local_player *lp);
+bool local_player_seek(struct local_player *lp, int64_t offset_usec);
 bool local_player_next(struct local_player *lp);
 bool local_player_previous(struct local_player *lp);
-bool local_player_seek(struct local_player *lp, bool forward);
 
 typedef void (*local_player_added_t)(struct local_player *lp, void *user_data);
 
 unsigned int local_player_register_watch(local_player_added_t cb,
 							void *user_data);
 void local_player_unregister_watch(unsigned int id);
+
+gboolean hfp_hf_set_configuration(struct media_endpoint *endpoint,
+					const char *ep_path,
+					media_endpoint_cb_t cb,
+					void *user_data,
+					GDestroyNotify destroy);

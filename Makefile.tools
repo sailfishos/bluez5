@@ -12,11 +12,13 @@ client_bluetoothctl_SOURCES = client/main.c \
 					client/adv_monitor.c \
 					client/gatt.h client/gatt.c \
 					client/admin.h client/admin.c \
+					client/main.h \
 					client/player.h client/player.c \
 					client/mgmt.h client/mgmt.c \
 					client/assistant.h client/assistant.c \
 					client/hci.h client/hci.c \
-					client/telephony.h client/telephony.c
+					client/telephony.h client/telephony.c \
+					client/cs.h client/cs.c
 client_bluetoothctl_LDADD = lib/libbluetooth-internal.la \
 			gdbus/libgdbus-internal.la src/libshared-glib.la \
 			$(GLIB_LIBS) $(DBUS_LIBS) -lreadline
@@ -56,12 +58,13 @@ monitor_btmon_SOURCES = monitor/main.c monitor/bt.h \
 				monitor/jlink.h monitor/jlink.c \
 				monitor/tty.h monitor/emulator.h \
 				monitor/att.h monitor/att.c \
+				monitor/find.h monitor/find.c \
 				src/log.h src/log.c \
 				src/textfile.h src/textfile.c \
 				src/settings.h src/settings.c
 monitor_btmon_LDADD = lib/libbluetooth-internal.la \
 				src/libshared-mainloop.la \
-				$(GLIB_LIBS) $(UDEV_LIBS) -ldl
+				$(GLIB_LIBS) $(UDEV_LIBS) -ldl -lm
 
 if MANPAGES
 man_MANS += doc/btmon.1
@@ -99,7 +102,13 @@ emulator_btvirt_SOURCES = emulator/main.c monitor/bt.h \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c \
 				emulator/phy.h emulator/phy.c \
-				emulator/le.h emulator/le.c
+				emulator/le.h emulator/le.c \
+				emulator/vhost.h emulator/vhost.c \
+				emulator/virtio.h emulator/virtio.c \
+				emulator/timetravel.h emulator/timetravel.c \
+				emulator/vconsole.h emulator/vconsole.c \
+				emulator/ttclient.h emulator/ttclient.c \
+				emulator/timeout.c
 emulator_btvirt_LDADD = lib/libbluetooth-internal.la src/libshared-mainloop.la
 
 emulator_b1ee_SOURCES = emulator/b1ee.c
@@ -127,7 +136,7 @@ tools_mgmt_tester_SOURCES = tools/mgmt-tester.c monitor/bt.h \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
 tools_mgmt_tester_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la $(GLIB_LIBS)
+				src/libshared-mainloop.la
 
 tools_mesh_tester_SOURCES = tools/mesh-tester.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
@@ -136,25 +145,27 @@ tools_mesh_tester_SOURCES = tools/mesh-tester.c monitor/bt.h \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
 tools_mesh_tester_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la $(GLIB_LIBS)
+				src/libshared-mainloop.la
 
-tools_l2cap_tester_SOURCES = tools/l2cap-tester.c tools/tester.h monitor/bt.h \
+tools_l2cap_tester_SOURCES = tools/l2cap-tester.c \
+				tools/tester-io.h tools/tester-io.c tools/tester.h monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
 				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
 tools_l2cap_tester_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la $(GLIB_LIBS)
+				src/libshared-mainloop.la
 
-tools_rfcomm_tester_SOURCES = tools/rfcomm-tester.c monitor/bt.h \
+tools_rfcomm_tester_SOURCES = tools/rfcomm-tester.c \
+				tools/tester-io.h tools/tester-io.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
 				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
 tools_rfcomm_tester_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la $(GLIB_LIBS)
+				src/libshared-mainloop.la
 
 tools_bnep_tester_SOURCES = tools/bnep-tester.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
@@ -163,7 +174,7 @@ tools_bnep_tester_SOURCES = tools/bnep-tester.c monitor/bt.h \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
 tools_bnep_tester_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la $(GLIB_LIBS)
+				src/libshared-mainloop.la
 
 tools_smp_tester_SOURCES = tools/smp-tester.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
@@ -172,7 +183,7 @@ tools_smp_tester_SOURCES = tools/smp-tester.c monitor/bt.h \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
 tools_smp_tester_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la $(GLIB_LIBS)
+				src/libshared-mainloop.la
 
 tools_gap_tester_SOURCES = tools/gap-tester.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
@@ -185,17 +196,18 @@ tools_gap_tester_LDADD =  lib/libbluetooth-internal.la \
 				src/libshared-glib.la \
 				$(GLIB_LIBS) $(DBUS_LIBS)
 
-tools_sco_tester_SOURCES = tools/sco-tester.c tools/tester.h monitor/bt.h \
+tools_sco_tester_SOURCES = tools/sco-tester.c \
+				tools/tester-io.h tools/tester-io.c tools/tester.h monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
 				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
 tools_sco_tester_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la $(GLIB_LIBS)
+				src/libshared-mainloop.la
 
 tools_hci_tester_SOURCES = tools/hci-tester.c monitor/bt.h
-tools_hci_tester_LDADD = src/libshared-glib.la $(GLIB_LIBS)
+tools_hci_tester_LDADD = src/libshared-mainloop.la
 
 tools_userchan_tester_SOURCES = tools/userchan-tester.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
@@ -204,16 +216,17 @@ tools_userchan_tester_SOURCES = tools/userchan-tester.c monitor/bt.h \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
 tools_userchan_tester_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la $(GLIB_LIBS)
+				src/libshared-mainloop.la
 
-tools_iso_tester_SOURCES = tools/iso-tester.c tools/tester.h monitor/bt.h \
+tools_iso_tester_SOURCES = tools/iso-tester.c \
+				tools/tester-io.h tools/tester-io.c tools/tester.h monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
 				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
 tools_iso_tester_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la $(GLIB_LIBS)
+				src/libshared-mainloop.la
 
 tools_ioctl_tester_SOURCES = tools/ioctl-tester.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
@@ -222,16 +235,17 @@ tools_ioctl_tester_SOURCES = tools/ioctl-tester.c monitor/bt.h \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
 tools_ioctl_tester_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la $(GLIB_LIBS)
+				src/libshared-mainloop.la
 
-tools_6lowpan_tester_SOURCES = tools/6lowpan-tester.c monitor/bt.h \
+tools_6lowpan_tester_SOURCES = tools/6lowpan-tester.c \
+				tools/tester-io.h tools/tester-io.c monitor/bt.h \
 				emulator/hciemu.h emulator/hciemu.c \
 				emulator/vhci.h emulator/vhci.c \
 				emulator/btdev.h emulator/btdev.c \
 				emulator/bthost.h emulator/bthost.c \
 				emulator/smp.c
 tools_6lowpan_tester_LDADD = lib/libbluetooth-internal.la \
-				src/libshared-glib.la $(GLIB_LIBS)
+				src/libshared-mainloop.la
 endif
 
 if TOOLS
@@ -322,6 +336,9 @@ tools_btgatt_server_LDADD = src/libshared-mainloop.la \
 						lib/libbluetooth-internal.la
 
 tools_test_runner_CFLAGS = $(WARNING_CFLAGS)
+if COVERAGE
+tools_test_runner_CFLAGS += -DHAVE_COVERAGE
+endif
 tools_test_runner_LDFLAGS =
 
 tools_rctest_LDADD = lib/libbluetooth-internal.la
@@ -359,7 +376,7 @@ man_MANS += doc/rctest.1 doc/l2ping.1 doc/btattach.1 doc/isotest.1 \
 		doc/bluetoothctl-gatt.1 doc/bluetoothctl-player.1 \
 		doc/bluetoothctl-scan.1 doc/bluetoothctl-transport.1 \
 		doc/bluetoothctl-assistant.1 doc/bluetoothctl-hci.1 \
-		doc/bluetoothctl-telephony.1
+		doc/bluetoothctl-telephony.1 doc/bluetoothctl-cs.1
 
 endif
 
@@ -436,7 +453,9 @@ tools_hciconfig_LDADD = lib/libbluetooth-internal.la
 tools_hcitool_SOURCES = tools/hcitool.c src/oui.h src/oui.c
 tools_hcitool_LDADD = lib/libbluetooth-internal.la $(UDEV_LIBS)
 
-tools_sdptool_SOURCES = tools/sdptool.c src/sdp-xml.h src/sdp-xml.c
+tools_sdptool_SOURCES = tools/sdptool.c src/sdp-xml.h src/sdp-xml.c \
+			src/shared/queue.h src/shared/queue.c \
+			src/shared/util.h src/shared/util.c
 tools_sdptool_LDADD = lib/libbluetooth-internal.la $(GLIB_LIBS)
 
 tools_ciptool_LDADD = lib/libbluetooth-internal.la
@@ -465,7 +484,8 @@ manual_pages += doc/hciattach.1 doc/hciconfig.1 doc/hcitool.1 \
 			doc/bluetoothctl-transport.1 \
 			doc/bluetoothctl-assistant.1 \
 			doc/bluetoothctl-hci.1 \
-			doc/bluetoothctl-telephony.1
+			doc/bluetoothctl-telephony.1 \
+			doc/bluetoothctl-cs.1
 
 if HID2HCI
 udevdir = $(UDEV_DIR)
@@ -508,18 +528,6 @@ tools_btmgmt_SOURCES = tools/btmgmt.c src/uuid-helper.c client/display.c \
 			client/mgmt.c
 tools_btmgmt_LDADD = lib/libbluetooth-internal.la src/libshared-glib.la \
 				$(GLIB_LIBS) -lreadline
-if DEPRECATED
-noinst_PROGRAMS += attrib/gatttool
-
-attrib_gatttool_SOURCES = attrib/gatttool.c attrib/att.c attrib/gatt.c \
-				attrib/gattrib.c btio/btio.c \
-				attrib/gatttool.h attrib/interactive.c \
-				attrib/utils.c src/log.c client/display.c \
-				client/display.h
-attrib_gatttool_LDADD = lib/libbluetooth-internal.la \
-			src/libshared-glib.la $(GLIB_LIBS) -lreadline
-
-endif
 endif
 
 if CUPS
@@ -548,13 +556,14 @@ test_scripts += test/bluezutils.py \
 		test/test-discovery test/test-manager test/test-adapter \
 		test/test-device test/simple-agent \
 		test/simple-endpoint \
-		test/test-network test/test-profile \
+		test/test-network test/test-profile test/test-fastpair \
 		test/service-record.dtd \
 		test/service-did.xml test/service-spp.xml test/service-opp.xml \
 		test/service-ftp.xml test/simple-player test/test-nap \
 		test/test-hfp test/opp-client test/ftp-client \
 		test/pbap-client test/map-client test/example-advertisement \
 		test/example-gatt-server test/example-gatt-client \
+		test/example-ranging-provider \
 		test/test-gatt-profile test/test-mesh test/agent.py
 
 if BTPCLIENT
@@ -562,11 +571,14 @@ noinst_PROGRAMS += client/btpclient/btpclient client/btpclient/btpclientctl
 
 client_btpclient_btpclient_SOURCES = client/btpclient/btpclient.c \
 				client/btpclient/btpclient.h \
-				src/shared/btp.c src/shared/btp.h \
+				src/shared/btp.c src/shared/btp.h src/shared/bap-defs.h \
+				client/btpclient/ascs.c client/btpclient/ascs.h \
 				client/btpclient/bap.c client/btpclient/bap.h \
 				client/btpclient/core.c client/btpclient/core.h \
 				client/btpclient/gap.c client/btpclient/gap.h \
-				client/btpclient/gatt.c client/btpclient/gatt.h
+				client/btpclient/gatt.c client/btpclient/gatt.h \
+				client/btpclient/pacs.c client/btpclient/pacs.h \
+				client/btpclient/vendor.c client/btpclient/vendor.h
 client_btpclient_btpclient_LDADD = lib/libbluetooth-internal.la \
 				src/libshared-ell.la $(ell_ldadd)
 client/btpclient/btpclient.$(OBJEXT): src/libshared-ell.la ell/internal

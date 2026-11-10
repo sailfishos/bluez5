@@ -811,6 +811,19 @@ static uint8_t l2cap_sig_send(struct bthost *bthost, struct btconn *conn,
 	return ident;
 }
 
+uint8_t bthost_l2cap_sig_raw(struct bthost *bthost, uint16_t handle,
+					uint8_t code, uint8_t ident,
+					const void *data, uint16_t len)
+{
+	struct btconn *conn;
+
+	conn = bthost_find_conn(bthost, handle);
+	if (!conn)
+		return 0;
+
+	return l2cap_sig_send(bthost, conn, code, ident, data, len);
+}
+
 void bthost_add_cid_hook(struct bthost *bthost, uint16_t handle, uint16_t cid,
 				bthost_cid_hook_func_t func, void *user_data)
 {
@@ -1729,6 +1742,21 @@ static void evt_le_conn_update_complete(struct bthost *bthost, const void *data,
 		return;
 }
 
+static void evt_le_conn_rate_change(struct bthost *bthost, const void *data,
+								uint8_t len)
+{
+	const struct bt_hci_evt_le_conn_rate_change *ev = data;
+
+	if (len < sizeof(*ev))
+		return;
+
+	if (ev->status)
+		return;
+
+	bthost_debug(bthost, "conn rate change: handle %u subrate %u",
+			le16_to_cpu(ev->handle), le16_to_cpu(ev->subrate));
+}
+
 static void evt_le_remote_features_complete(struct bthost *bthost,
 						const void *data, uint8_t len)
 {
@@ -1962,6 +1990,9 @@ static void evt_le_meta_event(struct bthost *bthost, const void *data,
 		break;
 	case BT_HCI_EVT_LE_BIG_INFO_ADV_REPORT:
 		evt_le_big_info_adv_report(bthost, evt_data, len - 1);
+		break;
+	case BT_HCI_EVT_LE_CONN_RATE_CHANGE:
+		evt_le_conn_rate_change(bthost, evt_data, len - 1);
 		break;
 	default:
 		bthost_debug(bthost, "Unsupported LE Meta event 0x%2.2x",
@@ -2588,6 +2619,13 @@ static bool l2cap_ecred_conn_req(struct bthost *bthost, struct btconn *conn,
 
 	len -= sizeof(rsp.pdu);
 	num_scid = len / sizeof(*req->scid);
+
+	if (num_scid > (int)ARRAY_SIZE(rsp.dcid)) {
+		rsp.pdu.result = cpu_to_le16(0x000c); /* Refuse all - Invalid */
+		bthost_debug(bthost, "invalid ECRED_CONN_REQ (num_scid = %d)",
+								num_scid);
+		goto respond;
+	}
 
 	for (; i < num_scid; i++)
 		rsp.dcid[i] = cpu_to_le16(conn->next_cid++);
@@ -3997,6 +4035,24 @@ void bthost_le_start_encrypt(struct bthost *bthost, uint16_t handle,
 	memcpy(cmd.ltk, ltk, 16);
 
 	send_command(bthost, BT_HCI_CMD_LE_START_ENCRYPT, &cmd, sizeof(cmd));
+}
+
+void bthost_le_conn_rate(struct bthost *bthost, uint16_t handle,
+					const struct bthost_conn_rate *rate)
+{
+	struct bt_hci_cmd_le_conn_rate cmd;
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.handle = cpu_to_le16(handle);
+	cmd.interval_min = cpu_to_le16(rate->interval_min);
+	cmd.interval_max = cpu_to_le16(rate->interval_max);
+	cmd.subrate_min = cpu_to_le16(rate->subrate_min);
+	cmd.subrate_max = cpu_to_le16(rate->subrate_max);
+	cmd.max_latency = cpu_to_le16(rate->max_latency);
+	cmd.cont_num = cpu_to_le16(rate->cont_num);
+	cmd.supv_timeout = cpu_to_le16(rate->supv_timeout);
+
+	send_command(bthost, BT_HCI_CMD_LE_CONN_RATE, &cmd, sizeof(cmd));
 }
 
 uint64_t bthost_conn_get_fixed_chan(struct bthost *bthost, uint16_t handle)

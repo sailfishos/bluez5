@@ -180,11 +180,21 @@ bt_gatt_client_ref_safe(struct bt_gatt_client *client)
 
 static void notify_client_idle(struct bt_gatt_client *client)
 {
+	struct queue *idle_cbs;
+
 	client = bt_gatt_client_ref_safe(client);
 	if (!client)
 		return;
 
-	queue_remove_all(client->idle_cbs, idle_notify, NULL, idle_destroy);
+	/* Detach the callbacks before calling them, as a callback may make
+	 * the client idle again, e.g. if a request it sends fails right away,
+	 * which would otherwise call them again while being removed.
+	 */
+	idle_cbs = client->idle_cbs;
+	client->idle_cbs = queue_new();
+
+	queue_remove_all(idle_cbs, idle_notify, NULL, idle_destroy);
+	queue_destroy(idle_cbs, NULL);
 
 	bt_gatt_client_unref(client);
 }
@@ -232,6 +242,7 @@ struct notify_data {
 	uint8_t att_ecode;
 	int ref_count;
 	struct notify_chrc *chrc;
+	uint16_t ccc_value;
 	bt_gatt_client_register_callback_t callback;
 	bt_gatt_client_notify_callback_t notify;
 	void *user_data;
@@ -1160,10 +1171,16 @@ static void discovery_found_service(struct discovery_op *op,
 {
 	/* Skip if service already active */
 	if (!gatt_db_service_get_active(attr)) {
-		/* Skip if there are no attributes */
+		/*
+		 * Skip if there are no attributes. An inactive service left by
+		 * an interrupted discovery is already pending from
+		 * discovery_op_create(); queueing it twice makes
+		 * discovery_op_complete() free it and then dereference the
+		 * second entry.
+		 */
 		if (end == start)
 			gatt_db_service_set_active(attr, true);
-		else
+		else if (!queue_find(op->pending_svcs, NULL, attr))
 			queue_push_tail(op->pending_svcs, attr);
 
 		if (start < op->svc_first)
@@ -1206,7 +1223,7 @@ static bool discovery_parse_services(struct discovery_op *op, bool primary,
 		if (!attr) {
 			gatt_db_clear_range(client->db, start, end);
 			attr = gatt_db_insert_service(client->db, start, &uuid,
-							false, end - start + 1);
+						primary, end - start + 1);
 			if (!attr) {
 				DBG(client, "Failed to store service");
 				return false;
@@ -1670,10 +1687,9 @@ static bool notify_data_write_ccc(struct notify_data *notify_data, bool enable,
 	assert(notify_data->chrc->ccc_handle);
 
 	if (enable) {
-		/* Try to enable notifications or indications based on
-		 * whatever the characteristic supports.
-		 */
-		if (properties & BT_GATT_CHRC_PROP_NOTIFY)
+		if (notify_data->ccc_value)
+			value = cpu_to_le16(notify_data->ccc_value);
+		else if (properties & BT_GATT_CHRC_PROP_NOTIFY)
 			value = cpu_to_le16(0x0001);
 		else if (properties & BT_GATT_CHRC_PROP_INDICATE)
 			value = cpu_to_le16(0x0002);
@@ -1749,6 +1765,7 @@ static bool match_notify_chrc_value_handle(const void *a, const void *b)
 
 static unsigned int register_notify(struct bt_gatt_client *client,
 				uint16_t handle,
+				uint16_t ccc_value,
 				bt_gatt_client_register_callback_t callback,
 				bt_gatt_client_notify_callback_t notify,
 				void *user_data,
@@ -1778,10 +1795,22 @@ static unsigned int register_notify(struct bt_gatt_client *client,
 	if (chrc->notify_count == INT_MAX)
 		return 0;
 
+	if (ccc_value == 0x0001 &&
+			!(chrc->properties & BT_GATT_CHRC_PROP_NOTIFY))
+		return 0;
+
+	if (ccc_value == 0x0002 &&
+			!(chrc->properties & BT_GATT_CHRC_PROP_INDICATE))
+		return 0;
+
+	if (ccc_value != 0 && ccc_value != 0x0001 && ccc_value != 0x0002)
+		return 0;
+
 	notify_data = new0(struct notify_data, 1);
 	notify_data->client = client;
 	notify_data->ref_count = 1;
 	notify_data->chrc = chrc;
+	notify_data->ccc_value = ccc_value;
 	notify_data->callback = callback;
 	notify_data->notify = notify;
 	notify_data->user_data = user_data;
@@ -1871,6 +1900,7 @@ static bool register_service_changed(struct bt_gatt_client *client)
 	 */
 	client->svc_chngd_ind_id = register_notify(client,
 					gatt_db_attribute_get_handle(attr),
+					0x0002,
 					service_changed_register_cb,
 					service_changed_cb,
 					client, NULL);
@@ -2608,6 +2638,14 @@ void bt_gatt_client_unref(struct bt_gatt_client *client)
 bool bt_gatt_client_is_ready(struct bt_gatt_client *client)
 {
 	return (client && client->ready);
+}
+
+/* Whether there are no pending requests, e.g. to know if the callbacks
+ * registered with bt_gatt_client_idle_register would be called.
+ */
+bool bt_gatt_client_is_idle(struct bt_gatt_client *client)
+{
+	return (client && queue_isempty(client->pending_requests));
 }
 
 unsigned int bt_gatt_client_ready_register(struct bt_gatt_client *client,
@@ -3834,14 +3872,35 @@ unsigned int bt_gatt_client_register_notify(struct bt_gatt_client *client,
 	if (client->in_svc_chngd)
 		return 0;
 
-	return register_notify(client, chrc_value_handle, callback, notify,
+	return register_notify(client, chrc_value_handle, 0, callback, notify,
 							user_data, destroy);
+}
+
+unsigned int bt_gatt_client_register_notify_with_ccc(
+				struct bt_gatt_client *client,
+				uint16_t chrc_value_handle, uint16_t ccc_value,
+				bt_gatt_client_register_callback_t callback,
+				bt_gatt_client_notify_callback_t notify,
+				void *user_data,
+				bt_gatt_client_destroy_func_t destroy)
+{
+	if (!client || !client->db || !chrc_value_handle ||
+			(!callback && !notify) || !ccc_value)
+		return 0;
+
+	if (client->in_svc_chngd)
+		return 0;
+
+	return register_notify(client, chrc_value_handle, ccc_value, callback,
+						notify, user_data, destroy);
 }
 
 bool bt_gatt_client_unregister_notify(struct bt_gatt_client *client,
 							unsigned int id)
 {
 	struct notify_data *notify_data;
+	bt_gatt_client_destroy_func_t destroy;
+	void *user_data;
 
 	if (!client || !id)
 		return false;
@@ -3858,7 +3917,26 @@ bool bt_gatt_client_unregister_notify(struct bt_gatt_client *client,
 	notify_data->callback = NULL;
 	notify_data->notify = NULL;
 
+	/* Call destroy once unregistered, as the user data may be freed then,
+	 * while notify_data may still be referenced by a pending procedure,
+	 * e.g. the write of the CCC, which would otherwise call it later.
+	 */
+	destroy = notify_data->destroy;
+	user_data = notify_data->user_data;
+	notify_data->destroy = NULL;
+
+	/* The client may be freed by destroy, e.g. if the user data holds
+	 * its last reference.
+	 */
+	bt_gatt_client_ref(client);
+
 	complete_unregister_notify(notify_data);
+
+	if (destroy)
+		destroy(user_data);
+
+	bt_gatt_client_unref(client);
+
 	return true;
 }
 

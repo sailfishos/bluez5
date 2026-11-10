@@ -45,6 +45,17 @@
 	do { tester_warn("%s:%d: failed in %s", __FILE__, __LINE__, __func__); \
 		tester_test_failed(); } while (0)
 
+/* Cancel one of the grouped Enable requests, either while it is queued or
+ * while the request is waiting for the ASE state.
+ */
+enum {
+	CANCEL_NONE,
+	CANCEL_LEADER,
+	CANCEL_MEMBER,
+	CANCEL_WAIT_LEADER,
+	CANCEL_WAIT_MEMBER,
+};
+
 struct test_config {
 	struct iovec cc;
 	struct iovec base;
@@ -61,6 +72,8 @@ struct test_config {
 	struct iovec *pac_caps;
 	const struct iovec *setup_data;
 	size_t setup_data_len;
+	uint8_t cancel;
+	bool mnotify;
 };
 
 struct test_data {
@@ -82,6 +95,13 @@ struct test_data {
 	size_t iovcnt;
 	struct iovec *iov;
 	int fds[8][2];
+	bool mnotify;
+	struct iovec *alt_iov;
+	size_t alt_iovcnt;
+	struct queue *alt_pdus;
+	unsigned int enable_ids[2];
+	struct bt_bap_stream *cancelled;
+	unsigned int enabled;
 };
 
 struct notify {
@@ -116,23 +136,168 @@ static struct bt_bap_pac_qos lc3_qos = {
 
 #define iov_data(args...) ((const struct iovec[]) { args })
 
+/* Unicast tests are also run with Notify Multiple, using the same test data
+ * with the notifications sent as Handle Value Multiple Notification as
+ * alternative.
+ */
 #define define_test(name, setup, function, _cfg, args...)		\
 	do {							\
 		const struct iovec iov[] = { args };		\
 		static struct test_data data;			\
-		data.caps = &lc3_caps;				\
-		data.qos = &lc3_qos;				\
-		data.cfg = _cfg;				\
-		if (data.cfg && data.cfg->pac_caps)		\
-			data.caps = data.cfg->pac_caps;		\
-		if (data.cfg && data.cfg->pac_qos)		\
-			data.qos = data.cfg->pac_qos;		\
-		data.iovcnt = ARRAY_SIZE(iov);			\
-		data.iov = util_iov_dup(iov, ARRAY_SIZE(iov));	\
-		data.streams = queue_new(); \
-		tester_add(name, &data, setup, function,	\
-				test_teardown);			\
+		static struct test_data data_mnotify;		\
+		test_add(&data, name, setup, function, _cfg,	\
+				iov, ARRAY_SIZE(iov), false);	\
+		if (setup == test_setup_server ||		\
+				setup == test_setup)		\
+			test_add(&data_mnotify, name, setup,	\
+					function, _cfg, iov,	\
+					ARRAY_SIZE(iov), true);	\
 	} while (0)
+
+static void test_setup_server(const void *user_data);
+static void test_setup(const void *user_data);
+static void test_teardown(const void *user_data);
+
+#define ATT_MTU			64
+#define ATT_OP_NFY		0x1b
+#define ATT_OP_NFY_MULT		0x23
+
+static const struct iovec iov_null = IOV_NULL;
+static const struct iovec iov_alt = IOV_ALT;
+static const struct iovec iov_alt_or = IOV_ALT_OR;
+static const struct iovec iov_alt_end = IOV_ALT_END;
+
+static bool iov_is_nfy(const struct iovec *iov)
+{
+	return iov->iov_base && iov->iov_len >= 3 &&
+			((uint8_t *)iov->iov_base)[0] == ATT_OP_NFY;
+}
+
+static void mnotify_pdu_free(void *data)
+{
+	struct iovec *pdu = data;
+
+	free(pdu->iov_base);
+	free(pdu);
+}
+
+static struct iovec *mnotify_pdu_new(struct test_data *data)
+{
+	struct iovec *pdu = new0(struct iovec, 1);
+
+	pdu->iov_base = malloc(ATT_MTU);
+	util_iov_push_u8(pdu, ATT_OP_NFY_MULT);
+	queue_push_tail(data->alt_pdus, pdu);
+
+	return pdu;
+}
+
+static void mnotify_push(struct test_data *data, const struct iovec *iov)
+{
+	data->alt_iov[data->alt_iovcnt++] = *iov;
+}
+
+/* Add each chain of notifications, i.e. notifications separated by
+ * IOV_NULL, with the alternative of sending them as Handle Value Multiple
+ * Notifications:
+ *
+ * IOV_ALT, <notifications>, IOV_ALT_OR, <multiple notifications>,
+ * IOV_ALT_END
+ */
+static void test_setup_mnotify(struct test_data *data)
+{
+	size_t i, j, k;
+
+	data->alt_pdus = queue_new();
+	data->alt_iov = new0(struct iovec, data->iovcnt * 5);
+	data->alt_iovcnt = 0;
+
+	for (i = 0; i < data->iovcnt; i = j + 1) {
+		struct iovec *pdu;
+
+		if (!iov_is_nfy(&data->iov[i])) {
+			j = i;
+			mnotify_push(data, &data->iov[i]);
+			continue;
+		}
+
+		/* Find the end of the chain */
+		for (j = i; j + 2 < data->iovcnt; j += 2) {
+			if (data->iov[j + 1].iov_base ||
+					!iov_is_nfy(&data->iov[j + 2]))
+				break;
+		}
+
+		mnotify_push(data, &iov_alt);
+
+		for (k = i; k <= j; k++)
+			mnotify_push(data, &data->iov[k]);
+
+		mnotify_push(data, &iov_alt_or);
+
+		pdu = mnotify_pdu_new(data);
+
+		for (k = i; k <= j; k += 2) {
+			const struct iovec *nfy = &data->iov[k];
+			size_t len = nfy->iov_len - 3;
+
+			/* Start a new PDU if it doesn't fit in the MTU */
+			if (pdu->iov_len > 1 &&
+					pdu->iov_len + 4 + len > ATT_MTU) {
+				mnotify_push(data, pdu);
+				mnotify_push(data, &iov_null);
+				pdu = mnotify_pdu_new(data);
+			}
+
+			/* Handle */
+			util_iov_push_mem(pdu, 2, nfy->iov_base + 1);
+			util_iov_push_le16(pdu, len);
+			util_iov_push_mem(pdu, len, nfy->iov_base + 3);
+		}
+
+		mnotify_push(data, pdu);
+		mnotify_push(data, &iov_alt_end);
+	}
+}
+
+static void test_add(struct test_data *data, const char *name,
+			tester_data_func_t setup, tester_data_func_t function,
+			struct test_config *cfg, const struct iovec *iov,
+			size_t iovcnt, bool mnotify)
+{
+	char mname[256];
+
+	data->caps = &lc3_caps;
+	data->qos = &lc3_qos;
+	data->cfg = cfg;
+	if (cfg && cfg->pac_caps)
+		data->caps = cfg->pac_caps;
+	if (cfg && cfg->pac_qos)
+		data->qos = cfg->pac_qos;
+	data->iovcnt = iovcnt;
+	data->iov = util_iov_dup(iov, iovcnt);
+	data->streams = queue_new();
+	data->mnotify = mnotify;
+
+	if (mnotify) {
+		test_setup_mnotify(data);
+		snprintf(mname, sizeof(mname), "%s (Notify Multiple)", name);
+		name = mname;
+	}
+
+	tester_add(name, data, setup, function, test_teardown);
+}
+
+static struct io *test_setup_iov(struct test_data *data)
+{
+	if (!data->mnotify)
+		return tester_setup_io(data->iov, data->iovcnt);
+
+	/* Use the Handle Value Multiple Notification alternative */
+	tester_io_set_alt(1);
+
+	return tester_setup_io(data->alt_iov, data->alt_iovcnt);
+}
 
 static void client_ready_cb(bool success, uint8_t att_ecode, void *user_data)
 {
@@ -637,7 +802,8 @@ static struct ccc_state *get_ccc_state(struct test_data *data,
 static void gatt_notify_cb(struct gatt_db_attribute *attrib,
 					struct gatt_db_attribute *ccc,
 					const uint8_t *value, size_t len,
-					struct bt_att *att, void *user_data)
+					uint8_t opcode, struct bt_att *att,
+					void *user_data)
 {
 	struct test_data *data = user_data;
 	uint16_t handle = gatt_db_attribute_get_handle(attrib);
@@ -652,7 +818,8 @@ static void gatt_notify_cb(struct gatt_db_attribute *attrib,
 	}
 
 	if (!bt_gatt_server_send_notification(data->server,
-			handle, value, len, false))
+			handle, value, len,
+			data->mnotify || (data->cfg && data->cfg->mnotify)))
 		tester_debug("%s: Failed to send notification", __func__);
 }
 
@@ -924,7 +1091,7 @@ static void test_client(const void *user_data)
 	struct test_data *data = (void *)user_data;
 	struct io *io;
 
-	io = tester_setup_io(data->iov, data->iovcnt);
+	io = test_setup_iov(data);
 	g_assert(io);
 
 	tester_io_set_complete_func(test_complete_cb);
@@ -1123,6 +1290,8 @@ static void test_teardown(const void *user_data)
 	bt_bap_unref(data->bap);
 	bt_gatt_client_unref(data->client);
 	util_iov_free(data->iov, data->iovcnt);
+	free(data->alt_iov);
+	queue_destroy(data->alt_pdus, mnotify_pdu_free);
 
 	util_iov_free(data->base, 1);
 
@@ -1481,7 +1650,7 @@ static void test_server(const void *user_data)
 	struct test_data *data = (void *)user_data;
 	struct io *io;
 
-	io = tester_setup_io(data->iov, data->iovcnt);
+	io = test_setup_iov(data);
 	g_assert(io);
 
 	tester_io_set_complete_func(test_complete_cb);
@@ -1512,7 +1681,7 @@ static void test_server_state(const void *user_data)
 	struct test_data *data = (void *)user_data;
 	struct io *io;
 
-	io = tester_setup_io(data->iov, data->iovcnt);
+	io = test_setup_iov(data);
 	g_assert(io);
 
 	tester_io_set_complete_func(test_complete_cb);
@@ -2051,6 +2220,30 @@ static void test_ucl_scc_cc_lc3(void)
 
 
 /* 4.9 Unicast Server Configuration */
+static struct test_config cfg_snk_8_1_mnotify = {
+	.cc = LC3_CONFIG_8_1,
+	.qos = QOS_UCAST,
+	.snk = true,
+	.mnotify = true,
+};
+
+/* The CP notification and the ASE state notification are expected to be
+ * sent in the same Notify Multiple PDU.
+ */
+#define SCC_SNK_8_1_MNOTIFY \
+	DISC_SRC_ASE_LC3, \
+	IOV_DATA(SCC_PDU(1), SCC_PDU_ASE(SNK_ID(0), LC3_CODEC_ID_DATA, \
+			0x0a, 0x02, 0x01, 0x01, 0x02, 0x02, 0x00, 0x03, 0x04, \
+			0x1a, 0x00)), \
+	IOV_DATA(0x23, CP_HND, 0x05, 0x00, 0x01, 0x01, SNK_ID(0), 0x00, \
+			0x00, \
+			SNK_HND(0), 0x23, 0x00, SNK_ID(0), 0x01, \
+			0x00, 0x02, 0x01, 0x0a, 0x00, \
+			0x20, 0x4e, 0x00, 0x40, 0x9c, 0x00, 0x20, 0x4e, 0x00, \
+			0x40, 0x9c, 0x00, LC3_CODEC_ID_DATA, \
+			0x0a, 0x02, 0x01, 0x01, 0x02, 0x02, 0x00, 0x03, 0x04, \
+			0x1a, 0x00)
+
 static void test_usr_scc_cc_lc3(void)
 {
 	/* 4.9.1 Unicast Server as Audio Sink Performs Config Codec – LC3
@@ -2084,6 +2277,10 @@ static void test_usr_scc_cc_lc3(void)
 	define_test("BAP/USR/SCC/BV-001-C [USR SNK Config Codec, LC3 8_1]",
 			test_setup_server, test_server, &cfg_snk_8_1,
 			SCC_SNK_8_1);
+	define_test("BAP/USR/SCC/BLUEZ-1 [USR SNK Config Codec, LC3 8_1, "
+			"Notify Multiple]",
+			test_setup_server, test_server, &cfg_snk_8_1_mnotify,
+			SCC_SNK_8_1_MNOTIFY);
 	define_test("BAP/USR/SCC/BV-002-C [USR SNK Config Codec, LC3 8_2]",
 			test_setup_server, test_server, &cfg_snk_8_2,
 			SCC_SNK_8_2);
@@ -3961,9 +4158,25 @@ static struct test_config cfg_src_cc_release = {
 	IOV_NULL, \
 	IOV_DATA(0x1b, 0x1c, 0x00, 0x03, 0x06)
 
+/* After Releasing the ASE moves to Idle, or to Codec Configured if the
+ * configuration is cached.
+ */
+#define ASE_SRC_RELEASE_IDLE \
+	ASE_SRC_RELEASE, \
+	IOV_NULL, \
+	IOV_DATA(0x1b, SRC_HND(0), SRC_ID(0), 0x00)
+
+#define LC3_CONFIG_16_2_DATA \
+	LC3_CODEC_ID_DATA, 0x0a, 0x02, 0x01, 0x03, 0x02, 0x02, 0x01, 0x03, \
+	0x04, 0x28, 0x00
+
+#define ASE_SRC_RELEASE_CC \
+	ASE_SRC_RELEASE, \
+	SCC_SRC_NOTIFY(0, LC3_CONFIG_16_2_DATA)
+
 #define SCC_SRC_CC_RELEASE \
 	SCC_SRC_16_2, \
-	ASE_SRC_RELEASE
+	ASE_SRC_RELEASE_IDLE
 
 static struct test_config cfg_snk_cc_release = {
 	.cc = LC3_CONFIG_16_2,
@@ -3988,9 +4201,18 @@ static struct test_config cfg_snk_cc_release = {
 	IOV_NULL, \
 	IOV_DATA(0x1b, 0x16, 0x00, 0x01, 0x06)
 
+#define ASE_SNK_RELEASE_IDLE \
+	ASE_SNK_RELEASE, \
+	IOV_NULL, \
+	IOV_DATA(0x1b, SNK_HND(0), SNK_ID(0), 0x00)
+
+#define ASE_SNK_RELEASE_CC \
+	ASE_SNK_RELEASE, \
+	SCC_SNK_NOTIFY(0, LC3_CONFIG_16_2_DATA)
+
 #define SCC_SNK_CC_RELEASE \
 	SCC_SNK_16_2, \
-	ASE_SNK_RELEASE
+	ASE_SNK_RELEASE_IDLE
 
 static void state_qos_release(struct bt_bap_stream *stream,
 					uint8_t old_state, uint8_t new_state,
@@ -4017,7 +4239,7 @@ static struct test_config cfg_src_qos_release = {
 
 #define SCC_SRC_QOS_RELEASE \
 	SCC_SRC_16_2_1, \
-	ASE_SRC_RELEASE
+	ASE_SRC_RELEASE_CC
 
 static struct test_config cfg_snk_qos_release = {
 	.cc = LC3_CONFIG_16_2,
@@ -4029,7 +4251,7 @@ static struct test_config cfg_snk_qos_release = {
 
 #define SCC_SNK_QOS_RELEASE \
 	SCC_SNK_16_2_1, \
-	ASE_SNK_RELEASE
+	ASE_SNK_RELEASE_CC
 
 static void state_enable_release(struct bt_bap_stream *stream,
 					uint8_t old_state, uint8_t new_state,
@@ -4056,7 +4278,7 @@ static struct test_config cfg_src_enable_release = {
 
 #define SCC_SRC_ENABLE_RELEASE \
 	SCC_SRC_ENABLE, \
-	ASE_SRC_RELEASE
+	ASE_SRC_RELEASE_CC
 
 static struct test_config cfg_snk_enable_release = {
 	.cc = LC3_CONFIG_16_2,
@@ -4068,7 +4290,7 @@ static struct test_config cfg_snk_enable_release = {
 
 #define SCC_SNK_ENABLE_RELEASE \
 	SCC_SNK_ENABLE, \
-	ASE_SNK_RELEASE
+	ASE_SNK_RELEASE_CC
 
 static void state_start_release(struct bt_bap_stream *stream,
 					uint8_t old_state, uint8_t new_state,
@@ -4096,7 +4318,7 @@ static struct test_config cfg_src_start_release = {
 #define SCC_SRC_START_RELEASE \
 	SCC_SRC_ENABLE, \
 	SRC_START, \
-	ASE_SRC_RELEASE
+	ASE_SRC_RELEASE_CC
 
 static void state_disable_release(struct bt_bap_stream *stream,
 					uint8_t old_state, uint8_t new_state,
@@ -4123,7 +4345,7 @@ static struct test_config cfg_src_disable_release = {
 
 #define SCC_SRC_DISABLE_RELEASE \
 	SCC_SRC_DISABLE, \
-	ASE_SRC_RELEASE
+	ASE_SRC_RELEASE_CC
 
 /* Test Purpose:
  * Verify that a Unicast Client IUT can release an ASE by initiating a Release
@@ -9460,6 +9682,31 @@ static void test_bsrc_str(void)
 							LC3_PAC_CAPS(0x01))
 
 #define STR_AC3		DISC_AC3, STR_SNK_SRC_STREAMING_LC3(0, 0, 0x1, 0x1)
+
+#define STR_SNK_SRC_QOS(cis1, cis2, challoc1, challoc2, codec_id...) \
+	SCC_ASE2(SNK_ID(0), SRC_ID(0), challoc1, challoc2, codec_id), \
+	SCC_SNK_NOTIFY(0, STR_SCC_DATA(challoc1, codec_id)), \
+	SCC_SRC_NOTIFY(0, STR_SCC_DATA(challoc2, codec_id)), \
+	QOS_ASE2(SNK_ID(0), SRC_ID(0), cis1, cis2, QOS_SRC_8_1_1_DATA), \
+	QOS_SNK_NOTIFY(0, cis1, QOS_SRC_8_1_1_DATA), \
+	QOS_SRC_NOTIFY(0, cis2, QOS_SRC_8_1_1_DATA)
+
+/* Enable of the Sink ASE cancelled, only the Source ASE is enabled */
+#define STR_AC3_CANCEL_LEADER \
+	DISC_AC3, \
+	STR_SNK_SRC_QOS(0, 0, 0x1, 0x1, LC3_CODEC_ID_DATA), \
+	ENABLE_ASE(SRC_ID(0)), \
+	SRC_ENABLE_NOTIFY(0, 0), \
+	START_ASE(SRC_ID(0)), \
+	SRC_START_NOTIFY(0, 0)
+
+/* Enable of the Source ASE cancelled, only the Sink ASE is enabled */
+#define STR_AC3_CANCEL_MEMBER \
+	DISC_AC3, \
+	STR_SNK_SRC_QOS(0, 0, 0x1, 0x1, LC3_CODEC_ID_DATA), \
+	ENABLE_ASE(SNK_ID(0)), \
+	SNK_ENABLE_NOTIFY(0, 0), \
+	SNK_START_NOTIFY(0, 0)
 #define STR_AC5		DISC_AC5, STR_SNK_SRC_STREAMING_LC3(0, 0, 0x22, 0x2)
 #define STR_AC7i	DISC_AC7i, STR_SNK_SRC_STREAMING_LC3(0, 1, 0x4, 0x4)
 
@@ -9646,6 +9893,42 @@ static struct test_config cfg_str_ac3 = {
 	.snk_locations = { 0x1, -1 },
 	.src_locations = { 0x1, -1 },
 	.qos = LC3_QOS_8_1_1,
+};
+
+static struct test_config cfg_str_ac3_cancel_leader = {
+	.snk = true,
+	.src = true,
+	.snk_locations = { 0x1, -1 },
+	.src_locations = { 0x1, -1 },
+	.qos = LC3_QOS_8_1_1,
+	.cancel = CANCEL_LEADER,
+};
+
+static struct test_config cfg_str_ac3_cancel_member = {
+	.snk = true,
+	.src = true,
+	.snk_locations = { 0x1, -1 },
+	.src_locations = { 0x1, -1 },
+	.qos = LC3_QOS_8_1_1,
+	.cancel = CANCEL_MEMBER,
+};
+
+static struct test_config cfg_str_ac3_cancel_wait_leader = {
+	.snk = true,
+	.src = true,
+	.snk_locations = { 0x1, -1 },
+	.src_locations = { 0x1, -1 },
+	.qos = LC3_QOS_8_1_1,
+	.cancel = CANCEL_WAIT_LEADER,
+};
+
+static struct test_config cfg_str_ac3_cancel_wait_member = {
+	.snk = true,
+	.src = true,
+	.snk_locations = { 0x1, -1 },
+	.src_locations = { 0x1, -1 },
+	.qos = LC3_QOS_8_1_1,
+	.cancel = CANCEL_WAIT_MEMBER,
 };
 
 static struct test_config cfg_str_ac5 = {
@@ -9930,8 +10213,17 @@ static void streaming_ucl_do_stream(struct bt_bap_stream *stream,
 	}
 
 	/* All streams handled */
-	if (data->id == 0)
-		tester_test_passed();
+	if (data->id)
+		return;
+
+	/* Check the requests not cancelled have been completed */
+	if (data->cfg->cancel && data->enabled + !!data->cancelled !=
+					queue_length(data->streams)) {
+		FAIL_TEST();
+		return;
+	}
+
+	tester_test_passed();
 }
 
 static void streaming_ucl_connect(struct bt_bap_stream *stream)
@@ -10004,6 +10296,37 @@ static int streaming_ucl_create_io(struct bt_bap_stream *stream,
 	return i;
 }
 
+static void streaming_ucl_enable(struct bt_bap_stream *stream, uint8_t code,
+					uint8_t reason, void *user_data)
+{
+	struct test_data *data = user_data;
+
+	tester_debug("stream %p enable code 0x%02x", stream, code);
+
+	/* Cancelled requests shall not be completed */
+	if (code || stream == data->cancelled) {
+		FAIL_TEST();
+		return;
+	}
+
+	data->enabled++;
+}
+
+static void streaming_ucl_cancel(struct test_data *data, unsigned int idx)
+{
+	const struct queue_entry *entry = queue_get_entries(data->streams);
+
+	if (idx)
+		entry = entry->next;
+
+	data->cancelled = entry->data;
+
+	tester_debug("cancel stream %p enable", data->cancelled);
+
+	g_assert(!bt_bap_stream_cancel(data->cancelled,
+						data->enable_ids[idx]));
+}
+
 static void streaming_ucl_state(struct bt_bap_stream *stream,
 					uint8_t old_state, uint8_t new_state,
 					void *user_data)
@@ -10032,18 +10355,47 @@ static void streaming_ucl_state(struct bt_bap_stream *stream,
 		for (entry = queue_get_entries(data->streams);
 					entry; entry = entry->next) {
 			struct bt_bap_stream *s = entry->data;
+			unsigned int idx = data->id;
 
-			if (data->cfg->state != BT_BAP_STREAM_STATE_ENABLING)
+			/* Don't connect the stream to be cancelled */
+			if (data->cfg->state != BT_BAP_STREAM_STATE_ENABLING &&
+				!(data->cfg->cancel == CANCEL_LEADER && !idx) &&
+				!(data->cfg->cancel == CANCEL_MEMBER && idx))
 				streaming_ucl_connect(s);
 
 			id = bt_bap_stream_enable(s, false, NULL,
-							NULL, NULL);
+						data->cfg->cancel ?
+						streaming_ucl_enable : NULL,
+						data);
 			g_assert(id);
+
+			if (idx < ARRAY_SIZE(data->enable_ids))
+				data->enable_ids[idx] = id;
 
 			data->id++;
 		}
+
+		switch (data->cfg->cancel) {
+		case CANCEL_LEADER:
+			streaming_ucl_cancel(data, 0);
+			data->id--;
+			break;
+		case CANCEL_MEMBER:
+			streaming_ucl_cancel(data, 1);
+			data->id--;
+			break;
+		}
 		break;
 	case BT_BAP_STREAM_STATE_ENABLING:
+		/* Cancel once the first ASE is enabling, the request is then
+		 * waiting for the other one.
+		 */
+		if (!data->cancelled && data->cfg->cancel == CANCEL_WAIT_LEADER)
+			streaming_ucl_cancel(data, 0);
+		else if (!data->cancelled &&
+				data->cfg->cancel == CANCEL_WAIT_MEMBER)
+			streaming_ucl_cancel(data, 1);
+
 		/* TODO: not correct to call bt_bap_stream_set_io() from this
 		 * callback
 		 */
@@ -10205,7 +10557,7 @@ static void test_select(const void *user_data)
 
 	data->id = 0;
 
-	io = tester_setup_io(data->iov, data->iovcnt);
+	io = test_setup_iov(data);
 	g_assert(io);
 
 	tester_io_set_complete_func(NULL);
@@ -10323,6 +10675,18 @@ static void test_ucl_str(void)
 
 	define_test("BAP/UCL/STR/BV-549-C [UCL, AC 3, Generic, QoS, QoS]",
 		test_setup, test_select, &cfg_str_ac3, STR_AC3);
+	define_test("BAP/UCL/STR/BLUEZ-3 [UCL, AC 3, Cancel Enable leader]",
+		test_setup, test_select, &cfg_str_ac3_cancel_leader,
+		STR_AC3_CANCEL_LEADER);
+	define_test("BAP/UCL/STR/BLUEZ-4 [UCL, AC 3, Cancel Enable member]",
+		test_setup, test_select, &cfg_str_ac3_cancel_member,
+		STR_AC3_CANCEL_MEMBER);
+	define_test("BAP/UCL/STR/BLUEZ-5 [UCL, AC 3, Cancel Enable leader "
+		"waiting]", test_setup, test_select,
+		&cfg_str_ac3_cancel_wait_leader, STR_AC3);
+	define_test("BAP/UCL/STR/BLUEZ-6 [UCL, AC 3, Cancel Enable member "
+		"waiting]", test_setup, test_select,
+		&cfg_str_ac3_cancel_wait_member, STR_AC3);
 	define_test("BAP/UCL/STR/BV-550-C [UCL, AC 5, Generic, QoS, QoS]",
 		test_setup, test_select, &cfg_str_ac5, STR_AC5);
 	define_test("BAP/UCL/STR/BV-551-C [UCL, AC 7(i), Generic, QoS, QoS]",

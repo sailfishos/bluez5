@@ -96,6 +96,9 @@ OPTIONS
 -E IP, --ellisys IP         Send Ellisys HCI Injection.
 
 -P, --no-pager              Disable pager usage while reading the log file.
+-0, --print0                Separate the frames with a NUL, so that a pager
+                            or a tool reading records rather than lines sees
+                            a whole frame as one entry.
 
 -J OPTIONS, --jlink OPTIONS     Read data from RTT.  Each options are comma(,)
                                 separated without spaces.
@@ -232,13 +235,95 @@ input going into the controller, ``>`` is output coming from it.
 
 **HCI event responses** reference the command they complete::
 
+    < HCI Command: Reset (0x03|0x0003) plen 0             #5 [hci0] 12:35:01.843185
     > HCI Event: Command Complete (0x0e) plen 4           #6 [hci0] 12:35:01.864922
-          Reset (0x03|0x0003) ncmd 2
+          Reset (0x03|0x0003) ncmd 2 #5 (21.737 msec)
             Status: Success (0x00)
 
 Here ``ncmd 2`` indicates the controller can accept 2 more commands
 (HCI flow control). The indented body shows the command this event
 completes and the result status.
+
+The trailing ``#5 (21.737 msec)`` is the frame number of the command that
+this event responds to, and how long the controller took to respond. It
+saves scrolling back through the trace to find the request, and makes a
+slow command obvious at the point where it completes.
+
+Several commands may be outstanding at once and they need not complete in
+order, so the reference is resolved by opcode, oldest first. It is omitted
+when the request was not captured, which is normal for the first commands
+seen when attaching to a system that is already running. ``Command Status``
+events carry the same reference.
+
+Some commands are only acknowledged by a ``Command Status`` and complete
+much later through a separate event. Those events carry the reference as a
+``Request`` field instead::
+
+    < HCI Command: Create Connection (0x01|0x0005) plen 13    #12 [hci0] 3.175055
+            Address: 00:11:22:33:44:55 (CIMSYS Inc)
+    > HCI Event: Command Status (0x0f) plen 4                 #13 [hci0] 3.176055
+          Create Connection (0x01|0x0005) ncmd 1 #12 (1.000 msec)
+    > HCI Event: Connect Complete (0x03) plen 11              #27 [hci0] 6.178055
+            Request: #12 (3003.000 msec)
+            Status: Success (0x00)
+
+This is where the reference is most useful, since the delay between the
+command and its completing event is often seconds and is otherwise only
+visible by comparing timestamps by hand. Page timeouts, slow authentication
+and slow encryption setup all show up directly.
+
+Commands of this kind are matched to their event by connection handle or by
+remote address, so several may be outstanding towards different devices at
+once and still resolve correctly. A ``Command Status`` reporting an error
+means the completing event will never arrive, and the command is dropped
+rather than left to match a later unrelated event.
+
+Protocols Above HCI
+-------------------
+
+The protocols carried over ACL pair their requests and responses through an
+identifier of their own, and their responses carry the same reference::
+
+    L2CAP: Connection Request (0x02) ident 1 len 4
+    L2CAP: Connection Response (0x03) ident 1 len 8 #2 (1.000 msec)
+    ATT: Read By Group Type Request (0x10) len 6
+    ATT: Error Response (0x01) len 4 #6 (45.500 msec)
+    SDP: Service Search Request (0x02) tid 5 len 8
+    SDP: Service Search Response (0x03) tid 5 len 5 #8 (12.400 msec)
+    AVCTP Control: Command: type 0x00 label 7 PID 0x110e
+    AVCTP Control: Response: type 0x00 label 7 PID 0x110e #12 (23.100 msec)
+
+What pairs the two halves differs by protocol:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 15 20 65
+
+   * - Protocol
+     - Paired by
+     - Notes
+   * - L2CAP
+     - ``ident``
+     - Responses are the request code plus one. A Command Reject
+       may answer any request.
+   * - ATT
+     - Opcode
+     - Responses are the request opcode plus one. Only one request
+       may be outstanding on a bearer. An Error Response names the
+       request it rejects. An indication is paired with its
+       confirmation.
+   * - SDP
+     - ``tid``
+     - Responses are the request PDU plus one. An Error Response
+       may answer any request.
+   * - AVDTP
+     - ``label``
+     - A command is answered by a response accept or reject.
+   * - AVCTP
+     - ``label``
+     - A command is answered by a response.
+
+SMP is not tracked, as its exchange has no transaction identifier.
 
 **LE Meta Events** contain a subevent type::
 
@@ -534,6 +619,67 @@ The kernel forwarded this as a MGMT Device Connected event. bluetoothd
 logged its ``connected_callback()``. Then data exchange began -- an L2CAP
 parameter update and ATT MTU negotiation over the new ACL connection.
 
+SEARCHING THE FRAMES
+====================
+
+A frame spans several lines, so a pager that works on records rather than
+lines has to be told where one ends. Asking for that with ``--print0``, or
+by having ``--read0`` in ``PAGER``, separates the frames with a NUL so that
+a whole frame is one entry::
+
+   $ PAGER='fzf --read0' btmon -r hcidump.log
+   $ btmon -r hcidump.log --print0 | fzf --read0
+
+Without it each line becomes an entry of its own, so searching finds the
+line reporting an error without the header saying which controller, handle
+and time it belongs to.
+
+The newline that ends a frame is left out of a record, since it is what
+separates the lines within one and would otherwise show as a blank line at
+the end of every entry.
+
+Nothing is separated unless it was asked for, so a pager reading lines,
+such as ``less``, is unaffected and never shows the separator. Redirected
+output is never separated either unless ``--print0`` says so, since nothing
+is then reading it as records.
+
+Searching a running capture
+---------------------------
+
+While capturing, the frames seen so far can be handed to a pager at any
+time by pressing ``Ctrl-R``, in the manner of the shell. The capture keeps
+running underneath, and closing the pager returns to it.
+
+.. code-block::
+
+   $ btmon                          # then press Ctrl-R
+   $ PAGER='fzf --read0' btmon      # then press Ctrl-R
+
+Whatever arrives while the pager is up is printed once it closes, so the
+trace on the terminal has no gap. The capture is never paused, as anything
+not read in time would be dropped by the kernel.
+
+The pager is taken from ``PAGER``. When that is not set and ``fzf`` is
+installed it is used instead of the plain pager, as it suits a trace far
+better. Wherever ``fzf`` is used it is given the options it needs, adding
+whichever of them are missing::
+
+   fzf --ansi --read0 --tac
+
+``--read0`` is what makes an entry a whole frame rather than a single line
+of one, ``--ansi`` renders the colours instead of showing the escape
+sequences, and ``--tac`` puts the most recent frame first. Setting
+``PAGER`` to ``cat`` or leaving it empty disables the pager, as elsewhere.
+
+Frames are only collected when the output is a terminal, so a capture that
+is piped or redirected behaves exactly as it always has. The terminal is
+switched to reading keys as they are typed, but signals are left enabled so
+``Ctrl-C`` still interrupts the capture.
+
+They are held in memory and the oldest are dropped once 200000 are held, so
+that a capture left running does not risk the monitor being killed for
+using too much memory.
+
 ANALYZE MODE
 ============
 
@@ -556,20 +702,97 @@ Analyze mode reports, for each controller found in the trace:
   events, ACL, SCO, ISO, vendor diagnostics, system notes, user
   logs, control messages).
 
+- **Command latency**: How long the controller took to acknowledge
+  commands, and how many commands were never answered at all.
+
 - **Per-connection statistics**: For each connection handle found:
 
   - Connection type (BR-ACL, LE-ACL, BR-SCO, BR-ESCO, LE-ISO)
   - Device address
   - TX and RX packet counts and completion counts
-  - Latency statistics (min, max, median) in milliseconds
+  - Latency statistics (min, max, moving average and standard
+    deviation) in milliseconds
   - Packet size statistics (min, max, average) in octets
   - Throughput estimate in Kb/s
+  - Packet loss statistics, for isochronous connections
 
 - **Per-channel statistics**: For each L2CAP channel within a
   connection, the same packet/latency/size statistics.
 
 - **Latency plots**: If ``gnuplot`` is installed, ASCII-art latency
    distribution plots are rendered in the terminal.
+
+Latency Standard Deviation
+--------------------------
+
+Latency is reported as::
+
+   TX Latency: 5-300 msec (~91 msec +/- 104 msec)
+
+The range is the minimum and maximum observed latency, ``~`` is a
+moving average and ``+/-`` is the standard deviation over all samples.
+
+The standard deviation is what distinguishes a link that is merely slow
+from one that is unstable. A high average with a low deviation means
+consistent latency, which is usually a scheduling or interval
+configuration issue. A low average with a high deviation means most
+packets are fast but some are heavily delayed, which typically points at
+interference, retransmissions or controller buffer stalls. Comparing the
+maximum against ``average + deviation`` shows whether the worst case is
+representative or a one-off outlier.
+
+Command Latency
+---------------
+
+Command latency is reported per controller::
+
+   Command latency: 0-215 msec (~55 msec +/- 70 msec)
+   Commands without response: 3
+
+This measures the interval between an HCI command and the ``Command
+Complete`` or ``Command Status`` that acknowledges it, so it describes the
+responsiveness of the controller itself.
+
+Commands that are only acknowledged by a ``Command Status`` and complete
+much later through a separate event are measured up to the acknowledgement
+only. A ``Create Connection`` that takes three seconds to reach its
+``Connect Complete`` is waiting on the remote device rather than on the
+controller, and including it would swamp both the average and the
+deviation.
+
+``Commands without response`` counts commands that were never acknowledged
+at all before the end of the trace. A non-zero value usually means the
+capture simply ended with commands in flight, but a persistently high count
+points at firmware dropping commands.
+
+Packet Loss
+-----------
+
+Packet loss is tracked for isochronous (CIS/BIS) connections, where the
+ISO data packet header carries an SDU sequence number and a packet
+status flag. It is reported as::
+
+   RX loss: 13/21 (61.90%) dropped 1 invalid 1
+
+The counters are:
+
+- **loss**: SDUs missing from the received sequence, derived from gaps
+  in the sequence number. The denominator is the number of SDUs that
+  should have been received, that is the ones actually seen plus the
+  ones detected as missing.
+
+- **dropped**: SDUs the controller delivered with a packet status flag
+  of ``2`` (lost data), meaning the controller knows the payload did not
+  arrive.
+
+- **invalid**: SDUs delivered with a packet status flag of ``1``
+  (possibly invalid), meaning the payload arrived but may be corrupt.
+
+Duplicate and reordered sequence numbers are not counted as loss.
+
+Loss counters are also shown during live decoding, on the ISO data
+packet where a discontinuity is detected. The line is only emitted once
+a loss has occurred, so a clean stream produces no extra output.
 
 PROTOCOL ERROR CODES
 =====================

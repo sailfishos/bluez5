@@ -2211,44 +2211,78 @@ char *strstrip(char *str)
 	return str;
 }
 
-size_t strnlenutf8(const char *str, size_t len)
+/*
+ * Decode the UTF-8 sequence at str, as defined by table 3-7 of the Unicode
+ * Standard, and return its size, or 0 if it is ill-formed.
+ *
+ * sublen is set to the size of the maximal subpart of the sequence, that is
+ * the number of leading bytes that could still have formed a well-formed
+ * sequence, which is what the caller needs to skip over.
+ */
+static size_t utf8_seqlen(const unsigned char *str, size_t len, size_t *sublen)
+{
+	unsigned char lo = 0x80, hi = 0xbf;
+	size_t size, i;
 
+	if (str[0] <= 0x7f) {
+		*sublen = 1;
+		return 1;
+	}
+
+	if (str[0] >= 0xc2 && str[0] <= 0xdf) {
+		size = 2;
+	} else if (str[0] >= 0xe0 && str[0] <= 0xef) {
+		size = 3;
+		/* Reject the overlong encodings and the UTF-16 surrogates */
+		if (str[0] == 0xe0)
+			lo = 0xa0;
+		else if (str[0] == 0xed)
+			hi = 0x9f;
+	} else if (str[0] >= 0xf0 && str[0] <= 0xf4) {
+		size = 4;
+		/* Reject the overlong encodings and anything past U+10FFFF */
+		if (str[0] == 0xf0)
+			lo = 0x90;
+		else if (str[0] == 0xf4)
+			hi = 0x8f;
+	} else {
+		/* C0 and C1 are overlong, F5 to FF are out of range, and a
+		 * continuation byte cannot start a sequence.
+		 */
+		*sublen = 1;
+		return 0;
+	}
+
+	for (i = 1; i < size; i++) {
+		if (i >= len || str[i] < lo || str[i] > hi) {
+			*sublen = i;
+			return 0;
+		}
+
+		/* Only the second byte has a restricted range */
+		lo = 0x80;
+		hi = 0xbf;
+	}
+
+	*sublen = size;
+	return size;
+}
+
+size_t strnlenutf8(const char *str, size_t len)
 {
 	size_t i = 0;
 
 	while (i < len) {
-		unsigned char c = str[i];
-		size_t size = 0;
+		size_t sublen;
 
-		/* Check the first byte to determine the number of bytes in the
-		 * UTF-8 character.
-		 */
-		if ((c & 0x80) == 0x00)
-			size = 1;
-		else if ((c & 0xE0) == 0xC0)
-			size = 2;
-		else if ((c & 0xF0) == 0xE0)
-			size = 3;
-		else if ((c & 0xF8) == 0xF0)
-			size = 4;
-		else
-			/* Invalid UTF-8 sequence */
-			goto done;
-
-		/* Check the following bytes to ensure they have the correct
-		 * format.
-		 */
-		for (size_t j = 1; j < size; ++j) {
-			if (i + j >= len || (str[i + j] & 0xC0) != 0x80)
-				/* Invalid UTF-8 sequence */
-				goto done;
-		}
+		if (!utf8_seqlen((const unsigned char *) str + i, len - i,
+								&sublen))
+			break;
 
 		/* Move to the next character */
-		i += size;
+		i += sublen;
 	}
 
-done:
 	return i;
 }
 
@@ -2280,4 +2314,50 @@ char *strtoutf8(char *str, size_t len)
 	/* Truncate to the longest valid UTF-8 string */
 	memset(str + i, 0, len - i);
 	return str;
+}
+
+char *str2utf8(const uint8_t *str, size_t len)
+{
+	char *utf8, *out, *stripped;
+	size_t i = 0;
+
+	if (!str)
+		return NULL;
+
+	/*
+	 * Invalid bytes are replaced with U+FFFD REPLACEMENT CHARACTER, which
+	 * is 3 bytes long, so that is the worst case size of the result.
+	 */
+	utf8 = malloc(len * 3 + 1);
+	if (!utf8)
+		return NULL;
+
+	out = utf8;
+
+	while (i < len) {
+		size_t sublen;
+		size_t size = utf8_seqlen(str + i, len - i, &sublen);
+
+		if (size) {
+			memcpy(out, str + i, size);
+			out += size;
+			i += size;
+			continue;
+		}
+
+		/* Replace the maximal subpart with U+FFFD */
+		*out++ = 0xef;
+		*out++ = 0xbf;
+		*out++ = 0xbd;
+		i += sublen;
+	}
+
+	*out = '\0';
+
+	/* Remove leading and trailing whitespace characters */
+	stripped = strstrip(utf8);
+	if (stripped != utf8)
+		memmove(utf8, stripped, strlen(stripped) + 1);
+
+	return utf8;
 }

@@ -1,7 +1,7 @@
 Name:       bluez5
 
 Summary:    Bluetooth daemon
-Version:    5.87
+Version:    5.88
 Release:    1
 License:    GPLv2+
 URL:        http://www.bluez.org/
@@ -188,7 +188,6 @@ ln -s ../mpris-proxy.service $RPM_BUILD_ROOT/%{_userunitdir}/post-user-session.t
 # HACK!! copy manually missing tools
 cp -a tools/bluetooth-player %{buildroot}%{_bindir}/
 cp -a tools/btmgmt %{buildroot}%{_bindir}/
-cp -a attrib/gatttool %{buildroot}%{_bindir}/
 cp -a tools/obex-client-tool %{buildroot}%{_bindir}/
 cp -a tools/obex-server-tool %{buildroot}%{_bindir}/
 cp -a tools/obexctl %{buildroot}%{_bindir}/
@@ -264,7 +263,6 @@ systemctl-user daemon-reload ||:
 %{_bindir}/btmgmt
 %{_bindir}/btmon
 %{_bindir}/ciptool
-%{_bindir}/gatttool
 %{_bindir}/hciconfig
 %{_bindir}/hcitool
 %{_bindir}/hex2hcd

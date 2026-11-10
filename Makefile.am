@@ -89,7 +89,7 @@ pkginclude_HEADERS += $(lib_headers)
 lib_LTLIBRARIES += lib/libbluetooth.la
 
 lib_libbluetooth_la_SOURCES = $(lib_headers) $(lib_sources)
-lib_libbluetooth_la_LDFLAGS = $(AM_LDFLAGS) -version-info 22:16:19
+lib_libbluetooth_la_LDFLAGS = $(AM_LDFLAGS) -version-info 22:17:19
 endif
 
 noinst_LTLIBRARIES += lib/libbluetooth-internal.la
@@ -239,6 +239,7 @@ shared_sources = src/shared/io.h src/shared/timeout.h \
 			src/shared/mcs.h src/shared/mcp.h src/shared/mcp.c \
 			src/shared/vcp.c src/shared/vcp.h \
 			src/shared/micp.c src/shared/micp.h \
+			src/shared/hog.c src/shared/hog.h \
 			src/shared/csip.c src/shared/csip.h \
 			src/shared/bass.h src/shared/bass.c \
 			src/shared/ccp.h src/shared/ccp.c \
@@ -249,7 +250,7 @@ shared_sources = src/shared/io.h src/shared/timeout.h \
 			src/shared/asha.h src/shared/asha.c \
 			src/shared/battery.h src/shared/battery.c \
 			src/shared/uinput.h src/shared/uinput.c \
-			src/shared/rap.h src/shared/rap.c
+			src/shared/rap.h src/shared/rap.c src/shared/cs-types.h
 
 
 if READLINE
@@ -271,7 +272,8 @@ src_libshared_mainloop_la_SOURCES = $(shared_sources) \
 				src/shared/timeout-mainloop.c \
 				src/shared/mainloop.h src/shared/mainloop.c \
 				src/shared/mainloop-notify.h \
-				src/shared/mainloop-notify.c
+				src/shared/mainloop-notify.c \
+				src/shared/tester.c
 src_libshared_mainloop_la_LDFLAGS = $(AM_LDFLAGS)
 src_libshared_mainloop_la_CFLAGS = $(AM_CFLAGS)
 
@@ -285,9 +287,6 @@ src_libshared_ell_la_LDFLAGS = $(AM_LDFLAGS)
 src_libshared_ell_la_CFLAGS = $(AM_CFLAGS)
 endif
 
-attrib_sources = attrib/att.h attrib/att-database.h attrib/att.c \
-		attrib/gatt.h attrib/gatt.c \
-		attrib/gattrib.h attrib/gattrib.c
 
 btio_sources = btio/btio.h btio/btio.c
 
@@ -323,7 +322,7 @@ endif
 pkglibexec_PROGRAMS += src/bluetoothd
 
 bluetoothd_internal_sources = \
-			$(attrib_sources) $(btio_sources) \
+			$(btio_sources) \
 			src/log.h src/log.c \
 			src/backtrace.h src/backtrace.c \
 			src/rfkill.c src/btd.h src/sdpd.h \
@@ -347,6 +346,7 @@ bluetoothd_internal_sources = \
 			src/eir.h src/eir.c \
 			src/adv_monitor.h src/adv_monitor.c \
 			src/battery.h src/battery.c \
+			src/ranging.h src/ranging.c \
 			src/settings.h src/settings.c \
 			src/set.h src/set.c \
 			src/bearer.h src/bearer.c
@@ -420,6 +420,10 @@ man_MANS += doc/org.bluez.Telephony.5 doc/org.bluez.Call.5
 man_MANS += doc/org.bluez.ThermometerManager.5 \
 		doc/org.bluez.Thermometer.5 \
 		doc/org.bluez.ThermometerWatcher.5
+man_MANS += doc/org.bluez.ChannelSounding1.5 \
+		doc/org.bluez.Ranging1.5 \
+		doc/org.bluez.RangingProvider1.5 \
+		doc/org.bluez.RangingProviderManager1.5
 endif
 manual_pages += doc/bluetoothd.8
 manual_pages += doc/hci.7 doc/mgmt.7 doc/l2cap.7 doc/rfcomm.7 doc/sco.7 \
@@ -460,6 +464,10 @@ manual_pages += doc/org.bluez.Telephony.5 doc/org.bluez.Call.5
 manual_pages += doc/org.bluez.ThermometerManager.5 \
 		doc/org.bluez.Thermometer.5 \
 		doc/org.bluez.ThermometerWatcher.5
+manual_pages += doc/org.bluez.ChannelSounding1.5 \
+		doc/org.bluez.Ranging1.5 \
+		doc/org.bluez.RangingProvider1.5 \
+		doc/org.bluez.RangingProviderManager1.5
 
 EXTRA_DIST += src/genbuiltin src/bluetooth.conf \
 			src/main.conf profiles/network/network.conf \
@@ -497,9 +505,22 @@ endif
 
 EXTRA_DIST += $(test_scripts)
 
+EXTRA_DIST += SECURITY.md
+
 EXTRA_DIST += doc/assigned-numbers.rst doc/supported-features.txt \
 				doc/test-coverage.txt \
 				doc/test-runner.rst \
+				doc/btvirt.rst \
+				doc/virtio.rst \
+				doc/test-functional.rst \
+				doc/functional-testing.rst \
+				doc/functional-a2dp.rst \
+				doc/functional-avrcp.rst \
+				doc/functional-bap.rst \
+				doc/functional-bearer.rst \
+				doc/functional-hog.rst \
+				doc/functional-mpris-proxy.rst \
+				doc/functional-obex.rst \
 				doc/settings-storage.txt
 
 EXTRA_DIST += doc/hci-protocol.rst doc/mgmt-protocol.rst \
@@ -548,6 +569,11 @@ EXTRA_DIST += doc/org.bluez.ThermometerManager.rst \
 	      doc/org.bluez.Thermometer.rst \
 	      doc/org.bluez.ThermometerWatcher.rst
 
+EXTRA_DIST += doc/org.bluez.ChannelSounding1.rst \
+		doc/org.bluez.Ranging1.rst \
+		doc/org.bluez.RangingProvider1.rst \
+		doc/org.bluez.RangingProviderManager1.rst
+
 EXTRA_DIST += doc/pics-opp.txt doc/pixit-opp.txt \
 		doc/pts-opp.txt
 
@@ -584,6 +610,11 @@ unit_tests += unit/test-tester
 unit_test_tester_SOURCES = unit/test-tester.c
 unit_test_tester_LDADD = src/libshared-glib.la lib/libbluetooth-internal.la \
 								$(GLIB_LIBS)
+
+unit_tests += unit/test-mainloop
+
+unit_test_mainloop_SOURCES = unit/test-mainloop.c
+unit_test_mainloop_LDADD = src/libshared-mainloop.la
 
 unit_tests += unit/test-eir
 
@@ -650,6 +681,22 @@ unit_test_sdp_SOURCES = unit/test-sdp.c \
 unit_test_sdp_LDADD = lib/libbluetooth-internal.la \
 				src/libshared-glib.la $(GLIB_LIBS)
 
+unit_tests += unit/test-sdp-xml
+
+unit_test_sdp_xml_SOURCES = unit/test-sdp-xml.c \
+				src/sdp-xml.c src/sdp-xml.h \
+				src/log.h src/log.c
+unit_test_sdp_xml_LDADD = lib/libbluetooth-internal.la \
+				src/libshared-glib.la $(GLIB_LIBS)
+unit_test_sdp_xml_CFLAGS = $(AM_CFLAGS) $(GLIB_CFLAGS) -DTOP_SRCDIR=\""$(srcdir)"\"
+unit_test_sdp_xml_CPPFLAGS = -I$(srcdir)/lib
+
+EXTRA_DIST += unit/sdp-xml/Bluetooth_HID-sdp_record.xml		\
+	unit/sdp-xml/alternate.xml				\
+	unit/sdp-xml/compute-seq-size-type-confusion.xml	\
+	unit/sdp-xml/duplicate-attribute.xml			\
+	unit/sdp-xml/qt-SerialPortSDPRecord.xml
+
 unit_tests += unit/test-avdtp
 
 unit_test_avdtp_SOURCES = unit/test-avdtp.c \
@@ -669,7 +716,9 @@ unit_tests += unit/test-avrcp
 unit_test_avrcp_SOURCES = unit/test-avrcp.c \
 				src/log.h src/log.c \
 				unit/avctp.c unit/avctp.h \
-				unit/avrcp-lib.c unit/avrcp-lib.h
+				unit/avrcp-lib.c unit/avrcp-lib.h \
+				profiles/audio/avrcp-parse.h \
+				profiles/audio/avrcp-parse.c
 unit_test_avrcp_LDADD = lib/libbluetooth-internal.la \
 				src/libshared-glib.la $(GLIB_LIBS)
 
@@ -683,6 +732,19 @@ unit_tests += unit/test-gdbus-client
 unit_test_gdbus_client_SOURCES = unit/test-gdbus-client.c
 unit_test_gdbus_client_LDADD = gdbus/libgdbus-internal.la \
 				src/libshared-glib.la $(GLIB_LIBS) $(DBUS_LIBS)
+
+unit_tests += unit/test-media-player
+
+unit_test_media_player_SOURCES = unit/test-media-player.c \
+				profiles/audio/player.h \
+				profiles/audio/player.c \
+				src/log.h src/log.c \
+				src/error.h src/error.c \
+				src/dbus-common.h src/dbus-common.c
+unit_test_media_player_LDADD = gdbus/libgdbus-internal.la \
+				src/libshared-glib.la \
+				lib/libbluetooth-internal.la \
+				$(GLIB_LIBS) $(DBUS_LIBS)
 
 if OBEX
 unit_tests += unit/test-gobex-header unit/test-gobex-packet unit/test-gobex \
@@ -727,26 +789,9 @@ unit_test_gatt_LDADD = src/libshared-glib.la \
 
 unit_tests += unit/test-hog
 
-unit_test_hog_SOURCES = unit/test-hog.c \
-			$(btio_sources) \
-			profiles/input/hog-lib.h profiles/input/hog-lib.c \
-			profiles/scanparam/scpp.h profiles/scanparam/scpp.c \
-			profiles/battery/bas.h profiles/battery/bas.c \
-			profiles/deviceinfo/dis.h profiles/deviceinfo/dis.c \
-			src/log.h src/log.c \
-			attrib/att.h attrib/att.c \
-			attrib/gatt.h attrib/gatt.c \
-			attrib/gattrib.h attrib/gattrib.c
+unit_test_hog_SOURCES = unit/test-hog.c
 unit_test_hog_LDADD = src/libshared-glib.la \
 				lib/libbluetooth-internal.la $(GLIB_LIBS)
-
-unit_tests += unit/test-gattrib
-
-unit_test_gattrib_SOURCES = unit/test-gattrib.c attrib/gattrib.c \
-					$(btio_sources) src/log.h src/log.c
-unit_test_gattrib_LDADD = src/libshared-glib.la \
-				lib/libbluetooth-internal.la \
-				$(GLIB_LIBS) $(DBUS_LIBS) -ldl -lrt
 
 unit_tests += unit/test-bap
 
@@ -796,6 +841,14 @@ unit_test_battery_SOURCES = unit/test-battery.c
 unit_test_battery_LDADD = src/libshared-glib.la \
 				lib/libbluetooth-internal.la $(GLIB_LIBS)
 
+unit_tests += unit/test-fastpair
+
+unit_test_fastpair_SOURCES = unit/test-fastpair.c \
+			profiles/fastpair/message-stream.h \
+			profiles/fastpair/message-stream.c
+unit_test_fastpair_LDADD = src/libshared-glib.la \
+				lib/libbluetooth-internal.la $(GLIB_LIBS)
+
 unit_tests += unit/test-rap
 
 unit_test_rap_SOURCES = unit/test-rap.c $(btio_sources)
@@ -832,6 +885,33 @@ endif
 
 TESTS = $(unit_tests)
 AM_TESTS_ENVIRONMENT = MALLOC_CHECK_=3 MALLOC_PERTURB_=69
+
+# Number of tests to run concurrently, override with e.g. CHECK_JOBS=1 to get
+# a serial run.
+CHECK_JOBS ?= $(shell nproc 2>/dev/null || echo 4)
+
+# The automake test harness spawns the individual tests from a sub-make, so
+# passing -j to it is enough to run the unit tests in parallel.
+check-TESTS recheck: AM_MAKEFLAGS += -j$(CHECK_JOBS)
+
+# The functional tests are parallelized by pytest-xdist, loadgroup is required
+# since pytest-bluezenv groups the tests sharing a host/VM setup together.
+# Each worker runs VM instances, so by default the number of workers is limited
+# by the memory available (see test/functional/conftest.py), override with e.g.
+# CHECK_FUNCTIONAL_JOBS=4.
+CHECK_FUNCTIONAL_JOBS ?= auto
+
+check-functional: all
+	python3 -m pytest "$(srcdir)/test/functional" -v \
+		-n $(CHECK_FUNCTIONAL_JOBS) --dist loadgroup \
+		-m "not tester" \
+		--kernel="$(FUNCTIONAL_TESTING_KERNEL)" \
+		--bluez-build-dir="$(top_builddir)" \
+		--bluez-src-dir="$(srcdir)"
+
+if FUNCTIONAL_TESTING
+check: check-functional
+endif
 
 if DBUS_RUN_SESSION
 AM_TESTS_ENVIRONMENT += dbus-run-session --
@@ -931,7 +1011,11 @@ if COVERAGE
 	@lcov --directory $(top_builddir) --zerocounters
 	$(RM) -r coverage $(top_builddir)/coverage.info
 
-coverage: check
+.PHONY: coverage clean-coverage
+
+coverage:
+	@lcov --directory $(top_builddir) --zerocounters
+	$(AM_V_at)$(MAKE) $(AM_MAKEFLAGS) check
 	@lcov --compat-libtool --directory $(top_builddir) --capture \
 				--output-file $(top_builddir)/coverage.info
 	$(AM_V_at)$(MKDIR_P) coverage

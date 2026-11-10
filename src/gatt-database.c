@@ -168,6 +168,7 @@ struct notify {
 	uint16_t len;
 	bt_gatt_server_conf_func_t conf;
 	void *user_data;
+	bool indicate;
 };
 
 #define CLI_FEAT_SIZE 1
@@ -1446,7 +1447,7 @@ static void send_notification_to_device(void *data, void *user_data)
 	 * TODO: If the device is not connected but bonded, send the
 	 * notification/indication when it becomes connected.
 	 */
-	if (ccc->value & 0x0001) {
+	if (!notify->indicate && (ccc->value & 0x0001)) {
 		DBG("GATT server sending notification");
 		bt_gatt_server_send_notification(server,
 					notify->handle, notify->value,
@@ -1454,6 +1455,9 @@ static void send_notification_to_device(void *data, void *user_data)
 					BT_GATT_CHRC_CLI_FEAT_NFY_MULTI);
 		return;
 	}
+
+	if (!(ccc->value & 0x0002))
+		return;
 
 	DBG("GATT server sending indication");
 	bt_gatt_server_send_indication(server, notify->handle, notify->value,
@@ -1474,7 +1478,8 @@ remove:
 static void gatt_notify_cb(struct gatt_db_attribute *attrib,
 					struct gatt_db_attribute *ccc,
 					const uint8_t *value, size_t len,
-					struct bt_att *att, void *user_data)
+					uint8_t opcode, struct bt_att *att,
+					void *user_data)
 {
 	struct btd_gatt_database *database = user_data;
 	struct notify notify;
@@ -1486,6 +1491,7 @@ static void gatt_notify_cb(struct gatt_db_attribute *attrib,
 	notify.ccc_handle = gatt_db_attribute_get_handle(ccc);
 	notify.value = (void *) value;
 	notify.len = len;
+	notify.indicate = (opcode == BT_ATT_OP_HANDLE_IND);
 
 	if (attrib == database->svc_chngd)
 		notify.conf = service_changed_conf;
@@ -2971,8 +2977,15 @@ static uint8_t ccc_write_cb(struct pending_op *op, void *user_data)
 		if (!chrc->ntfy_cnt)
 			goto done;
 
-		client = queue_remove_if(chrc->notify_ios, match_client_att,
-							op ? op->att : NULL);
+		/*
+		 * A NULL op means clear_ccc_state() is clearing the CCC of a
+		 * device that has just disconnected. Its own IO is reclaimed
+		 * by att_disconnect_cb(), and match_client_att() matches any
+		 * entry when the ATT instance is NULL, which would free the
+		 * IO of an unrelated client, so only account for it here.
+		 */
+		client = op ? queue_remove_if(chrc->notify_ios,
+					match_client_att, op->att) : NULL;
 		if (client) {
 			client_io_free(client);
 			__sync_sub_and_fetch(&chrc->ntfy_cnt, 1);

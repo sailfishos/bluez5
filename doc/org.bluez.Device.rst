@@ -395,6 +395,17 @@ int16 TxPower [readonly, optional]
 
 Advertised transmitted power level (inquiry or advertising).
 
+boolean Connectable [readonly, optional]
+````````````````````````````````````````
+
+Indicates whether the remote device accepts connections, based on the most
+recent advertising report or inquiry result. For LE this is false when the
+last advertising report was non-connectable, e.g. ADV_NONCONN_IND or
+ADV_SCAN_IND.
+
+BR/EDR devices are always considered connectable. LE devices only have this
+property once they have been discovered or connected.
+
 dict ManufacturerData [readonly, optional]
 ``````````````````````````````````````````
 
@@ -478,3 +489,39 @@ Possible values:
 Examples:
 
 :bluetoothctl: > bearer <dev> [last-seen/bredr/le]
+
+byte SecurityLevel [readonly, experimental]
+```````````````````````````````````````````
+Indicate the Security Level of a connection.
+
+Possible values:
+
+:0:
+	No security
+
+:1:
+	Unauthenticated pairing with encryption not required
+
+:2:
+	Unauthenticated pairing with encryption desired
+
+:3:
+	Authenticated pairing with encryption
+
+:4:
+	FIPS authenticated pairing with encryption
+
+byte EncryptionType [readonly, experimental]
+````````````````````````````````````````````
+Indicate the Encryption type in use for a connection.
+
+Possible values:
+
+:0:
+	No encryption
+
+:1:
+	E0 encryption
+
+:2:
+	AES-CCM encryption

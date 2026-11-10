@@ -50,6 +50,7 @@ struct bluetooth_profile {
 static GSList *profiles = NULL;
 
 static DBusConnection *connection = NULL;
+static gboolean bluez_available = FALSE;
 
 static DBusMessage *profile_release(DBusConnection *conn, DBusMessage *msg,
 								void *data)
@@ -92,7 +93,6 @@ done:
 drop:
 	error("%s", err->message);
 	g_io_channel_shutdown(io, TRUE, NULL);
-	return;
 }
 
 static DBusMessage *invalid_args(DBusMessage *msg)
@@ -320,18 +320,17 @@ static void name_acquired(DBusConnection *conn, void *user_data)
 
 	DBG("org.bluez appeared");
 
+	bluez_available = TRUE;
+
 	for (l = profiles; l; l = l->next) {
 		struct bluetooth_profile *profile = l->data;
 
 		if (profile->path != NULL)
 			continue;
 
-		if (register_profile(profile) < 0) {
-			error("bluetooth: Failed to register profile %s",
-							profile->path);
-			g_free(profile->path);
-			profile->path = NULL;
-		}
+		if (register_profile(profile) < 0)
+			error("bluetooth: Failed to register profile UUID %s",
+			      profile->uuid);
 	}
 }
 
@@ -340,6 +339,8 @@ static void name_released(DBusConnection *conn, void *user_data)
 	GSList *l;
 
 	DBG("org.bluez disappeared");
+
+	bluez_available = FALSE;
 
 	for (l = profiles; l; l = l->next) {
 		struct bluetooth_profile *profile = l->data;
@@ -370,6 +371,15 @@ static void *bluetooth_start(struct obex_server *server, int *err)
 		profile->uuid = g_strdup(uuid);
 
 		profiles = g_slist_prepend(profiles, profile);
+
+		/*
+		 * This profile had not been added to the profiles list when
+		 * name_acquired() ran, so it was not registered by that call.
+		 * Register it here.
+		 */
+		if (bluez_available && register_profile(profile) < 0)
+			error("bluetooth: Failed to register profile UUID %s",
+			      profile->uuid);
 	}
 
 	return profiles;
@@ -453,6 +463,7 @@ static void bluetooth_exit_cb(gboolean at_unregister)
 	(void)at_unregister;
 
 	g_dbus_remove_watch(connection, listener_id);
+	bluez_available = FALSE;
 
 	for (l = profiles; l; l = l->next) {
 		struct bluetooth_profile *profile = l->data;
@@ -476,9 +487,10 @@ static int bluetooth_init(void)
 {
 	return logind_register(bluetooth_init_cb, bluetooth_exit_cb);
 }
+
 static void bluetooth_exit(void)
 {
-	return logind_unregister(bluetooth_init_cb, bluetooth_exit_cb);
+	logind_unregister(bluetooth_init_cb, bluetooth_exit_cb);
 }
 
 OBEX_PLUGIN_DEFINE(bluetooth, bluetooth_init, bluetooth_exit)

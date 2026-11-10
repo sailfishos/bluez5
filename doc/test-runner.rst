@@ -8,8 +8,8 @@ DESCRIPTION
 ===========
 
 **test-runner(1)** is used to test Kernel changes to the Bluetooth subsystem,
-it lunches a virtual machine using qemu(1) and mounts the local filesystem
-using virtio (9p).
+it launches a virtual machine using qemu(1) with the host filesystem mounted
+read-only inside the guest.
 
 OPTIONS
 =======
@@ -23,9 +23,144 @@ OPTIONS
 :-A/-audio[=path]: Start audio server
 :-u/--unix[=path]: Provide serial device
 :-U/--usb=<qemu_args>: Provide USB device
+:-P/--pcie=<qemu_args>: Provide PCIe device
 :-q/--qemu=<path>: QEMU binary
-:-k/--kernel=<image>: Kernel image (bzImage)
+:-H/--qemu-host-cpu: Use host CPU (requires KVM support)
+:-k/--kernel=<image>: Kernel image (bzImage) or User Mode Linux binary
+:-F/--virtiofs[=<path>]: Path to virtiofsd, or no to disable virtio-fs
+:-T/--time-travel: Run a User Mode Linux kernel on simulated time, with
+    btvirt as time travel calendar (default if the kernel supports it)
+:-R/--real-time: Run a User Mode Linux kernel on real time
+:-o/--option=<opt>: Additional argument passed to QEMU, or kernel
+    parameter with User Mode Linux
 :-h/--help: Show help options
+
+ARCHITECTURE
+============
+
+**test-runner(1)** is both the launcher and the guest ``init``.  When run
+normally it builds a QEMU command line and starts QEMU, replacing itself
+with it unless it has to stay around to clean up after a ``virtiofsd`` or
+a passed-through PCIe device.  The same binary is re-executed inside the
+guest as PID 1, where it sets up the sandbox and runs the requested
+command::
+
+    ┌────────────────────────────────────────────────────────┐
+    │ test-runner (launcher)                                 │
+    │   ├ virtiofsd (optional)  ←─── vhost-user ───┐         │
+    │   └ qemu                                     │         │
+    │      ┌──── guest ─────────────────────────────┴─────┐  │
+    │      │ kernel (bzImage), init=test-runner           │  │
+    │      │   ├ prepare_sandbox()                        │  │
+    │      │   ├ attach controller (optional)             │  │
+    │      │   ├ start dbus / bluetoothd / btmon / btvirt │  │
+    │      │   ├ fork+exec <command>                      │  │
+    │      │   └ reboot() when it exits                   │  │
+    │      └──────────────────────────────────────────────┘  │
+    └────────────────────────────────────────────────────────┘
+
+There is no disk image.  The launcher's root filesystem is passed through
+read-only and used as the guest root, so the guest runs the very same
+BlueZ build tree that was just compiled.
+
+Two passthrough implementations are supported.  When ``virtiofsd`` is
+available, a ``virtiofsd`` process is started alongside QEMU and exports
+``/`` over a vhost-user socket::
+
+    virtiofsd --socket-path <tmpdir>/virtiofs --shared-dir / --readonly
+              --tag /dev/root ...
+    -chardev socket,id=virtiofs0,path=<tmpdir>/virtiofs
+    -device  vhost-user-fs-pci,queue-size=1024,chardev=virtiofs0,tag=/dev/root
+    -object  memory-backend-memfd,id=mem0,size=<mem>,share=on
+    -numa    node,memdev=mem0
+    -append  "... rootfstype=virtiofs root=/dev/root ..."
+
+Since vhost-user requires the guest memory to be shareable, the machine
+memory is backed by a memfd object.  Otherwise, the fallback is 9p::
+
+    -fsdev local,id=fsdev-root,path=/,readonly=on,security_model=none
+    -device virtio-9p-pci,fsdev=fsdev-root,mount_tag=/dev/root
+    -append "... rootfstype=9p rootflags=trans=virtio,version=9p2000.u ..."
+
+9p passthrough is noticeably more CPU intensive, so virtio-fs is used by
+default whenever possible.
+
+Either way the kernel command line also carries the launcher settings::
+
+    -append "... init=<test-runner> TESTHOME=<cwd> TESTARGS='<command>' ..."
+
+The ``TEST*`` variables carry the options given to the launcher over to
+the guest instance.
+
+As PID 1, ``prepare_sandbox()`` mounts ``sysfs``, ``proc``, ``devtmpfs``,
+``devpts``, ``debugfs`` and ``tmpfs`` on ``/dev/shm``, ``/run`` and
+``/tmp``.  Since the root is read-only, writable ``tmpfs`` instances are
+also overlaid on ``/var/lib/bluetooth``, ``/etc/bluetooth``,
+``/etc/dbus-1`` and ``/usr/share/dbus-1``.
+
+Console and controller
+----------------------
+
+The guest console is a virtio console, ``/dev/hvc0``, multiplexed onto the
+launcher's stdio, so kernel messages and the command output appear on the
+terminal that started test-runner.
+
+With ``-u``, the given UNIX socket (typically a **btproxy(1)** or
+**btvirt(1)** server socket) is attached as a second virtio console::
+
+    -chardev socket,path=<socket>,id=bt0
+    -device  virtconsole,chardev=bt0,name=bt.0
+
+In the guest this is ``/dev/hvc1``.  test-runner sets the ``N_HCI`` line
+discipline with the H:4 protocol on it, so the kernel ``hci_uart`` driver
+registers an ``hciX`` device.  The transport is therefore plain HCI H:4
+carried over a virtio console to a UNIX socket on the launcher side::
+
+    guest                                             launcher
+    ┌───────────────────────────┐                 ┌──────────────────┐
+    │ bluetoothd                │                 │ btvirt/btproxy   │
+    │   ↕ mgmt / HCI sockets    │                 │                  │
+    │ hci_uart  hci0            │   virtconsole   │                  │
+    │   ↕ H:4                   │     bt.0        │                  │
+    │ /dev/hvc1  ───────────────┼─────────────────┤  AF_UNIX socket  │
+    └───────────────────────────┘                 └──────────────────┘
+
+With ``-U`` a host USB controller is passed through instead (a
+``qemu-xhci`` controller plus the given ``usb-host`` device), and with
+``-P`` a PCIe controller is passed through via vfio-pci.  In both cases
+the guest uses the normal ``btusb``/``btintel_pcie`` drivers.
+
+Extra QEMU devices
+------------------
+
+``-o`` appends raw arguments to the QEMU command line.  This is how
+additional channels between the launcher and the guest are added, for
+example by **test-functional(1)**, which attaches its own virtio-serial
+ports and a writable shared directory this way.
+
+User Mode Linux
+---------------
+
+When ``-k`` is a User Mode Linux (UML) binary, recognized by its
+``.uml.setup.init`` section, test-runner runs it directly instead of QEMU,
+with the host filesystem mounted as root through hostfs, and powers it off
+at the end since rebooting UML starts it again. The kernel needs
+``CONFIG_HOSTFS``, and ``CONFIG_VIRTIO_UML`` for virtio devices.
+
+``-o`` then adds kernel parameters, which is how UML attaches devices served
+from the host, e.g. ``virtio_uml.device=<socket>:40`` for a virtio
+Bluetooth controller, or joins an external simulated clock with
+``time-travel=ext:<socket>``. See `virtio.rst <virtio.rst>`_. ``-u``,
+``-U``, ``-P``, ``-q`` and ``-H`` need QEMU.
+
+If the kernel has ``CONFIG_UML_TIME_TRAVEL_SUPPORT``, test-runner starts
+**btvirt(1)** ``--time`` as time travel calendar and runs the guest on its
+simulated clock: time only advances when the guest waits, so it skips idle
+time and timeouts take no real time, while the guest sees the same timings
+on every run. ``-R`` runs the guest on real time instead, and ``-T`` fails if
+the kernel has no time travel support. A ``time-travel`` kernel parameter
+given with ``-o``, e.g. to join the calendar of other guests, replaces the
+calendar of test-runner.
 
 Kernel
 ======
@@ -46,6 +181,8 @@ option (like the Bluetooth subsystem) can be enabled on top of this.
 	CONFIG_VIRTIO=y
 	CONFIG_VIRTIO_PCI=y
 	CONFIG_VIRTIO_CONSOLE=y
+	CONFIG_VIRTIO_FS=y
+	CONFIG_FUSE_FS=y
 
 	CONFIG_NET=y
 	CONFIG_INET=y
@@ -67,6 +204,9 @@ option (like the Bluetooth subsystem) can be enabled on top of this.
 
 	CONFIG_DEVTMPFS=y
 	CONFIG_DEBUG_FS=y
+
+Filesystem passthrough uses virtio-fs when ``virtiofsd`` is installed on the
+host, otherwise 9p. Use ``-Fno`` for kernels without ``CONFIG_VIRTIO_FS``.
 
 Bluetooth
 ---------
@@ -93,6 +233,11 @@ Bluetooth
 	CONFIG_UNIX=y
 
 	CONFIG_UHID=y
+	CONFIG_HIDRAW=y
+
+CONFIG_HIDRAW is used by unit/test-uhid, when run as root e.g. with
+test-runner, to check the replies to the reports requested by the kernel
+through a hidraw device, as HIDIOCGFEATURE does.
 
 For 6lowpan-tester, the following are required:
 
@@ -230,3 +375,58 @@ In addition the above kernel config option the following is required:
 
 	$ tools/test-runner -U "usb-host,vendorid=<0xxxxx>,productid=<0xxxxx>" \
 	-d -k /pathto/bzImage -- /bin/bash
+
+Running shell with host controller PCIe-passthrough
+---------------------------------------------------
+
+In addition the above kernel config option the following is required:
+
+.. code-block::
+
+	CONFIG_PCI=y
+	CONFIG_PCI_MSI=y
+	CONFIG_ACPI=y
+	CONFIG_BT_HCIBTINTEL_PCIE=y
+
+IOMMU and interrupt remapping, without which vfio-pci fails to allocate
+MSI-X vectors (-ENOSPC):
+
+.. code-block::
+
+	CONFIG_INTEL_IOMMU=y
+	CONFIG_INTEL_IOMMU_DEFAULT_ON=y
+	CONFIG_INTEL_IOMMU_SVM=y
+	CONFIG_IRQ_REMAP=y
+	CONFIG_AMD_IOMMU=y
+
+On the host, an IOMMU must be enabled in the firmware and on the host kernel
+command line (``intel_iommu=on`` or ``amd_iommu=on``). The controller itself
+does not need any manual preparation: test-runner unbinds it from its current
+driver, binds it to vfio-pci, and restores the original driver once the guest
+exits.
+
+.. code-block::
+
+	$ tools/test-runner -P "vfio-pci,host=0000:00:14.3" \
+	-d -k /pathto/bzImage -- /bin/bash
+
+Note that unlike the other modes, PCIe-passthrough boots the guest with ACPI
+and APIC enabled, as these are required for device enumeration and MSI
+interrupt delivery.
+
+Running mgmt-tester under User Mode Linux
+-----------------------------------------
+
+.. code-block::
+
+	$ make ARCH=um defconfig
+	$ scripts/kconfig/merge_config.sh -m .config <bluez>/doc/tester.config
+	$ make ARCH=um olddefconfig linux
+	$ tools/test-runner -k <linux>/linux -- tools/mgmt-tester
+
+With a kernel that also has ``CONFIG_UML_TIME_TRAVEL_SUPPORT=y`` this runs
+on simulated time; to run it on real time:
+
+.. code-block::
+
+	$ tools/test-runner -R -k <linux>/linux -- tools/mgmt-tester

@@ -18,7 +18,7 @@
 #include <poll.h>
 #include <stdbool.h>
 
-#include <glib.h>
+#include <assert.h>
 
 #include "bluetooth/bluetooth.h"
 #include "bluetooth/l2cap.h"
@@ -29,7 +29,10 @@
 #include "emulator/hciemu.h"
 
 #include "src/shared/tester.h"
+#include "src/shared/timeout.h"
+#include "tools/tester-io.h"
 #include "src/shared/mgmt.h"
+#include "src/shared/queue.h"
 #include "src/shared/util.h"
 
 #include "tester.h"
@@ -51,7 +54,18 @@ struct test_data {
 	int sk2;
 	bool host_disconnected;
 	int step;
+	struct queue *io_channels;
 	struct tx_tstamp_data tx_ts;
+};
+
+struct l2cap_conn_subrate {
+	uint16_t min_interval;
+	uint16_t max_interval;
+	uint16_t subrate_min;
+	uint16_t subrate_max;
+	uint16_t max_latency;
+	uint16_t cont_num;
+	uint16_t supv_timeout;
 };
 
 struct l2cap_data {
@@ -112,6 +126,14 @@ struct l2cap_data {
 
 	/* Set PHY */
 	uint32_t phy;
+
+	/* Connection Subrate parameters to load before connecting.
+	 * The address is filled in with the client bdaddr at runtime.
+	 */
+	const struct l2cap_conn_subrate *conn_subrate;
+
+	/* Change security level to this after connecting */
+	int change_sec_level;
 };
 
 static void print_debug(const char *str, void *user_data)
@@ -249,19 +271,27 @@ static void test_pre_setup(const void *test_data)
 					read_index_list_callback, NULL, NULL);
 }
 
+static void io_channel_unref(void *data)
+{
+	tester_io_unref(data);
+}
+
 static void test_post_teardown(const void *test_data)
 {
 	struct test_data *data = tester_get_data();
 
 	if (data->io_id > 0) {
-		g_source_remove(data->io_id);
+		tester_remove_source(data->io_id);
 		data->io_id = 0;
 	}
 
 	if (data->err_io_id > 0) {
-		g_source_remove(data->err_io_id);
+		tester_remove_source(data->err_io_id);
 		data->err_io_id = 0;
 	}
+
+	queue_destroy(data->io_channels, io_channel_unref);
+	data->io_channels = NULL;
 
 	hciemu_unref(data->hciemu);
 	data->hciemu = NULL;
@@ -277,7 +307,7 @@ static void test_data_free(void *test_data)
 #define test_l2cap(name, type, data, setup, func) \
 	do { \
 		struct test_data *user; \
-		user = malloc(sizeof(struct test_data)); \
+		user = calloc(1, sizeof(struct test_data)); \
 		if (!user) \
 			break; \
 		user->hciemu_type = type; \
@@ -297,6 +327,9 @@ static void test_data_free(void *test_data)
 
 #define test_l2cap_le_52(name, data, setup, func) \
 	test_l2cap(name, HCIEMU_TYPE_BREDRLE52, data, setup, func)
+
+#define test_l2cap_le_62(name, data, setup, func) \
+	test_l2cap(name, HCIEMU_TYPE_BREDRLE62, data, setup, func)
 
 static uint8_t pair_device_pin[] = { 0x30, 0x30, 0x30, 0x30 }; /* "0000" */
 
@@ -336,6 +369,17 @@ static const struct l2cap_data client_connect_pin_success_test = {
 	.pin_len = sizeof(pair_device_pin),
 	.client_pin = pair_device_pin,
 	.client_pin_len = sizeof(pair_device_pin),
+};
+
+static const struct l2cap_data client_connect_pin_change_sec_success_test = {
+	.client_psm = 0x1001,
+	.server_psm = 0x1001,
+	.sec_level  = BT_SECURITY_MEDIUM,
+	.pin = pair_device_pin,
+	.pin_len = sizeof(pair_device_pin),
+	.client_pin = pair_device_pin,
+	.client_pin_len = sizeof(pair_device_pin),
+	.change_sec_level = BT_SECURITY_HIGH,
 };
 
 static uint8_t l2_data[] = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
@@ -654,6 +698,94 @@ static const struct l2cap_data le_client_connect_success_test_1 = {
 	.server_psm = 0x0080,
 };
 
+/* HIDS 1.2 recommended SCI parameters (see HOGP v1.2 spec).
+ * Connection intervals are in units of 0.125 ms, supervision timeout in
+ * units of 10 ms.
+ */
+static const struct l2cap_conn_subrate conn_subrate_hids_fast = {
+	.min_interval = 0x000a,		/* 1.25 ms */
+	.max_interval = 0x0028,		/* 5 ms */
+	.subrate_min = 0x0001,
+	.subrate_max = 0x0004,
+	.max_latency = 0x0000,
+	.cont_num = 0x0003,
+	.supv_timeout = 0x0004,		/* 40 ms */
+};
+
+static const struct l2cap_conn_subrate conn_subrate_hids_default = {
+	.min_interval = 0x003c,		/* 7.5 ms */
+	.max_interval = 0x0078,		/* 15 ms */
+	.subrate_min = 0x0001,
+	.subrate_max = 0x0004,
+	.max_latency = 0x0000,
+	.cont_num = 0x0000,
+	.supv_timeout = 0x000c,		/* 120 ms */
+};
+
+static const struct l2cap_conn_subrate conn_subrate_hids_low_power = {
+	.min_interval = 0x003c,		/* 7.5 ms */
+	.max_interval = 0x0078,		/* 15 ms */
+	.subrate_min = 0x0001,
+	.subrate_max = 0x0004,
+	.max_latency = 0x0064,		/* 100 */
+	.cont_num = 0x0000,
+	.supv_timeout = 0x04bc,		/* 12120 ms */
+};
+
+static const struct l2cap_conn_subrate conn_subrate_hids_full_range = {
+	.min_interval = 0x000a,		/* 1.25 ms */
+	.max_interval = 0x0078,		/* 15 ms */
+	.subrate_min = 0x0001,
+	.subrate_max = 0x0004,
+	.max_latency = 0x0000,
+	.cont_num = 0x0001,
+	.supv_timeout = 0x000c,		/* 120 ms */
+};
+
+static const struct l2cap_data le_client_connect_subrate_fast_test = {
+	.client_psm = 0x0080,
+	.server_psm = 0x0080,
+	.conn_subrate = &conn_subrate_hids_fast,
+};
+
+static const struct l2cap_data le_client_connect_subrate_default_test = {
+	.client_psm = 0x0080,
+	.server_psm = 0x0080,
+	.conn_subrate = &conn_subrate_hids_default,
+};
+
+static const struct l2cap_data le_client_connect_subrate_low_power_test = {
+	.client_psm = 0x0080,
+	.server_psm = 0x0080,
+	.conn_subrate = &conn_subrate_hids_low_power,
+};
+
+static const struct l2cap_data le_client_connect_subrate_full_range_test = {
+	.client_psm = 0x0080,
+	.server_psm = 0x0080,
+	.conn_subrate = &conn_subrate_hids_full_range,
+};
+
+static const struct l2cap_data le_server_subrate_fast_test = {
+	.cid = 0x0004,
+	.conn_subrate = &conn_subrate_hids_fast,
+};
+
+static const struct l2cap_data le_server_subrate_default_test = {
+	.cid = 0x0004,
+	.conn_subrate = &conn_subrate_hids_default,
+};
+
+static const struct l2cap_data le_server_subrate_low_power_test = {
+	.cid = 0x0004,
+	.conn_subrate = &conn_subrate_hids_low_power,
+};
+
+static const struct l2cap_data le_server_subrate_full_range_test = {
+	.cid = 0x0004,
+	.conn_subrate = &conn_subrate_hids_full_range,
+};
+
 static const struct l2cap_data le_client_connect_close_test_1 = {
 	.client_psm = 0x0080,
 };
@@ -751,6 +883,13 @@ static const struct l2cap_data le_client_connect_success_test_2 = {
 	.client_psm = 0x0080,
 	.server_psm = 0x0080,
 	.sec_level  = BT_SECURITY_MEDIUM,
+};
+
+static const struct l2cap_data le_client_change_sec_success_test = {
+	.client_psm = 0x0080,
+	.server_psm = 0x0080,
+	.sec_level  = BT_SECURITY_LOW,
+	.change_sec_level = BT_SECURITY_MEDIUM,
 };
 
 static const uint8_t cmd_reject_rsp[] = { 0x01, 0x01, 0x02, 0x00, 0x00, 0x00 };
@@ -1010,6 +1149,30 @@ static const struct l2cap_data ext_flowctl_server_nval_scid_test = {
 	.expect_cmd_len = sizeof(nval_ecred_connect_rsp),
 };
 
+static const struct l2cap_data ext_flowctl_server_nval_conn_req_test = {
+	.server_psm = 0x0080,
+	.defer = true,
+	.mode = BT_MODE_EXT_FLOWCTL,
+};
+
+static const uint8_t ecred_connect_req_2[] = {
+						0x80, 0x00, /* PSM */
+						0x40, 0x00, /* MTU */
+						0x40, 0x00, /* MPS */
+						0x05, 0x00, /* Credits */
+						0x41, 0x00, /* SCID #1 */
+						0x42, 0x00, /* SCID #2 */
+};
+
+static const struct l2cap_data ext_flowctl_server_accept_2_close_1_test = {
+	.server_psm = 0x0080,
+	.defer = true,
+	.mode = BT_MODE_EXT_FLOWCTL,
+	.send_cmd_code = BT_L2CAP_PDU_ECRED_CONN_REQ,
+	.send_cmd = ecred_connect_req_2,
+	.send_cmd_len = ARRAY_SIZE(ecred_connect_req_2)
+};
+
 static const struct l2cap_data ext_flowctl_server_phy_test = {
 	.server_psm = 0x0080,
 	.send_cmd_code = BT_L2CAP_PDU_ECRED_CONN_REQ,
@@ -1081,6 +1244,12 @@ static const struct l2cap_data le_att_client_connect_success_test_1 = {
 	.sec_level = BT_SECURITY_LOW,
 };
 
+static const struct l2cap_data le_att_client_change_sec_success_test = {
+	.cid = 0x0004,
+	.sec_level = BT_SECURITY_LOW,
+	.change_sec_level = BT_SECURITY_MEDIUM,
+};
+
 static const struct l2cap_data le_att_server_success_test_1 = {
 	.cid = 0x0004,
 };
@@ -1090,6 +1259,14 @@ static const struct l2cap_data le_eatt_client_connect_success_test_1 = {
 	.server_psm = 0x0027,
 	.mode = BT_MODE_EXT_FLOWCTL,
 	.sec_level = BT_SECURITY_LOW,
+};
+
+static const struct l2cap_data le_eatt_client_change_sec_success_test = {
+	.client_psm = 0x0027,
+	.server_psm = 0x0027,
+	.mode = BT_MODE_EXT_FLOWCTL,
+	.sec_level = BT_SECURITY_LOW,
+	.change_sec_level = BT_SECURITY_MEDIUM,
 };
 
 static const uint8_t eatt_connect_req[] = {	0x27, 0x00, /* PSM */
@@ -1246,6 +1423,12 @@ static const struct l2cap_data ext_flowctl_client_set_phy_coded_test = {
 		 BT_PHY_LE_2M_TX | BT_PHY_LE_2M_RX |
 		 BT_PHY_LE_CODED_TX | BT_PHY_LE_CODED_RX),
 	.phy = BT_PHY_LE_CODED_TX | BT_PHY_LE_CODED_RX,
+};
+
+static const struct l2cap_data ext_flowctl_client_defer_limit = {
+	.client_psm = 0x0080,
+	.server_psm = 0x0080,
+	.mode = BT_MODE_EXT_FLOWCTL,
 };
 
 static void client_cmd_complete(uint16_t opcode, uint8_t status,
@@ -1512,6 +1695,37 @@ static void setup_powered_client(const void *test_data)
 		mgmt_send(data->mgmt, MGMT_OP_SET_LE, data->mgmt_index,
 				sizeof(param), param, NULL, NULL, NULL);
 
+	if (test && test->conn_subrate) {
+		const struct l2cap_conn_subrate *cs = test->conn_subrate;
+		const uint8_t *client_bdaddr;
+		struct {
+			struct mgmt_cp_load_conn_subrate cp;
+			struct mgmt_conn_subrate param;
+		} __attribute__((packed)) load;
+
+		client_bdaddr = hciemu_get_client_bdaddr(data->hciemu);
+		if (!client_bdaddr) {
+			tester_setup_failed();
+			return;
+		}
+
+		memset(&load, 0, sizeof(load));
+		load.cp.param_count = cpu_to_le16(1);
+		memcpy(&load.param.addr.bdaddr, client_bdaddr, 6);
+		load.param.addr.type = BDADDR_LE_PUBLIC;
+		load.param.min_interval = cpu_to_le16(cs->min_interval);
+		load.param.max_interval = cpu_to_le16(cs->max_interval);
+		load.param.subrate_min = cpu_to_le16(cs->subrate_min);
+		load.param.subrate_max = cpu_to_le16(cs->subrate_max);
+		load.param.max_latency = cpu_to_le16(cs->max_latency);
+		load.param.cont_num = cpu_to_le16(cs->cont_num);
+		load.param.supv_timeout = cpu_to_le16(cs->supv_timeout);
+
+		mgmt_send(data->mgmt, MGMT_OP_LOAD_CONN_SUBRATE,
+				data->mgmt_index, sizeof(load), &load,
+				NULL, NULL, NULL);
+	}
+
 	mgmt_send(data->mgmt, MGMT_OP_SET_POWERED, data->mgmt_index,
 			sizeof(param), param, setup_powered_client_callback,
 			NULL, NULL);
@@ -1586,8 +1800,8 @@ static void received_data(struct test_data *tdata, const void *buf,
 	iov.iov_len = 0;
 }
 
-static gboolean sock_received_data(GIOChannel *io, GIOCondition cond,
-							gpointer user_data)
+static bool sock_received_data(struct tester_io *io, uint32_t cond,
+							void *user_data)
 {
 	struct test_data *data = tester_get_data();
 	const struct l2cap_data *l2data = data->test_data;
@@ -1596,21 +1810,21 @@ static gboolean sock_received_data(GIOChannel *io, GIOCondition cond,
 	int sk;
 	ssize_t len;
 
-	sk = g_io_channel_unix_get_fd(io);
+	sk = tester_io_get_fd(io);
 
 	len = recv_tstamp(sk, buf, sizeof(buf), tstamp);
 	if (len < 0) {
 		tester_warn("Unable to read: %s (%d)", strerror(errno), errno);
 		tester_test_failed();
-		return FALSE;
+		return false;
 	}
 
 	received_data(data, buf, len, l2data->read_data, l2data->data_len);
 
 	if (data->step)
-		return TRUE;
+		return true;
 
-	return FALSE;
+	return false;
 }
 
 static void bthost_received_data(const void *buf, uint16_t len,
@@ -1622,8 +1836,8 @@ static void bthost_received_data(const void *buf, uint16_t len,
 	received_data(data, buf, len, l2data->write_data, l2data->data_len);
 }
 
-static gboolean socket_closed_cb(GIOChannel *io, GIOCondition cond,
-							gpointer user_data)
+static bool socket_closed_cb(struct tester_io *io, uint32_t cond,
+							void *user_data)
 {
 	struct test_data *data = tester_get_data();
 	const struct l2cap_data *l2data = data->test_data;
@@ -1634,19 +1848,19 @@ static gboolean socket_closed_cb(GIOChannel *io, GIOCondition cond,
 
 	if (l2data->shut_sock_wr) {
 		/* if socket is closed using SHUT_WR, L2CAP disconnection
-		 * response must be received first before G_IO_HUP event.
+		 * response must be received first before TESTER_IO_HUP event.
 		 */
 		if (data->host_disconnected)
 			tester_test_passed();
 		else {
-			tester_warn("G_IO_HUP received before receiving L2CAP disconnection");
+			tester_warn("TESTER_IO_HUP received before receiving L2CAP disconnection");
 			tester_test_failed();
 		}
 	}
 
 	data->io_id = 0;
 
-	sk = g_io_channel_unix_get_fd(io);
+	sk = tester_io_get_fd(io);
 
 	if (getsockopt(sk, SOL_SOCKET, SO_ERROR, &sk_err, &len) < 0)
 		err = -errno;
@@ -1657,10 +1871,12 @@ static gboolean socket_closed_cb(GIOChannel *io, GIOCondition cond,
 		tester_print("err %d != %d expected_err", -err,
 						l2data->expect_err);
 		tester_test_failed();
-	} else
+	} else if (!data->step)
 		tester_test_passed();
+	else
+		tester_test_failed();
 
-	return FALSE;
+	return false;
 }
 
 static bool check_mtu(struct test_data *data, int sk)
@@ -1709,11 +1925,12 @@ static bool check_mtu(struct test_data *data, int sk)
 	return true;
 }
 
-static gboolean check_phy(gpointer args)
+static bool check_phy_and_sec(void *args)
 {
 	int sk = PTR_TO_INT(args);
 	struct test_data *data = tester_get_data();
 	const struct l2cap_data *l2data = data->test_data;
+	struct bt_security sec;
 	socklen_t len;
 
 	len = sizeof(data->phys);
@@ -1729,23 +1946,44 @@ static gboolean check_phy(gpointer args)
 	}
 
 	if (l2data->phy && l2data->phy != data->phys) {
-		tester_warn("phy 0x%08x != 0x%08x", l2data->phy, data->phys);
+		tester_print("phy 0x%08x != 0x%08x", l2data->phy, data->phys);
+
+		/* Retry */
+		return true;
+	}
+
+	tester_print("Checking security level...");
+
+	len = sizeof(sec);
+	if (getsockopt(sk, SOL_BLUETOOTH, BT_SECURITY, &sec, &len) < 0) {
+		tester_warn("getsockopt(BT_SECURITY): %s (%d)",
+							strerror(errno), errno);
 		tester_test_failed();
 		goto done;
 	}
 
-	tester_test_passed();
+	if (l2data->change_sec_level && sec.level != l2data->change_sec_level) {
+		tester_print("sec.level %d != %d", sec.level,
+						l2data->change_sec_level);
+
+		/* Retry */
+		return true;
+	}
+
+	data->step--;
 
 done:
 	shutdown(sk, SHUT_WR);
 
-	return FALSE;
+	return false;
 }
 
-static int check_phys(struct test_data *data, int sk)
+static int check_phys_and_sec(struct test_data *data, int sk)
 {
 	const struct l2cap_data *l2data = data->test_data;
 	socklen_t len;
+	bool changed = false;
+	int err;
 
 	len = sizeof(data->phys);
 	data->phys = 0;
@@ -1761,16 +1999,41 @@ static int check_phys(struct test_data *data, int sk)
 		return -EINVAL;
 	}
 
+	if (l2data->change_sec_level) {
+		struct bt_security sec;
+
+		memset(&sec, 0, sizeof(sec));
+		sec.level = l2data->change_sec_level;
+
+		tester_print("Changing security level to %d", sec.level);
+
+		if (setsockopt(sk, SOL_BLUETOOTH, BT_SECURITY, &sec,
+							sizeof(sec)) < 0) {
+			err = -errno;
+			tester_warn("Can't set security level: %s (%d)",
+							strerror(errno), errno);
+			return err;
+		}
+
+		changed = true;
+	}
+
 	if (l2data->phy) {
 		if (setsockopt(sk, SOL_BLUETOOTH, BT_PHY, &l2data->phy,
 						sizeof(l2data->phy)) < 0) {
+			err = -errno;
 			tester_warn("setsockopt(BT_PHY): %s (%d)",
 					strerror(errno), errno);
-			return -errno;
+			return err;
 		}
 
-		/* Wait for the PHY to change */
-		g_idle_add(check_phy, INT_TO_PTR(sk));
+		changed = true;
+	}
+
+	if (changed) {
+		/* Wait for the change */
+		data->step++;
+		timeout_add(50, check_phy_and_sec, INT_TO_PTR(sk), NULL);
 
 		return -EINPROGRESS;
 	}
@@ -1778,29 +2041,29 @@ static int check_phys(struct test_data *data, int sk)
 	return 0;
 }
 
-static gboolean recv_errqueue(GIOChannel *io, GIOCondition cond,
-							gpointer user_data)
+static bool recv_errqueue(struct tester_io *io, uint32_t cond,
+							void *user_data)
 {
 	struct test_data *data = user_data;
 	const struct l2cap_data *l2data = data->test_data;
-	int sk = g_io_channel_unix_get_fd(io);
+	int sk = tester_io_get_fd(io);
 	int err;
 
 	data->step--;
 
 	err = tx_tstamp_recv(&data->tx_ts, sk, l2data->data_len);
 	if (err > 0)
-		return TRUE;
+		return true;
 	else if (err)
 		tester_test_failed();
 	else if (!data->step)
 		tester_test_passed();
 
 	data->err_io_id = 0;
-	return FALSE;
+	return false;
 }
 
-static void l2cap_tx_timestamping(struct test_data *data, GIOChannel *io)
+static void l2cap_tx_timestamping(struct test_data *data, struct tester_io *io)
 {
 	const struct l2cap_data *l2data = data->test_data;
 	int so = l2data->so_timestamping;
@@ -1811,7 +2074,7 @@ static void l2cap_tx_timestamping(struct test_data *data, GIOChannel *io)
 	if (!(l2data->so_timestamping & TS_TX_RECORD_MASK))
 		return;
 
-	sk = g_io_channel_unix_get_fd(io);
+	sk = tester_io_get_fd(io);
 
 	tester_print("Enabling TX timestamping");
 
@@ -1829,7 +2092,8 @@ static void l2cap_tx_timestamping(struct test_data *data, GIOChannel *io)
 		return;
 	}
 
-	data->err_io_id = g_io_add_watch(io, G_IO_ERR, recv_errqueue, data);
+	data->err_io_id = tester_io_add_watch(io, TESTER_IO_ERR, recv_errqueue,
+									data);
 }
 
 static int l2cap_send(int sk, const void *data, size_t len, uint16_t mtu)
@@ -1854,7 +2118,7 @@ static int l2cap_send(int sk, const void *data, size_t len, uint16_t mtu)
 	return total;
 }
 
-static void l2cap_read_data(struct test_data *data, GIOChannel *io,
+static void l2cap_read_data(struct test_data *data, struct tester_io *io,
 							uint16_t cid)
 {
 	const struct l2cap_data *l2data = data->test_data;
@@ -1864,12 +2128,12 @@ static void l2cap_read_data(struct test_data *data, GIOChannel *io,
 
 	data->step = 0;
 
-	if (rx_timestamping_init(g_io_channel_unix_get_fd(io),
+	if (rx_timestamping_init(tester_io_get_fd(io),
 						l2data->so_timestamping))
 		return;
 
 	bthost = hciemu_client_get_host(data->hciemu);
-	g_io_add_watch(io, G_IO_IN, sock_received_data, NULL);
+	tester_io_add_watch(io, TESTER_IO_IN, sock_received_data, NULL);
 
 	len = MIN(iov.iov_len, data->l2o.imtu);
 
@@ -1883,7 +2147,7 @@ static void l2cap_read_data(struct test_data *data, GIOChannel *io,
 	++data->step;
 }
 
-static void l2cap_write_data(struct test_data *data, GIOChannel *io,
+static void l2cap_write_data(struct test_data *data, struct tester_io *io,
 							uint16_t cid)
 {
 	const struct l2cap_data *l2data = data->test_data;
@@ -1893,7 +2157,7 @@ static void l2cap_write_data(struct test_data *data, GIOChannel *io,
 	unsigned int count;
 	socklen_t len = sizeof(size);
 
-	sk = g_io_channel_unix_get_fd(io);
+	sk = tester_io_get_fd(io);
 
 	data->step = 0;
 
@@ -1924,8 +2188,8 @@ static void l2cap_write_data(struct test_data *data, GIOChannel *io,
 	}
 }
 
-static gboolean l2cap_connect_cb(GIOChannel *io, GIOCondition cond,
-							gpointer user_data)
+static bool l2cap_connect_cb(struct tester_io *io, uint32_t cond,
+							void *user_data)
 {
 	struct test_data *data = tester_get_data();
 	const struct l2cap_data *l2data = data->test_data;
@@ -1934,7 +2198,7 @@ static gboolean l2cap_connect_cb(GIOChannel *io, GIOCondition cond,
 
 	data->io_id = 0;
 
-	sk = g_io_channel_unix_get_fd(io);
+	sk = tester_io_get_fd(io);
 
 	if (getsockopt(sk, SOL_SOCKET, SO_ERROR, &sk_err, &len) < 0)
 		err = -errno;
@@ -1950,30 +2214,31 @@ static gboolean l2cap_connect_cb(GIOChannel *io, GIOCondition cond,
 
 	if (!check_mtu(data, sk)) {
 		tester_test_failed();
-		return FALSE;
+		return false;
 	}
 
-	err = check_phys(data, sk);
+	err = check_phys_and_sec(data, sk);
 	if (err < 0) {
 		if (err == -EINPROGRESS) {
-			g_io_add_watch(io, G_IO_HUP, socket_closed_cb, NULL);
-			return FALSE;
+			tester_io_add_watch(io, TESTER_IO_HUP, socket_closed_cb,
+									NULL);
+			return false;
 		}
 		tester_test_failed();
-		return FALSE;
+		return false;
 	}
 
 	if (l2data->read_data) {
 		l2cap_read_data(data, io, data->dcid);
-		return FALSE;
+		return false;
 	} else if (l2data->write_data) {
 		l2cap_write_data(data, io, data->dcid);
-		return FALSE;
+		return false;
 	} else if (l2data->shut_sock_wr) {
-		g_io_add_watch(io, G_IO_HUP, socket_closed_cb, NULL);
+		tester_io_add_watch(io, TESTER_IO_HUP, socket_closed_cb, NULL);
 		shutdown(sk, SHUT_WR);
 
-		return FALSE;
+		return false;
 	}
 
 failed:
@@ -1982,7 +2247,7 @@ failed:
 	else
 		tester_test_passed();
 
-	return FALSE;
+	return false;
 }
 
 static int create_l2cap_sock(struct test_data *data, uint16_t psm,
@@ -2173,7 +2438,7 @@ static void test_connect(const void *test_data)
 {
 	struct test_data *data = tester_get_data();
 	const struct l2cap_data *l2data = data->test_data;
-	GIOChannel *io;
+	struct tester_io *io;
 	int sk;
 
 	if (l2data->server_psm) {
@@ -2224,12 +2489,13 @@ static void test_connect(const void *test_data)
 		return;
 	}
 
-	io = g_io_channel_unix_new(sk);
-	g_io_channel_set_close_on_unref(io, TRUE);
+	io = tester_io_new(sk);
+	tester_io_set_close_on_unref(io, true);
 
-	data->io_id = g_io_add_watch(io, G_IO_OUT, l2cap_connect_cb, NULL);
+	data->io_id = tester_io_add_watch(io, TESTER_IO_OUT, l2cap_connect_cb,
+									NULL);
 
-	g_io_channel_unref(io);
+	tester_io_unref(io);
 
 	tester_print("Connect in progress");
 }
@@ -2238,7 +2504,7 @@ static void test_connect_close(const void *test_data)
 {
 	struct test_data *data = tester_get_data();
 	const struct l2cap_data *l2data = data->test_data;
-	GIOChannel *io;
+	struct tester_io *io;
 	int sk;
 
 	sk = create_l2cap_sock(data, 0, l2data->cid, l2data->sec_level,
@@ -2258,10 +2524,11 @@ static void test_connect_close(const void *test_data)
 		return;
 	}
 
-	io = g_io_channel_unix_new(sk);
-	g_io_channel_set_close_on_unref(io, TRUE);
-	data->io_id = g_io_add_watch(io, G_IO_HUP, socket_closed_cb, NULL);
-	g_io_channel_unref(io);
+	io = tester_io_new(sk);
+	tester_io_set_close_on_unref(io, true);
+	data->io_id = tester_io_add_watch(io, TESTER_IO_HUP, socket_closed_cb,
+									NULL);
+	tester_io_unref(io);
 
 	shutdown(sk, SHUT_RDWR);
 }
@@ -2270,7 +2537,7 @@ static void test_connect_timeout(const void *test_data)
 {
 	struct test_data *data = tester_get_data();
 	const struct l2cap_data *l2data = data->test_data;
-	GIOChannel *io;
+	struct tester_io *io;
 	int sk;
 	struct timeval sndto;
 	socklen_t len;
@@ -2304,10 +2571,11 @@ static void test_connect_timeout(const void *test_data)
 		return;
 	}
 
-	io = g_io_channel_unix_new(sk);
-	g_io_channel_set_close_on_unref(io, TRUE);
-	data->io_id = g_io_add_watch(io, G_IO_HUP, socket_closed_cb, NULL);
-	g_io_channel_unref(io);
+	io = tester_io_new(sk);
+	tester_io_set_close_on_unref(io, true);
+	data->io_id = tester_io_add_watch(io, TESTER_IO_HUP, socket_closed_cb,
+									NULL);
+	tester_io_unref(io);
 }
 
 static void test_connect_reject(const void *test_data)
@@ -2332,12 +2600,13 @@ static void test_connect_reject(const void *test_data)
 	close(sk);
 }
 
-static int connect_socket(const uint8_t *client_bdaddr, GIOFunc connect_cb,
+static int connect_socket(const uint8_t *client_bdaddr,
+						tester_io_func_t connect_cb,
 								bool defer)
 {
 	struct test_data *data = tester_get_data();
 	const struct l2cap_data *l2data = data->test_data;
-	GIOChannel *io;
+	struct tester_io *io;
 	int sk;
 
 	sk = create_l2cap_sock(data, 0, l2data->cid, l2data->sec_level,
@@ -2373,12 +2642,13 @@ static int connect_socket(const uint8_t *client_bdaddr, GIOFunc connect_cb,
 	}
 
 	if (connect_cb) {
-		io = g_io_channel_unix_new(sk);
-		g_io_channel_set_close_on_unref(io, TRUE);
+		io = tester_io_new(sk);
+		tester_io_set_close_on_unref(io, true);
 
-		data->io_id = g_io_add_watch(io, G_IO_OUT, connect_cb, NULL);
+		data->io_id = tester_io_add_watch(io, TESTER_IO_OUT, connect_cb,
+									NULL);
 
-		g_io_channel_unref(io);
+		tester_io_unref(io);
 	}
 
 	tester_print("Connect in progress, sk = %d %s", sk,
@@ -2387,7 +2657,7 @@ static int connect_socket(const uint8_t *client_bdaddr, GIOFunc connect_cb,
 	return sk;
 }
 
-static gboolean test_close_socket_1_part_3(gpointer arg)
+static bool test_close_socket_1_part_3(void *arg)
 {
 	struct test_data *data = tester_get_data();
 
@@ -2396,20 +2666,20 @@ static gboolean test_close_socket_1_part_3(gpointer arg)
 	if (data->sk != -1) {
 		tester_print("Error - scan was not enabled yet");
 		tester_test_failed();
-		return FALSE;
+		return false;
 	}
 
 	if (hciemu_get_central_le_scan_enable(data->hciemu)) {
 		tester_print("Delayed check whether scann is off failed");
 		tester_test_failed();
-		return FALSE;
+		return false;
 	}
 
 	tester_test_passed();
-	return FALSE;
+	return false;
 }
 
-static gboolean test_close_socket_1_part_2(gpointer args)
+static bool test_close_socket_1_part_2(void *args)
 {
 	struct test_data *data = tester_get_data();
 	int sk = data->sk;
@@ -2423,7 +2693,7 @@ static gboolean test_close_socket_1_part_2(gpointer args)
 	if (!hciemu_get_central_le_scan_enable(data->hciemu)) {
 		tester_print("Error - should be still scanning");
 		tester_test_failed();
-		return FALSE;
+		return false;
 	}
 
 	/* Calling close() should remove device from  accept list, and stop
@@ -2432,15 +2702,15 @@ static gboolean test_close_socket_1_part_2(gpointer args)
 	if (close(sk) < 0) {
 		tester_print("Error when closing socket");
 		tester_test_failed();
-		return FALSE;
+		return false;
 	}
 
 	data->sk = -1;
 	/* tester_test_passed will be called when scan is stopped. */
-	return FALSE;
+	return false;
 }
 
-static gboolean test_close_socket_2_part_3(gpointer arg)
+static bool test_close_socket_2_part_3(void *arg)
 {
 	struct test_data *data = tester_get_data();
 	int sk = data->sk;
@@ -2450,7 +2720,7 @@ static gboolean test_close_socket_2_part_3(gpointer arg)
 	if (hciemu_get_central_le_scan_enable(data->hciemu)) {
 		tester_print("Error - should no longer scan");
 		tester_test_failed();
-		return FALSE;
+		return false;
 	}
 
 	/* Calling close() should eventually cause CMD_LE_CREATE_CONN_CANCEL */
@@ -2458,11 +2728,11 @@ static gboolean test_close_socket_2_part_3(gpointer arg)
 	if (err < 0) {
 		tester_print("Error when closing socket");
 		tester_test_failed();
-		return FALSE;
+		return false;
 	}
 
 	/* CMD_LE_CREATE_CONN_CANCEL will trigger test pass. */
-	return FALSE;
+	return false;
 }
 
 static bool test_close_socket_cc_hook(const void *data, uint16_t len,
@@ -2471,7 +2741,7 @@ static bool test_close_socket_cc_hook(const void *data, uint16_t len,
 	return false;
 }
 
-static gboolean test_close_socket_2_part_2(gpointer arg)
+static bool test_close_socket_2_part_2(void *arg)
 {
 	struct test_data *data = tester_get_data();
 	struct bthost *bthost = hciemu_client_get_host(data->hciemu);
@@ -2487,7 +2757,7 @@ static gboolean test_close_socket_2_part_2(gpointer arg)
 	 */
 	bthost_set_adv_enable(bthost, 0x01);
 	bthost_set_adv_enable(bthost, 0x00);
-	return FALSE;
+	return false;
 }
 
 static void test_close_socket_scan_enabled(void)
@@ -2496,9 +2766,9 @@ static void test_close_socket_scan_enabled(void)
 	const struct l2cap_data *l2data = data->test_data;
 
 	if (l2data == &le_client_close_socket_test_1)
-		g_idle_add(test_close_socket_1_part_2, NULL);
+		timeout_add(0, test_close_socket_1_part_2, NULL, NULL);
 	else if (l2data == &le_client_close_socket_test_2)
-		g_idle_add(test_close_socket_2_part_2, NULL);
+		timeout_add(0, test_close_socket_2_part_2, NULL, NULL);
 }
 
 static void test_close_socket_scan_disabled(void)
@@ -2507,9 +2777,19 @@ static void test_close_socket_scan_disabled(void)
 	const struct l2cap_data *l2data = data->test_data;
 
 	if (l2data == &le_client_close_socket_test_1)
-		g_idle_add(test_close_socket_1_part_3, NULL);
-	else if (l2data == &le_client_close_socket_test_2)
-		g_idle_add(test_close_socket_2_part_3, NULL);
+		timeout_add(0, test_close_socket_1_part_3, NULL, NULL);
+}
+
+/* The kernel creates the connection once the scan is disabled, close the
+ * socket only then, so it has a connection attempt to cancel.
+ */
+static void test_close_socket_create_conn(void)
+{
+	struct test_data *data = tester_get_data();
+	const struct l2cap_data *l2data = data->test_data;
+
+	if (l2data == &le_client_close_socket_test_2)
+		timeout_add(0, test_close_socket_2_part_3, NULL, NULL);
 }
 
 static void test_close_socket_conn_cancel(void)
@@ -2532,6 +2812,8 @@ static void test_close_socket_router(uint16_t opcode, const void *param,
 			test_close_socket_scan_enabled();
 		else
 			test_close_socket_scan_disabled();
+	} else if (opcode == BT_HCI_CMD_LE_CREATE_CONN) {
+		test_close_socket_create_conn();
 	} else if (opcode == BT_HCI_CMD_LE_CREATE_CONN_CANCEL) {
 		test_close_socket_conn_cancel();
 	}
@@ -2555,8 +2837,8 @@ static void test_close_socket(const void *test_data)
 }
 
 static uint8_t test_2_connect_cb_cnt;
-static gboolean test_2_connect_cb(GIOChannel *io, GIOCondition cond,
-							gpointer user_data)
+static bool test_2_connect_cb(struct tester_io *io, uint32_t cond,
+							void *user_data)
 {
 	struct test_data *data = tester_get_data();
 	const struct l2cap_data *l2data = data->test_data;
@@ -2565,7 +2847,7 @@ static gboolean test_2_connect_cb(GIOChannel *io, GIOCondition cond,
 
 	data->io_id = 0;
 
-	sk = g_io_channel_unix_get_fd(io);
+	sk = tester_io_get_fd(io);
 
 	if (getsockopt(sk, SOL_SOCKET, SO_ERROR, &sk_err, &len) < 0)
 		err = -errno;
@@ -2575,7 +2857,7 @@ static gboolean test_2_connect_cb(GIOChannel *io, GIOCondition cond,
 	if (err < 0) {
 		tester_warn("Connect failed: %s (%d)", strerror(-err), -err);
 		tester_test_failed();
-		return FALSE;
+		return false;
 	}
 
 	tester_print("Successfully connected");
@@ -2592,16 +2874,16 @@ static gboolean test_2_connect_cb(GIOChannel *io, GIOCondition cond,
 		tester_test_passed();
 	}
 
-	return FALSE;
+	return false;
 }
 
-static gboolean enable_advertising(gpointer args)
+static bool enable_advertising(void *args)
 {
 	struct test_data *data = tester_get_data();
 	struct bthost *bthost = hciemu_client_get_host(data->hciemu);
 
 	bthost_set_adv_enable(bthost, 0x01);
-	return FALSE;
+	return false;
 }
 
 static void test_connect_2_part_2(void)
@@ -2618,7 +2900,7 @@ static void test_connect_2_part_2(void)
 		close(data->sk);
 	}
 
-	g_idle_add(enable_advertising, NULL);
+	timeout_add(0, enable_advertising, NULL, NULL);
 }
 
 static uint8_t test_scan_enable_counter;
@@ -2634,7 +2916,7 @@ static void test_connect_2_router(uint16_t opcode, const void *param,
 		if (test_scan_enable_counter == 1)
 			test_connect_2_part_2();
 		else if (test_scan_enable_counter == 2)
-			g_idle_add(enable_advertising, NULL);
+			timeout_add(0, enable_advertising, NULL, NULL);
 	}
 }
 
@@ -2669,52 +2951,143 @@ static void test_connect_2(const void *test_data)
 								defer);
 }
 
-static gboolean l2cap_accept_cb(GIOChannel *io, GIOCondition cond,
-							gpointer user_data)
+static bool watch_no_track_cb(struct tester_io *io, uint32_t cond,
+							void *user_data)
+{
+	int sk = tester_io_get_fd(io);
+
+	tester_print("Ready sk = %d", sk);
+	return false;
+}
+
+static int watch_and_close_sk(int sk)
+{
+	struct tester_io *io;
+
+	if (sk < 0)
+		return sk;
+
+	io = tester_io_new(sk);
+	tester_io_add_watch(io,
+		TESTER_IO_OUT | TESTER_IO_ERR | TESTER_IO_HUP | TESTER_IO_NVAL,
+						watch_no_track_cb, NULL);
+	tester_io_unref(io);
+
+	return sk;
+}
+
+static void test_connect_ext_defer_limit(const void *test_data)
+{
+	struct test_data *data = tester_get_data();
+	const struct l2cap_data *l2data = data->test_data;
+	const uint8_t *client_bdaddr;
+	int sk[6];
+	int err;
+	int opt = 1;
+	int i;
+
+	data->step = 6;
+
+	if (l2data->server_psm) {
+		struct bthost *bthost = hciemu_client_get_host(data->hciemu);
+
+		if (!l2data->data_len)
+			bthost_add_l2cap_server(bthost, l2data->server_psm,
+						NULL, NULL, NULL);
+	}
+
+	client_bdaddr = hciemu_get_client_bdaddr(data->hciemu);
+
+	/* Close sk only after connection, to trigger kernel processing */
+	sk[0] = watch_and_close_sk(connect_socket(client_bdaddr, NULL, true));
+	sk[1] = watch_and_close_sk(connect_socket(client_bdaddr, NULL, true));
+	sk[2] = watch_and_close_sk(connect_socket(client_bdaddr, NULL, true));
+	sk[3] = watch_and_close_sk(connect_socket(client_bdaddr, NULL, true));
+	sk[4] = watch_and_close_sk(connect_socket(client_bdaddr, NULL, false));
+
+	/* Open one deferred socket too many for ECRED REQ, triggers miscounting
+	 * of pending connections in some kernel versions.
+	 */
+	sk[5] = create_l2cap_sock(data, 0, l2data->cid, l2data->sec_level,
+								l2data->mode);
+	if (sk[5] < 0) {
+		tester_test_failed();
+		return;
+	}
+
+	if (setsockopt(sk[5], SOL_BLUETOOTH, BT_DEFER_SETUP, &opt,
+							sizeof(opt)) < 0) {
+		tester_test_failed();
+		close(sk[5]);
+		return;
+	}
+
+	err = connect_l2cap_impl(sk[5], client_bdaddr, BDADDR_LE_PUBLIC,
+					l2data->client_psm, l2data->cid);
+	if (err == -EPROTO) {
+		tester_test_passed();
+
+		for (i = 0; i < (int)ARRAY_SIZE(sk); ++i)
+			if (sk[i] >= 0)
+				close(sk[i]);
+	} else {
+		/* Try to trigger kernel to make ECRED REQ with > 5 SCID */
+		watch_and_close_sk(sk[5]);
+
+		tester_test_failed();
+	}
+}
+
+static bool l2cap_accept_cb(struct tester_io *io, uint32_t cond,
+							void *user_data)
 {
 	struct test_data *data = tester_get_data();
 	const struct l2cap_data *l2data = data->test_data;
 	int sk, err;
 
-	sk = g_io_channel_unix_get_fd(io);
+	data->io_id = 0;
+
+	sk = tester_io_get_fd(io);
 
 	if (!check_mtu(data, sk)) {
 		tester_test_failed();
-		return FALSE;
+		return false;
 	}
 
-	err = check_phys(data, sk);
+	err = check_phys_and_sec(data, sk);
 	if (err < 0) {
 		if (err == -EINPROGRESS) {
-			g_io_add_watch(io, G_IO_HUP, socket_closed_cb, NULL);
-			return FALSE;
+			tester_io_add_watch(io, TESTER_IO_HUP, socket_closed_cb,
+									NULL);
+			return false;
 		}
 		tester_test_failed();
-		return FALSE;
+		return false;
 	}
 
 	if (l2data->read_data) {
 		l2cap_read_data(data, io, data->dcid);
-		return FALSE;
+		return false;
 	} else if (l2data->write_data) {
 		l2cap_write_data(data, io, data->scid);
-		return FALSE;
+		return false;
 	}
 
 	tester_print("Successfully connected");
 
 	tester_test_passed();
 
-	return FALSE;
+	return false;
 }
 
-static bool defer_accept(struct test_data *data, GIOChannel *io)
+static bool defer_accept(struct test_data *data, struct tester_io *io,
+						tester_io_func_t accept_cb)
 {
 	int sk;
 	char c;
 	struct pollfd pfd;
 
-	sk = g_io_channel_unix_get_fd(io);
+	sk = tester_io_get_fd(io);
 
 	memset(&pfd, 0, sizeof(pfd));
 	pfd.fd = sk;
@@ -2732,17 +3105,19 @@ static bool defer_accept(struct test_data *data, GIOChannel *io)
 		}
 	}
 
-	data->io_id = g_io_add_watch(io, G_IO_OUT, l2cap_accept_cb, NULL);
+	if (accept_cb)
+		data->io_id = tester_io_add_watch(io, TESTER_IO_OUT, accept_cb,
+									NULL);
 
-	g_io_channel_unref(io);
+	tester_io_unref(io);
 
-	tester_print("Accept deferred setup");
+	tester_print("Accept deferred setup sk = %d", sk);
 
 	return true;
 }
 
-static gboolean l2cap_listen_cb(GIOChannel *io, GIOCondition cond,
-							gpointer user_data)
+static bool l2cap_listen_cb(struct tester_io *io, uint32_t cond,
+							void *user_data)
 {
 	struct test_data *data = tester_get_data();
 	const struct l2cap_data *l2data = data->test_data;
@@ -2750,29 +3125,31 @@ static gboolean l2cap_listen_cb(GIOChannel *io, GIOCondition cond,
 
 	data->io_id = 0;
 
-	sk = g_io_channel_unix_get_fd(io);
+	sk = tester_io_get_fd(io);
 
 	new_sk = accept(sk, NULL, NULL);
 	if (new_sk < 0) {
 		tester_warn("accept failed: %s (%u)", strerror(errno), errno);
 		tester_test_failed();
-		return FALSE;
+		return false;
 	}
 
-	io = g_io_channel_unix_new(new_sk);
-	g_io_channel_set_close_on_unref(io, TRUE);
+	tester_print("Accept sk = %d", new_sk);
+
+	io = tester_io_new(new_sk);
+	tester_io_set_close_on_unref(io, true);
 
 	if (l2data->defer) {
 		if (l2data->expect_err < 0) {
-			g_io_channel_unref(io);
-			return FALSE;
+			tester_io_unref(io);
+			return false;
 		}
 
-		if (!defer_accept(data, io)) {
+		if (!defer_accept(data, io, l2cap_accept_cb)) {
 			tester_warn("Unable to accept deferred setup");
 			tester_test_failed();
 		}
-		return FALSE;
+		return false;
 	}
 
 	return l2cap_accept_cb(io, cond, user_data);
@@ -2842,6 +3219,24 @@ static void send_req_new_conn(uint16_t handle, void *user_data)
 
 	data->handle = handle;
 
+	if (l2data->conn_subrate) {
+		const struct l2cap_conn_subrate *cs = l2data->conn_subrate;
+		struct bthost_conn_rate rate;
+
+		rate.interval_min = cs->min_interval;
+		rate.interval_max = cs->max_interval;
+		rate.subrate_min = cs->subrate_min;
+		rate.subrate_max = cs->subrate_max;
+		rate.max_latency = cs->max_latency;
+		rate.cont_num = cs->cont_num;
+		rate.supv_timeout = cs->supv_timeout;
+
+		tester_print("Sending LE Connection Rate Request from client");
+
+		bthost = hciemu_client_get_host(data->hciemu);
+		bthost_le_conn_rate(bthost, handle, &rate);
+	}
+
 	if (l2data->send_cmd) {
 		bthost_l2cap_rsp_cb cb;
 
@@ -2859,14 +3254,15 @@ static void send_req_new_conn(uint16_t handle, void *user_data)
 	}
 }
 
-static void test_server(const void *test_data)
+static void start_test_server(const void *test_data, bthost_new_conn_cb conn_cb,
+						tester_io_func_t listen_cb)
 {
 	struct test_data *data = tester_get_data();
 	const struct l2cap_data *l2data = data->test_data;
 	const uint8_t *central_bdaddr;
 	uint8_t addr_type;
 	struct bthost *bthost;
-	GIOChannel *io;
+	struct tester_io *io;
 	int sk;
 
 	if (l2data->server_psm || l2data->cid) {
@@ -2889,7 +3285,7 @@ static void test_server(const void *test_data)
 			return;
 		}
 
-		if (listen(sk, 5) < 0) {
+		if (listen(sk, 32) < 0) {
 			tester_warn("listening on socket failed: %s (%u)",
 					strerror(errno), errno);
 			tester_test_failed();
@@ -2897,12 +3293,12 @@ static void test_server(const void *test_data)
 			return;
 		}
 
-		io = g_io_channel_unix_new(sk);
-		g_io_channel_set_close_on_unref(io, TRUE);
+		io = tester_io_new(sk);
+		tester_io_set_close_on_unref(io, true);
 
-		data->io_id = g_io_add_watch(io, G_IO_IN, l2cap_listen_cb,
+		data->io_id = tester_io_add_watch(io, TESTER_IO_IN, listen_cb,
 									NULL);
-		g_io_channel_unref(io);
+		tester_io_unref(io);
 
 		tester_print("Listening for connections");
 	}
@@ -2915,7 +3311,7 @@ static void test_server(const void *test_data)
 	}
 
 	bthost = hciemu_client_get_host(data->hciemu);
-	bthost_set_connect_cb(bthost, send_req_new_conn, data);
+	bthost_set_connect_cb(bthost, conn_cb, data);
 
 	if (data->hciemu_type == HCIEMU_TYPE_BREDR)
 		addr_type = BDADDR_BREDR;
@@ -2923,6 +3319,174 @@ static void test_server(const void *test_data)
 		addr_type = BDADDR_LE_PUBLIC;
 
 	bthost_hci_connect(bthost, central_bdaddr, addr_type);
+}
+
+static void test_server(const void *test_data)
+{
+	start_test_server(test_data, send_req_new_conn, l2cap_listen_cb);
+}
+
+static bool ext_flowctl_accept_2_close_1_listen_cb(struct tester_io *io,
+					uint32_t cond, void *user_data)
+{
+	struct test_data *data = tester_get_data();
+	int sk, new_sk;
+	int err = 0;
+
+	sk = tester_io_get_fd(io);
+
+	new_sk = accept(sk, NULL, NULL);
+	if (err < 0) {
+		tester_warn("accept failed: %s (%u)", strerror(errno), errno);
+		tester_test_failed();
+		return false;
+	}
+
+	if (!defer_accept(data, tester_io_new(new_sk), NULL))
+		goto fail;
+
+	close(new_sk);
+
+	if (data->step--)
+		return true;
+
+	tester_test_passed();
+
+	data->io_id = 0;
+	return false;
+
+fail:
+	tester_test_failed();
+	close(new_sk);
+	return false;
+}
+
+static void test_ext_flowctl_server_accept_2_close_1(const void *test_data)
+{
+	struct test_data *data = tester_get_data();
+
+	data->step = 1;
+	start_test_server(test_data, send_req_new_conn,
+					ext_flowctl_accept_2_close_1_listen_cb);
+}
+
+static bool ext_flowctl_nval_conn_req_ready_cb(void *ptr)
+{
+	struct test_data *data = tester_get_data();
+	const struct queue_entry *entry;
+	tester_io_func_t cb = l2cap_accept_cb;
+
+	if (data->io_id) {
+		tester_remove_source(data->io_id);
+		data->io_id = 0;
+	}
+
+	data->err_io_id = 0;
+	data->step = 0;
+
+	tester_print("Accepting %d deferred", queue_length(data->io_channels));
+
+	entry = queue_get_entries(data->io_channels);
+	for (; entry; entry = entry->next) {
+		struct tester_io *io = entry->data;
+
+		if (!defer_accept(data, tester_io_ref(io), cb)) {
+			tester_io_unref(io);
+			tester_warn("Unable to accept deferred setup");
+			tester_test_failed();
+			break;
+		}
+
+		/* Require only the first to connect */
+		cb = NULL;
+	}
+
+	return false;
+}
+
+static bool ext_flowctl_nval_conn_req_listen_cb(struct tester_io *io,
+					uint32_t cond, void *user_data)
+{
+	struct test_data *data = tester_get_data();
+	int sk, new_sk;
+	struct tester_io *new_io;
+
+	if (!data->step)
+		return false;
+
+	sk = tester_io_get_fd(io);
+
+	new_sk = accept(sk, NULL, NULL);
+	if (new_sk < 0) {
+		tester_warn("accept failed: %s (%u)", strerror(errno), errno);
+		tester_test_failed();
+		return false;
+	}
+
+	tester_print("Accept sk = %d", new_sk);
+
+	new_io = tester_io_new(new_sk);
+	tester_io_set_close_on_unref(new_io, true);
+
+	if (!data->io_channels)
+		data->io_channels = queue_new();
+	queue_push_tail(data->io_channels, new_io);
+
+	if (data->err_io_id) {
+		tester_remove_source(data->err_io_id);
+		data->err_io_id = 0;
+	}
+
+	/* Accept all deferred connections at once, or until timeout */
+	data->step--;
+	if (!data->step) {
+		data->io_id = 0;
+		ext_flowctl_nval_conn_req_ready_cb(NULL);
+		return false;
+	}
+
+	data->err_io_id = timeout_add(1000,
+				ext_flowctl_nval_conn_req_ready_cb, NULL, NULL);
+
+	return true;
+}
+
+static void ext_flowctl_nval_conn_req_conn_cb(uint16_t handle, void *user_data)
+{
+	struct test_data *data = user_data;
+	struct bthost *bthost;
+	int i;
+
+	tester_print("New client connection with handle 0x%04x", handle);
+
+	bthost = hciemu_client_get_host(data->hciemu);
+
+	tester_print("Sending %d L2CAP_LE_CONN_REQ", data->step);
+
+	/* All L2CAP_LE_CONN_REQ (0x14) use the same PSM, same ident, different
+	 * SCID.  Receiver may reject some of these due to ident collision,
+	 * but at least it should not hang/crash.
+	 */
+	for (i = 0; i < data->step; ++i) {
+		uint8_t cmd[] = {
+			/* PSM(2), SCID(2), MTU(2), MPS(2), Crd(2) */
+			0x80, 0x00, 0x40 + i, 0x00,
+			0x40, 0x00, 0x40, 0x00,
+			0x05, 0x00
+		};
+
+		bthost_l2cap_sig_raw(bthost, handle, 0x14, 0x9f,
+							cmd, ARRAY_SIZE(cmd));
+	}
+}
+
+static void test_ext_flowctl_server_nval_conn_req(const void *test_data)
+{
+	struct test_data *data = tester_get_data();
+
+	data->step = 32;
+	start_test_server(test_data, ext_flowctl_nval_conn_req_conn_cb,
+					ext_flowctl_nval_conn_req_listen_cb);
 }
 
 static void test_getpeername_not_connected(const void *test_data)
@@ -2997,6 +3561,10 @@ int main(int argc, char *argv[])
 	test_l2cap_bredr("L2CAP BR/EDR Client PIN Code - Success",
 					&client_connect_pin_success_test,
 					setup_powered_client, test_connect);
+
+	test_l2cap_bredr("L2CAP BR/EDR Client PIN Code Change Sec - Success",
+				&client_connect_pin_change_sec_success_test,
+				setup_powered_client, test_connect);
 
 	test_l2cap_bredr("L2CAP BR/EDR Client - Read Success",
 					&client_connect_read_success_test,
@@ -3114,6 +3682,32 @@ int main(int argc, char *argv[])
 	test_l2cap_le("L2CAP LE Client - Success",
 				&le_client_connect_success_test_1,
 				setup_powered_client, test_connect);
+
+	test_l2cap_le_62("L2CAP LE Client - SCI Fast Mode",
+				&le_client_connect_subrate_fast_test,
+				setup_powered_client, test_connect);
+	test_l2cap_le_62("L2CAP LE Client - SCI Default Mode",
+				&le_client_connect_subrate_default_test,
+				setup_powered_client, test_connect);
+	test_l2cap_le_62("L2CAP LE Client - SCI Low Power Mode",
+				&le_client_connect_subrate_low_power_test,
+				setup_powered_client, test_connect);
+	test_l2cap_le_62("L2CAP LE Client - SCI Full Range Mode",
+				&le_client_connect_subrate_full_range_test,
+				setup_powered_client, test_connect);
+
+	test_l2cap_le_62("L2CAP LE Server - SCI Fast Mode",
+				&le_server_subrate_fast_test,
+				setup_powered_server, test_server);
+	test_l2cap_le_62("L2CAP LE Server - SCI Default Mode",
+				&le_server_subrate_default_test,
+				setup_powered_server, test_server);
+	test_l2cap_le_62("L2CAP LE Server - SCI Low Power Mode",
+				&le_server_subrate_low_power_test,
+				setup_powered_server, test_server);
+	test_l2cap_le_62("L2CAP LE Server - SCI Full Range Mode",
+				&le_server_subrate_full_range_test,
+				setup_powered_server, test_server);
 	test_l2cap_le("L2CAP LE Client - Close",
 				&le_client_connect_close_test_1,
 				setup_powered_client, test_connect_close);
@@ -3146,6 +3740,9 @@ int main(int argc, char *argv[])
 				setup_powered_client, test_connect);
 	test_l2cap_le("L2CAP LE Client SMP - Success",
 				&le_client_connect_success_test_2,
+				setup_powered_client, test_connect);
+	test_l2cap_le("L2CAP LE Client Change Sec - Success",
+				&le_client_change_sec_success_test,
 				setup_powered_client, test_connect);
 	test_l2cap_le("L2CAP LE Client - Command Reject",
 					&le_client_connect_reject_test_1,
@@ -3256,12 +3853,21 @@ int main(int argc, char *argv[])
 				&ext_flowctl_client_set_phy_coded_test,
 				setup_powered_client, test_connect);
 
+	test_l2cap_le("L2CAP Ext-Flowctl Client - Defer limit",
+				&ext_flowctl_client_defer_limit,
+				setup_powered_client,
+				test_connect_ext_defer_limit);
+
 	test_l2cap_le("L2CAP Ext-Flowctl Server - Success",
 				&ext_flowctl_server_success_test,
 				setup_powered_server, test_server);
 	test_l2cap_le("L2CAP Ext-Flowctl Server - Nval SCID",
 				&ext_flowctl_server_nval_scid_test,
 				setup_powered_server, test_server);
+	test_l2cap_le("L2CAP Ext-Flowctl Server - Accept 2 Close 1",
+				&ext_flowctl_server_accept_2_close_1_test,
+				setup_powered_server,
+				test_ext_flowctl_server_accept_2_close_1);
 	test_l2cap_le("L2CAP Ext-Flowctl Server - PHY",
 				&ext_flowctl_server_phy_test,
 				setup_powered_server, test_server);
@@ -3278,8 +3884,16 @@ int main(int argc, char *argv[])
 				&ext_flowctl_server_set_phy_coded_test,
 				setup_powered_server, test_server);
 
+	test_l2cap_le_52("L2CAP Ext-Flowctl Server - Nval Conn Req",
+				&ext_flowctl_server_nval_conn_req_test,
+				setup_powered_server,
+				test_ext_flowctl_server_nval_conn_req);
+
 	test_l2cap_le("L2CAP LE ATT Client - Success",
 				&le_att_client_connect_success_test_1,
+				setup_powered_client, test_connect);
+	test_l2cap_le("L2CAP LE ATT Client Change Sec  - Success",
+				&le_att_client_change_sec_success_test,
 				setup_powered_client, test_connect);
 	test_l2cap_le("L2CAP LE ATT Server - Success",
 				&le_att_server_success_test_1,
@@ -3287,6 +3901,9 @@ int main(int argc, char *argv[])
 
 	test_l2cap_le("L2CAP LE EATT Client - Success",
 				&le_eatt_client_connect_success_test_1,
+				setup_powered_client, test_connect);
+	test_l2cap_le("L2CAP LE EATT Client Change Sec - Success",
+				&le_eatt_client_change_sec_success_test,
 				setup_powered_client, test_connect);
 	test_l2cap_le("L2CAP LE EATT Server - Success",
 				&le_eatt_server_success_test_1,

@@ -165,7 +165,7 @@ static void invalidate_cache(struct cache *cache)
 }
 
 static void phonebook_size_result(const char *buffer, size_t bufsize,
-					int vcards, int missed,
+					int vcards, uint8_t missed,
 					gboolean lastpart, void *user_data)
 {
 	struct pbap_session *pbap = user_data;
@@ -200,7 +200,7 @@ static void phonebook_size_result(const char *buffer, size_t bufsize,
 }
 
 static void query_result(const char *buffer, size_t bufsize, int vcards,
-				int missed, gboolean lastpart, void *user_data)
+			uint8_t missed, gboolean lastpart, void *user_data)
 {
 	struct pbap_session *pbap = user_data;
 

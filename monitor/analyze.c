@@ -32,6 +32,12 @@
 #define TIMEVAL_MSEC(_tv) \
 	(long long)((_tv)->tv_sec * 1000 + (_tv)->tv_usec / 1000)
 
+/* Same layout as the ISO handle/flags fields decoded in packet.c */
+#define ISO_FLAGS(_h)		((_h) >> 12)
+#define ISO_FLAGS_PB(_f)	((_f) & 0x0003)
+#define ISO_FLAGS_TS(_f)	(((_f) >> 2) & 0x0001)
+#define ISO_DATA_FLAGS(_h)	((_h) >> 14)
+
 struct hci_dev {
 	uint16_t index;
 	uint8_t type;
@@ -44,6 +50,7 @@ struct hci_dev {
 	unsigned long num_acl;
 	unsigned long num_sco;
 	unsigned long num_iso;
+	unsigned long num_vendor;
 	unsigned long vendor_diag;
 	unsigned long system_note;
 	unsigned long user_log;
@@ -51,7 +58,19 @@ struct hci_dev {
 	unsigned long unknown;
 	uint16_t manufacturer;
 	struct queue *conn_list;
+	struct queue *cmd_list;
+	struct packet_latency cmd_latency;
+	unsigned long num_cmd_rsp;
 };
+
+/* Command awaiting a Command Complete or a Command Status */
+struct hci_cmd {
+	uint16_t opcode;
+	struct timeval tv;
+};
+
+/* Bound the queue so commands that never get a response cannot pile up */
+#define CMD_LIST_MAX 64
 
 struct hci_stats {
 	size_t bytes;
@@ -87,6 +106,7 @@ struct hci_conn {
 	struct queue *chan_list;
 	struct hci_stats rx;
 	struct hci_stats tx;
+	struct packet_loss rx_loss;
 };
 
 struct hci_conn_tx {
@@ -155,10 +175,12 @@ static void print_stats(struct hci_stats *stats, const char *label)
 		return;
 
 	print_field("%s packets: %zu/%zu", label, stats->num, stats->num_comp);
-	print_field("%s Latency: %lld-%lld msec (~%lld msec)", label,
+	print_field("%s Latency: %lld-%lld msec (~%lld msec +/- %lld msec)",
+			label,
 			TV_MSEC(stats->latency.min),
 			TV_MSEC(stats->latency.max),
-			TV_MSEC(stats->latency.med));
+			TV_MSEC(stats->latency.med),
+			packet_latency_stddev(&stats->latency));
 	print_field("%s size: %u-%u octets (~%zd octets)", label,
 			stats->min, stats->max, stats->bytes / stats->num);
 
@@ -255,11 +277,11 @@ static void chan_destroy(void *data)
 
 	fixed = fixed_channel_name(chan->cid);
 	if (fixed)
-		printf("  Found %s L2CAP channel with CID %u (%s)\n",
+		display_printf("  Found %s L2CAP channel with CID %u (%s)\n",
 					chan->out ? "TX" : "RX", chan->cid,
 					fixed);
 	else
-		printf("  Found %s L2CAP channel with CID %u\n",
+		display_printf("  Found %s L2CAP channel with CID %u\n",
 					chan->out ? "TX" : "RX", chan->cid);
 
 	if (chan->psm)
@@ -276,6 +298,8 @@ static void chan_destroy(void *data)
 	print_stats(&chan->tx, "TX");
 
 done:
+	queue_destroy(chan->rx.plot, free);
+	queue_destroy(chan->tx.plot, free);
 	free(chan);
 }
 
@@ -348,12 +372,22 @@ static void conn_destroy(void *data)
 		break;
 	}
 
-	printf("  Found %s connection with handle %u\n", str, conn->handle);
+	display_printf("  Found %s connection with handle %u\n", str,
+				conn->handle);
 	packet_print_addr("Address", conn->bdaddr, conn->bdaddr_type);
 	if (!conn->setup_seen)
 		print_field("Connection setup missing");
 	print_stats(&conn->rx, "RX");
 	print_stats(&conn->tx, "TX");
+
+	if (conn->rx_loss.total)
+		print_field("RX loss: %zu/%zu (%zu.%02zu%%) "
+				"dropped %zu invalid %zu",
+				conn->rx_loss.lost, conn->rx_loss.total,
+				conn->rx_loss.lost * 100 / conn->rx_loss.total,
+				(conn->rx_loss.lost * 10000 /
+					conn->rx_loss.total) % 100,
+				conn->rx_loss.dropped, conn->rx_loss.invalid);
 
 	if (conn->setup_seen) {
 		print_field("Connected: #%lu", conn->frame_connected);
@@ -451,27 +485,43 @@ static void dev_destroy(void *data)
 		break;
 	}
 
-	printf("Found %s controller with index %u\n", str, dev->index);
-	printf("  BD_ADDR %2.2X:%2.2X:%2.2X:%2.2X:%2.2X:%2.2X",
+	display_printf("Found %s controller with index %u\n", str, dev->index);
+	display_printf("  BD_ADDR %2.2X:%2.2X:%2.2X:%2.2X:%2.2X:%2.2X",
 			dev->bdaddr[5], dev->bdaddr[4], dev->bdaddr[3],
 			dev->bdaddr[2], dev->bdaddr[1], dev->bdaddr[0]);
 	if (dev->manufacturer != 0xffff)
-		printf(" (%s)", bt_compidtostr(dev->manufacturer));
-	printf("\n");
+		display_printf(" (%s)", bt_compidtostr(dev->manufacturer));
+	display_printf("\n");
 
 
-	printf("  %lu commands\n", dev->num_cmd);
-	printf("  %lu events\n", dev->num_evt);
-	printf("  %lu ACL packets\n", dev->num_acl);
-	printf("  %lu SCO packets\n", dev->num_sco);
-	printf("  %lu ISO packets\n", dev->num_iso);
-	printf("  %lu vendor diagnostics\n", dev->vendor_diag);
-	printf("  %lu system notes\n", dev->system_note);
-	printf("  %lu user logs\n", dev->user_log);
-	printf("  %lu control messages \n", dev->ctrl_msg);
-	printf("  %lu unknown opcodes\n", dev->unknown);
+	display_printf("  %lu commands\n", dev->num_cmd);
+	display_printf("  %lu events\n", dev->num_evt);
+	display_printf("  %lu ACL packets\n", dev->num_acl);
+	display_printf("  %lu SCO packets\n", dev->num_sco);
+	display_printf("  %lu ISO packets\n", dev->num_iso);
+	display_printf("  %lu vendor packets\n", dev->num_vendor);
+	display_printf("  %lu vendor diagnostics\n", dev->vendor_diag);
+	display_printf("  %lu system notes\n", dev->system_note);
+	display_printf("  %lu user logs\n", dev->user_log);
+	display_printf("  %lu control messages\n", dev->ctrl_msg);
+	display_printf("  %lu unknown opcodes\n", dev->unknown);
+
+	if (dev->num_cmd_rsp)
+		display_printf("  Command latency: %lld-%lld msec "
+				"(~%lld msec +/- %lld msec)\n",
+				TV_MSEC(dev->cmd_latency.min),
+				TV_MSEC(dev->cmd_latency.max),
+				TV_MSEC(dev->cmd_latency.med),
+				packet_latency_stddev(&dev->cmd_latency));
+
+	/* Whatever is left never got a Command Complete or Command Status */
+	if (!queue_isempty(dev->cmd_list))
+		display_printf("  Commands without response: %u\n",
+					queue_length(dev->cmd_list));
+
+	queue_destroy(dev->cmd_list, free);
 	queue_destroy(dev->conn_list, conn_destroy);
-	printf("\n");
+	display_printf("\n");
 
 	free(dev);
 }
@@ -486,6 +536,7 @@ static struct hci_dev *dev_alloc(uint16_t index)
 	dev->manufacturer = 0xffff;
 
 	dev->conn_list = queue_new();
+	dev->cmd_list = queue_new();
 
 	return dev;
 }
@@ -721,10 +772,20 @@ static void del_index(struct timeval *tv, uint16_t index,
 	dev_destroy(dev);
 }
 
+static bool match_cmd_opcode(const void *data, const void *user_data)
+{
+	const struct hci_cmd *cmd = data;
+
+	return cmd->opcode == PTR_TO_UINT(user_data);
+}
+
 static void command_pkt(struct timeval *tv, uint16_t index,
 					const void *data, uint16_t size)
 {
+	const struct bt_hci_cmd_hdr *hdr = data;
 	struct hci_dev *dev;
+	struct hci_cmd *cmd;
+	uint16_t opcode;
 
 	dev = dev_lookup(index);
 	if (!dev)
@@ -732,6 +793,51 @@ static void command_pkt(struct timeval *tv, uint16_t index,
 
 	dev->num_hci++;
 	dev->num_cmd++;
+
+	if (size < sizeof(*hdr))
+		return;
+
+	opcode = le16_to_cpu(hdr->opcode);
+
+	/* NOP carries no request and is only used to update ncmd */
+	if (opcode == BT_HCI_CMD_NOP)
+		return;
+
+	if (queue_length(dev->cmd_list) >= CMD_LIST_MAX)
+		free(queue_pop_head(dev->cmd_list));
+
+	cmd = new0(struct hci_cmd, 1);
+	cmd->opcode = opcode;
+	cmd->tv = *tv;
+
+	queue_push_tail(dev->cmd_list, cmd);
+}
+
+/*
+ * Measure how long the controller took to acknowledge a command. Commands
+ * that are only acknowledged here and complete later through a separate
+ * event are still measured up to the acknowledgement, so that the figure
+ * stays a property of the controller rather than of the remote device.
+ */
+static void cmd_rsp(struct hci_dev *dev, struct timeval *tv, uint16_t opcode)
+{
+	struct hci_cmd *cmd;
+	struct timeval res;
+
+	/*
+	 * Several commands may be outstanding at once and they need not
+	 * complete in order, so match on the opcode and take the oldest.
+	 */
+	cmd = queue_remove_if(dev->cmd_list, match_cmd_opcode,
+							UINT_TO_PTR(opcode));
+	if (!cmd)
+		return;
+
+	timersub(tv, &cmd->tv, &res);
+	packet_latency_add(&dev->cmd_latency, &res);
+	dev->num_cmd_rsp++;
+
+	free(cmd);
 }
 
 static void evt_conn_complete(struct hci_dev *dev, struct timeval *tv,
@@ -794,11 +900,24 @@ static void evt_cmd_complete(struct hci_dev *dev, struct timeval *tv,
 
 	opcode = le16_to_cpu(evt->opcode);
 
+	cmd_rsp(dev, tv, opcode);
+
 	switch (opcode) {
 	case BT_HCI_CMD_READ_BD_ADDR:
 		rsp_read_bd_addr(dev, tv, data, size);
 		break;
 	}
+}
+
+static void evt_cmd_status(struct hci_dev *dev, struct timeval *tv,
+					const void *data, uint16_t size)
+{
+	const struct bt_hci_evt_cmd_status *evt = data;
+
+	if (size < sizeof(*evt))
+		return;
+
+	cmd_rsp(dev, tv, le16_to_cpu(evt->opcode));
 }
 
 static bool match_plot_latency(const void *data, const void *user_data)
@@ -1096,6 +1215,9 @@ static void event_pkt(struct timeval *tv, uint16_t index,
 	case BT_HCI_EVT_CMD_COMPLETE:
 		evt_cmd_complete(dev, tv, data, size);
 		break;
+	case BT_HCI_EVT_CMD_STATUS:
+		evt_cmd_status(dev, tv, data, size);
+		break;
 	case BT_HCI_EVT_NUM_COMPLETED_PACKETS:
 		evt_num_completed_packets(dev, tv, data, size);
 		break;
@@ -1336,8 +1458,11 @@ static void iso_pkt(struct timeval *tv, uint16_t index, bool out,
 					const void *data, uint16_t size)
 {
 	const struct bt_hci_iso_hdr *hdr = data;
+	struct iovec iov = { .iov_base = (void *)data, .iov_len = size };
 	struct hci_conn *conn;
 	struct hci_dev *dev;
+	uint16_t handle;
+	uint8_t flags, pb_flag;
 
 	dev = dev_lookup(index);
 	if (!dev)
@@ -1355,11 +1480,44 @@ static void iso_pkt(struct timeval *tv, uint16_t index, bool out,
 			return;
 	}
 
+	handle = le16_to_cpu(hdr->handle);
+	flags = ISO_FLAGS(handle);
+	pb_flag = ISO_FLAGS_PB(flags);
+
+	/* Only the first fragment of an SDU carries the sequence number */
+	if (!out && (pb_flag == 0x00 || pb_flag == 0x02)) {
+		const struct bt_hci_iso_data_start *start;
+
+		util_iov_pull_mem(&iov, sizeof(*hdr));
+
+		/* Skip the timestamp when present */
+		if (ISO_FLAGS_TS(flags))
+			util_iov_pull_mem(&iov, sizeof(uint32_t));
+
+		start = util_iov_pull_mem(&iov, sizeof(*start));
+		if (start)
+			packet_loss_add(&conn->rx_loss, le16_to_cpu(start->sn),
+				ISO_DATA_FLAGS(le16_to_cpu(start->slen)));
+	}
+
 	if (out) {
 		conn_pkt_tx(conn, tv, size - sizeof(*hdr), NULL);
 	} else {
 		conn_pkt_rx(conn, tv, size - sizeof(*hdr), NULL);
 	}
+}
+
+static void vendor_pkt(struct timeval *tv, uint16_t index, bool out,
+					const void *data, uint16_t size)
+{
+	struct hci_dev *dev;
+
+	dev = dev_lookup(index);
+	if (!dev)
+		return;
+
+	dev->num_hci++;
+	dev->num_vendor++;
 }
 
 static void unknown_opcode(struct timeval *tv, uint16_t index,
@@ -1468,6 +1626,14 @@ void analyze_trace(const char *path)
 			num_frames++;
 			iso_pkt(&tv, index, false, buf, pktlen);
 			break;
+		case BTSNOOP_OPCODE_VENDOR_TX_PKT:
+			num_frames++;
+			vendor_pkt(&tv, index, true, buf, pktlen);
+			break;
+		case BTSNOOP_OPCODE_VENDOR_RX_PKT:
+			num_frames++;
+			vendor_pkt(&tv, index, false, buf, pktlen);
+			break;
 		default:
 			unknown_opcode(&tv, index, buf, pktlen);
 			break;
@@ -1476,7 +1642,7 @@ void analyze_trace(const char *path)
 		num_packets++;
 	}
 
-	printf("Trace contains %lu packets\n\n", num_packets);
+	display_printf("Trace contains %lu packets\n\n", num_packets);
 
 	queue_destroy(dev_list, dev_destroy);
 

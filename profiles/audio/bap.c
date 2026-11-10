@@ -139,6 +139,8 @@ struct bap_data {
 	struct queue *bcast_snks;
 	struct queue *server_streams;
 	GIOChannel *listen_io;
+	bool pa_synced;
+	unsigned int pa_timer;
 	unsigned int io_id;
 	unsigned int cig_update_id;
 	bool services_ready;
@@ -176,6 +178,9 @@ static void bap_data_free(struct bap_data *data)
 {
 	struct queue *bcast_snks = data->bcast_snks;
 
+	if (data->pa_timer)
+		g_source_remove(data->pa_timer);
+
 	if (data->listen_io) {
 		g_io_channel_shutdown(data->listen_io, TRUE, NULL);
 		g_io_channel_unref(data->listen_io);
@@ -201,6 +206,9 @@ static void bap_data_free(struct bap_data *data)
 
 	if (data->cig_update_id)
 		g_source_remove(data->cig_update_id);
+
+	if (data->device)
+		btd_device_unref(data->device);
 
 	free(data);
 }
@@ -1560,6 +1568,63 @@ static void bis_handler(uint8_t sid, uint8_t bis, uint8_t sgrp,
 									path);
 }
 
+/* Time a PA sync is kept around waiting for a stream to be enabled,
+ * before it is released.
+ */
+#define PA_SYNC_GRACE_TIMEOUT 5
+
+static void pa_sync_release(struct bap_data *data)
+{
+	if (!data->pa_synced)
+		return;
+
+	DBG("Release PA sync");
+
+	if (data->pa_timer) {
+		g_source_remove(data->pa_timer);
+		data->pa_timer = 0;
+	}
+
+	if (data->listen_io) {
+		g_io_channel_shutdown(data->listen_io, TRUE, NULL);
+		g_io_channel_unref(data->listen_io);
+		data->listen_io = NULL;
+	}
+
+	data->pa_synced = false;
+}
+
+static gboolean pa_sync_timeout(gpointer user_data)
+{
+	struct bap_data *data = user_data;
+
+	data->pa_timer = 0;
+	pa_sync_release(data);
+
+	return FALSE;
+}
+
+static bool pa_sync_pending(const void *data, const void *match_data)
+{
+	const struct bap_data *bdata = data;
+
+	if (bdata == match_data)
+		return false;
+
+	/* A session with a listener that has not synced yet is still
+	 * discovering a Broadcast Source.
+	 */
+	return bdata->listen_io && !bdata->pa_synced;
+}
+
+static void pa_sync_release_session(void *data, void *user_data)
+{
+	struct bap_data *bdata = data;
+
+	if (bdata != user_data)
+		pa_sync_release(bdata);
+}
+
 static gboolean big_info_report_cb(GIOChannel *io, GIOCondition cond,
 							gpointer user_data)
 {
@@ -1591,10 +1656,21 @@ static gboolean big_info_report_cb(GIOChannel *io, GIOCondition cond,
 	g_io_channel_unref(data->listen_io);
 	data->listen_io = NULL;
 
-	/* For short-lived PA, the sync is no longer needed at
-	 * this point, so the io can be closed.
-	 */
-	g_io_channel_shutdown(io, TRUE, NULL);
+	if (queue_find(sessions, pa_sync_pending, data)) {
+		/* Other Broadcast Sources are still being discovered, so the
+		 * sync is closed to not hold the resources needed for them.
+		 */
+		g_io_channel_shutdown(io, TRUE, NULL);
+	} else {
+		/* Nothing else to discover: keep the sync for a while, as
+		 * syncing to the BIG requires one, so it does not have to be
+		 * established again if a stream is enabled.
+		 */
+		data->listen_io = g_io_channel_ref(io);
+		data->pa_synced = true;
+		data->pa_timer = g_timeout_add_seconds(PA_SYNC_GRACE_TIMEOUT,
+							pa_sync_timeout, data);
+	}
 
 	/* Analyze received BASE data and create remote media endpoints for each
 	 * BIS matching our capabilities
@@ -1711,9 +1787,6 @@ static struct bap_ep *ep_register_bcast(struct bap_data *data,
 	ep->data = data;
 	ep->lpac = lpac;
 	ep->rpac = rpac;
-
-	if (device)
-		ep->data->device = device;
 
 	switch (bt_bap_pac_get_type(lpac)) {
 	case BT_BAP_BCAST_SOURCE:
@@ -2503,12 +2576,17 @@ static void update_cig_setup_io(void *data, void *match_data)
 	struct update_cig_data *info = match_data;
 	struct bt_bap_stream *stream = setup->stream;
 	struct bt_bap_qos *qos = bt_bap_stream_get_qos(stream);
+	uint8_t state;
 
 	if (qos && qos->ucast.cig_id != info->cig)
 		return;
 	if (!setup->want_io || !stream || setup->io || setup->closing)
 		return;
-	if (bt_bap_stream_get_state(stream) != BT_BAP_STREAM_STATE_QOS)
+
+	/* Enable may complete while the previous IO is still disconnecting. */
+	state = bt_bap_stream_get_state(stream);
+	if (state != BT_BAP_STREAM_STATE_QOS &&
+					state != BT_BAP_STREAM_STATE_ENABLING)
 		return;
 
 	DBG("%p", setup);
@@ -3390,7 +3468,8 @@ static struct bap_data *bap_data_new(struct btd_device *device)
 	struct bap_data *data;
 
 	data = new0(struct bap_data, 1);
-	data->device = device;
+	/* Hold reference: sessions may outlive device removal */
+	data->device = device ? btd_device_ref(device) : NULL;
 	data->srcs = queue_new();
 	data->snks = queue_new();
 	data->bcast = queue_new();
@@ -3592,6 +3671,11 @@ static int pa_sync(struct bap_data *data)
 
 	DBG("Create PA sync with this source");
 
+	/* Release any sync kept by another session, as it is not needed
+	 * to discover this source.
+	 */
+	queue_foreach(sessions, pa_sync_release_session, data);
+
 	data->listen_io = bt_io_listen(NULL, iso_pa_sync_confirm_cb, data,
 		NULL, &err,
 		BT_IO_OPT_SOURCE_BDADDR,
@@ -3650,7 +3734,8 @@ static void setup_refresh_qos(void *data, void *user_data)
 	setup->qos = *bt_bap_stream_get_qos(stream);
 }
 
-static void iso_do_big_sync(GIOChannel *io, void *user_data)
+static gboolean iso_do_big_sync(GIOChannel *io, GIOCondition cond,
+						void *user_data)
 {
 	GError *err = NULL;
 	struct bap_setup *setup = user_data;
@@ -3659,12 +3744,14 @@ static void iso_do_big_sync(GIOChannel *io, void *user_data)
 	struct bt_iso_qos qos;
 	struct queue *links = bt_bap_stream_io_get_links(setup->stream);
 
-	DBG("PA Sync done");
+	DBG("BIG info received, do BIG sync");
 
-	g_io_channel_unref(data->listen_io);
-	g_io_channel_shutdown(data->listen_io, TRUE, NULL);
-	data->listen_io = io;
-	g_io_channel_ref(data->listen_io);
+	if (data->listen_io != io) {
+		g_io_channel_unref(data->listen_io);
+		g_io_channel_shutdown(data->listen_io, TRUE, NULL);
+		data->listen_io = io;
+		g_io_channel_ref(data->listen_io);
+	}
 
 	/* Append each linked BIS to the BIG sync request */
 	append_setup(setup->stream, &iso_bc_addr);
@@ -3693,6 +3780,20 @@ static void iso_do_big_sync(GIOChannel *io, void *user_data)
 		error("bt_io_bcast_accept: %s", err->message);
 		g_error_free(err);
 	}
+
+	return FALSE;
+}
+
+static void long_pa_sync_confirm_cb(GIOChannel *io, void *user_data)
+{
+	struct bap_setup *setup = user_data;
+	struct bap_data *data = setup->data;
+
+	DBG("Long PA Sync done");
+
+	/* store io and add watch that will call iso_do_big_sync */
+	data->io_id = g_io_add_watch(io, G_IO_OUT, iso_do_big_sync,
+							setup);
 }
 
 static void pa_and_big_sync(struct bap_setup *setup)
@@ -3700,8 +3801,27 @@ static void pa_and_big_sync(struct bap_setup *setup)
 	GError *err = NULL;
 	struct bap_data *bap_data = setup->data;
 
+	if (bap_data->pa_synced) {
+		DBG("Reuse PA sync with this source");
+
+		/* The sync is in use from now on, so it is not released
+		 * while the BIG sync is being set up.
+		 */
+		bap_data->pa_synced = false;
+
+		if (bap_data->pa_timer) {
+			g_source_remove(bap_data->pa_timer);
+			bap_data->pa_timer = 0;
+		}
+
+		bap_data->io_id = g_io_add_watch(bap_data->listen_io, G_IO_OUT,
+							iso_do_big_sync, setup);
+		return;
+	}
+
 	DBG("Create PA sync with this source");
-	bap_data->listen_io = bt_io_listen(NULL, iso_do_big_sync, setup,
+
+	bap_data->listen_io = bt_io_listen(NULL, long_pa_sync_confirm_cb, setup,
 			NULL, &err,
 			BT_IO_OPT_SOURCE_BDADDR,
 			btd_adapter_get_address(bap_data->adapter),
@@ -3774,7 +3894,6 @@ static int bap_bcast_probe(struct btd_service *service)
 	data = bap_data_new(device);
 	data->service = service;
 	data->adapter = adapter;
-	data->device = device;
 	data->bap = bap;
 	data->bcast_snks = queue_new();
 
@@ -3871,6 +3990,7 @@ static int bap_probe(struct btd_service *service)
 					btd_device_get_gatt_db(device));
 	if (!data->bap) {
 		error("Unable to create BAP instance");
+		btd_device_unref(data->device);
 		free(data);
 		return -EINVAL;
 	}
