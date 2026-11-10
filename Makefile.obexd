@@ -42,7 +42,11 @@ obexd_builtin_modules += ftp
 obexd_builtin_sources += obexd/plugins/ftp.c obexd/plugins/ftp.h
 
 obexd_builtin_modules += bip_avrcp
-obexd_builtin_sources += obexd/plugins/bip-avrcp.c
+obexd_builtin_sources += obexd/plugins/bip-avrcp.c \
+			obexd/plugins/cover-art-image.c \
+			obexd/plugins/cover-art-image.h
+obexd_builtin_sources += obexd/plugins/cover-art-descriptor.c \
+			obexd/plugins/cover-art-descriptor.h
 
 obexd_builtin_modules += irmc
 obexd_builtin_sources += obexd/plugins/irmc.c
@@ -107,7 +111,7 @@ obexd_src_obexd_LDADD = lib/libbluetooth-internal.la \
 			gdbus/libgdbus-internal.la \
 			src/libshared-glib.la \
 			$(ICAL_LIBS) $(DBUS_LIBS) $(LIBEBOOK_LIBS) \
-			$(LIBEDATASERVER_LIBS) $(GLIB_LIBS) -ldl
+			$(LIBEDATASERVER_LIBS) $(GLIB_LIBS) $(COVER_ART_LIBS) -ldl
 
 if EXTERNAL_PLUGINS
 obexd_src_obexd_LDFLAGS = $(AM_LDFLAGS) -Wl,--export-dynamic
@@ -116,7 +120,7 @@ obexd_src_obexd_LDFLAGS =
 endif
 
 obexd_src_obexd_CPPFLAGS = $(AM_CPPFLAGS) $(GLIB_CFLAGS) $(DBUS_CFLAGS) \
-				$(ICAL_CFLAGS) -DOBEX_PLUGIN_BUILTIN \
+				$(ICAL_CFLAGS) $(COVER_ART_CFLAGS) -DOBEX_PLUGIN_BUILTIN \
 				-DPLUGINDIR=\""$(obex_plugindir)"\" \
 				-D_FILE_OFFSET_BITS=64 \
 				-I$(builddir)/obexd/src
