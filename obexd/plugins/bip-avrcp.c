@@ -33,6 +33,8 @@
 #include "obexd/src/mimetype.h"
 #include "obexd/src/log.h"
 #include "obexd/src/manager.h"
+#include "cover-art-image.h"
+#include "cover-art-descriptor.h"
 
 /* AVRCP 1.6 section 5.14.2.1 */
 #define COVER_ART_TARGET ((const uint8_t *) \
@@ -45,8 +47,7 @@
 #define MPRIS_PLAYER_INTERFACE "org.mpris.MediaPlayer2.Player"
 
 struct cover_art_object {
-	int fd;
-	char *contents;		/* Properties document, NULL for images */
+	GBytes *contents;
 	size_t size;
 	size_t offset;
 };
@@ -135,56 +136,39 @@ done:
 /*
  * Controllers fetch lazily and commonly ask for the previous track's
  * handle after a track change, when the player no longer advertises that
- * art URL. Remember the last few resolved handles so those requests can
- * still be answered.
+ * art URL. Keep the converted bytes, not source paths: players may delete
+ * their old image files before a delayed request arrives.
  */
 #define COVER_ART_CACHE_SIZE 4
 
 struct cover_art_entry {
 	char handle[8];
-	char *filename;
+	GBytes *contents, *thumbnail;
+	unsigned int width, height;
 };
 
 static GQueue cover_art_cache = G_QUEUE_INIT;
+static unsigned int cover_art_sessions;
 
-static void cover_art_cache_add(const char *handle, const char *filename)
+static void cover_art_entry_free(struct cover_art_entry *entry)
 {
-	struct cover_art_entry *entry;
-	GList *l;
-
-	for (l = cover_art_cache.head; l != NULL; l = g_list_next(l)) {
-		entry = l->data;
-
-		if (!g_str_equal(entry->handle, handle))
-			continue;
-
-		g_queue_unlink(&cover_art_cache, l);
-		g_queue_push_head_link(&cover_art_cache, l);
-		return;
-	}
-
-	if (g_queue_get_length(&cover_art_cache) >= COVER_ART_CACHE_SIZE) {
-		entry = g_queue_pop_tail(&cover_art_cache);
-		g_free(entry->filename);
-		g_free(entry);
-	}
-
-	entry = g_new0(struct cover_art_entry, 1);
-	strncpy(entry->handle, handle, sizeof(entry->handle) - 1);
-	entry->filename = g_strdup(filename);
-
-	g_queue_push_head(&cover_art_cache, entry);
+	g_bytes_unref(entry->contents);
+	g_bytes_unref(entry->thumbnail);
+	g_free(entry);
 }
 
-static char *cover_art_cache_lookup(const char *handle)
+static struct cover_art_entry *cover_art_cache_lookup(const char *handle)
 {
 	GList *l;
 
 	for (l = cover_art_cache.head; l != NULL; l = g_list_next(l)) {
 		struct cover_art_entry *entry = l->data;
 
-		if (g_str_equal(entry->handle, handle))
-			return g_strdup(entry->filename);
+		if (g_str_equal(entry->handle, handle)) {
+			g_queue_unlink(&cover_art_cache, l);
+			g_queue_push_head_link(&cover_art_cache, l);
+			return entry;
+		}
 	}
 
 	return NULL;
@@ -194,10 +178,8 @@ static void cover_art_cache_clear(void)
 {
 	struct cover_art_entry *entry;
 
-	while ((entry = g_queue_pop_head(&cover_art_cache)) != NULL) {
-		g_free(entry->filename);
-		g_free(entry);
-	}
+	while ((entry = g_queue_pop_head(&cover_art_cache)) != NULL)
+		cover_art_entry_free(entry);
 }
 
 /*
@@ -214,10 +196,6 @@ static char *cover_art_lookup(const char *handle)
 
 	if (handle == NULL)
 		return NULL;
-
-	filename = cover_art_cache_lookup(handle);
-	if (filename != NULL)
-		return filename;
 
 	if (conn == NULL)
 		return NULL;
@@ -258,12 +236,8 @@ static char *cover_art_lookup(const char *handle)
 
 		cover_art_handle(url, h, sizeof(h));
 
-		if (g_str_equal(h, handle)) {
+		if (g_str_equal(h, handle))
 			filename = g_filename_from_uri(url, NULL, NULL);
-
-			if (filename != NULL)
-				cover_art_cache_add(handle, filename);
-		}
 
 		g_free(url);
 
@@ -277,102 +251,120 @@ done:
 	return filename;
 }
 
-static void *cover_art_open_image(const char *name, int oflag, mode_t mode,
-					void *context, size_t *size, int *err)
+static struct cover_art_entry *cover_art_load(const char *handle, int *err)
 {
-	struct cover_art_object *obj;
+	struct cover_art_entry *entry = cover_art_cache_lookup(handle);
+	struct cover_art_image native, thumbnail;
 	struct stat st;
 	char *filename;
-	int fd;
+	int fd, ret;
 
-	if (oflag != O_RDONLY) {
-		if (err)
-			*err = -EPERM;
-		return NULL;
-	}
-
-	filename = cover_art_lookup(name);
+	if (entry)
+		return entry;
+	filename = cover_art_lookup(handle);
 	if (filename == NULL) {
-		DBG("no image for handle %s", name ? name : "(none)");
-		if (err)
-			*err = -ENOENT;
+		*err = -ENOENT;
 		return NULL;
 	}
-
-	fd = open(filename, O_RDONLY | O_CLOEXEC);
+	fd = open(filename, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
 	g_free(filename);
-
 	if (fd < 0) {
-		if (err)
-			*err = -errno;
+		*err = -errno;
 		return NULL;
 	}
-
 	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) ||
 					st.st_size > COVER_ART_MAX_SIZE) {
 		close(fd);
-		if (err)
-			*err = -EINVAL;
+		*err = -EINVAL;
 		return NULL;
 	}
-
-	obj = g_new0(struct cover_art_object, 1);
-	obj->fd = fd;
-	obj->size = st.st_size;
-
-	if (size)
-		*size = obj->size;
-
-	if (err)
-		*err = 0;
-
-	return obj;
+	ret = cover_art_image_load(fd, &native, &thumbnail);
+	close(fd);
+	if (ret < 0) {
+		*err = ret;
+		return NULL;
+	}
+	/* Bound both retained entries and the memory held by each entry. */
+	if (native.size + thumbnail.size > COVER_ART_MAX_SIZE) {
+		g_free(native.data);
+		g_free(thumbnail.data);
+		*err = -EFBIG;
+		return NULL;
+	}
+	entry = g_new0(struct cover_art_entry, 1);
+	strncpy(entry->handle, handle, sizeof(entry->handle) - 1);
+	entry->contents = g_bytes_new_take(native.data, native.size);
+	entry->thumbnail = g_bytes_new_take(thumbnail.data, thumbnail.size);
+	entry->width = native.width;
+	entry->height = native.height;
+	if (g_queue_get_length(&cover_art_cache) >= COVER_ART_CACHE_SIZE)
+		cover_art_entry_free(g_queue_pop_tail(&cover_art_cache));
+	g_queue_push_head(&cover_art_cache, entry);
+	return entry;
 }
 
-/*
- * Parse the JPEG start-of-frame marker for the image dimensions, which the
- * image-properties document has to carry.
- */
-static gboolean jpeg_dimensions(int fd, unsigned int *width,
-						unsigned int *height)
+static void *cover_art_open_image(const char *name, int oflag, mode_t mode,
+					void *context, size_t *size, int *err)
 {
-	uint8_t buf[4];
-	off_t pos = 2;
+	struct obex_session *os = context;
+	struct cover_art_object *obj;
+	struct cover_art_entry *entry;
+	GBytes *contents, *converted = NULL;
+	struct cover_art_request request;
+	struct cover_art_image image;
+	const void *descriptor;
+	size_t len;
+	int ret = 0;
 
-	if (lseek(fd, 0, SEEK_SET) < 0)
-		return FALSE;
-
-	if (read(fd, buf, 2) != 2 || buf[0] != 0xff || buf[1] != 0xd8)
-		return FALSE;
-
-	while (lseek(fd, pos, SEEK_SET) >= 0 && read(fd, buf, 4) == 4) {
-		uint16_t len = (buf[2] << 8) | buf[3];
-
-		if (buf[0] != 0xff)
-			return FALSE;
-
-		/* SOF0..SOF3, SOF5..SOF7, SOF9..SOF11, SOF13..SOF15 */
-		if (buf[1] >= 0xc0 && buf[1] <= 0xcf &&
-				buf[1] != 0xc4 && buf[1] != 0xc8 &&
-				buf[1] != 0xcc) {
-			uint8_t sof[5];
-
-			if (read(fd, sof, 5) != 5)
-				return FALSE;
-
-			*height = (sof[1] << 8) | sof[2];
-			*width = (sof[3] << 8) | sof[4];
-
-			return TRUE;
-		}
-
-		if (len < 2)
-			return FALSE;
-
-		pos += 2 + len;
+	if (oflag != O_RDONLY) {
+		ret = -EPERM;
+		goto failed;
 	}
+	entry = cover_art_load(name, &ret);
+	if (!entry)
+		goto failed;
+	contents = g_str_equal(obex_get_type(os), "x-bt/img-thm") ?
+				entry->thumbnail : entry->contents;
+	if (g_str_equal(obex_get_type(os), "x-bt/img-img")) {
+		descriptor = obex_get_img_descriptor(os, &len);
+		ret = cover_art_descriptor_parse(descriptor, len,
+				entry->width, entry->height, &request);
+		if (ret < 0)
+			goto failed;
+		if (request.width == 200 && request.height == 200 &&
+				request.transform == COVER_ART_FILL)
+			contents = entry->thumbnail;
+		if ((contents == entry->contents &&
+				(request.width != entry->width ||
+				request.height != entry->height)) ||
+				(request.maxsize && g_bytes_get_size(contents) >
+				request.maxsize)) {
+			ret = cover_art_image_resize(
+					g_bytes_get_data(entry->contents, NULL),
+					g_bytes_get_size(entry->contents),
+					request.width, request.height,
+					request.transform, request.maxsize, &image);
+			if (ret < 0)
+				goto failed;
+			converted = g_bytes_new_take(image.data, image.size);
+			contents = converted;
+		}
+	}
+	obj = g_new0(struct cover_art_object, 1);
+	obj->contents = g_bytes_ref(contents);
+	if (converted)
+		g_bytes_unref(converted);
+	obj->size = g_bytes_get_size(contents);
+	if (size)
+		*size = obj->size;
+	if (err)
+		*err = 0;
+	return obj;
 
-	return FALSE;
+failed:
+	if (err)
+		*err = ret;
+	return NULL;
 }
 
 static void *cover_art_open_properties(const char *name, int oflag,
@@ -380,32 +372,27 @@ static void *cover_art_open_properties(const char *name, int oflag,
 					size_t *size, int *err)
 {
 	struct cover_art_object *obj;
-	unsigned int width = 0, height = 0;
+	struct cover_art_entry *entry;
 	GString *props;
 
 	obj = cover_art_open_image(name, oflag, mode, context, NULL, err);
 	if (obj == NULL)
 		return NULL;
 
-	if (!jpeg_dimensions(obj->fd, &width, &height)) {
-		close(obj->fd);
-		g_free(obj);
-		if (err)
-			*err = -EINVAL;
-		return NULL;
-	}
-
+	entry = cover_art_cache_lookup(name);
 	props = g_string_new("<image-properties version=\"1.0\" handle=\"");
 	g_string_append_printf(props, "%s\">\n", name);
 	g_string_append_printf(props,
-		"<native encoding=\"JPEG\" pixel=\"%ux%u\" size=\"%zu\"/>\n",
-		width, height, obj->size);
+		"<native encoding=\"JPEG\" pixel=\"%u*%u\" size=\"%zu\"/>\n",
+		entry->width, entry->height, obj->size);
+	g_string_append(props,
+		"<variant encoding=\"JPEG\" pixel=\"1*1-4096*4096\" "
+		"transformation=\"stretch fill crop\"/>\n");
 	g_string_append(props, "</image-properties>\n");
 
-	close(obj->fd);
-	obj->fd = -1;
+	g_bytes_unref(obj->contents);
 	obj->size = props->len;
-	obj->contents = g_string_free(props, FALSE);
+	obj->contents = g_bytes_new_take(g_string_free(props, FALSE), obj->size);
 
 	if (size)
 		*size = obj->size;
@@ -416,19 +403,11 @@ static void *cover_art_open_properties(const char *name, int oflag,
 static ssize_t cover_art_read(void *object, void *buf, size_t count)
 {
 	struct cover_art_object *obj = object;
-	ssize_t len;
+	size_t len = MIN(count, obj->size - obj->offset);
 
-	if (obj->contents != NULL) {
-		len = MIN(count, obj->size - obj->offset);
-		memcpy(buf, obj->contents + obj->offset, len);
-		obj->offset += len;
-
-		return len;
-	}
-
-	len = read(obj->fd, buf, count);
-	if (len < 0)
-		return -errno;
+	memcpy(buf, (const char *) g_bytes_get_data(obj->contents, NULL) +
+						obj->offset, len);
+	obj->offset += len;
 
 	return len;
 }
@@ -437,10 +416,7 @@ static int cover_art_close(void *object)
 {
 	struct cover_art_object *obj = object;
 
-	if (obj->fd >= 0)
-		close(obj->fd);
-
-	g_free(obj->contents);
+	g_bytes_unref(obj->contents);
 	g_free(obj);
 
 	return 0;
@@ -450,12 +426,13 @@ static void *cover_art_connect(struct obex_session *os, int *err)
 {
 	DBG("");
 
+	cover_art_sessions++;
 	manager_register_session(os);
 
 	if (err)
 		*err = 0;
 
-	return NULL;
+	return os;
 }
 
 static void cover_art_disconnect(struct obex_session *os, void *user_data)
@@ -463,6 +440,8 @@ static void cover_art_disconnect(struct obex_session *os, void *user_data)
 	DBG("");
 
 	manager_unregister_session(os);
+	if (--cover_art_sessions == 0)
+		cover_art_cache_clear();
 }
 
 static int cover_art_get(struct obex_session *os, void *user_data)
@@ -479,7 +458,7 @@ static int cover_art_get(struct obex_session *os, void *user_data)
 	return obex_get_stream_start(os, handle);
 }
 
-static const struct obex_service_driver cover_art = {
+static struct obex_service_driver cover_art = {
 	.name = "AVRCP Cover Art server",
 	.service = OBEX_BIP,
 	.target = COVER_ART_TARGET,
@@ -498,11 +477,7 @@ static const struct obex_mime_type_driver properties = {
 	.read = cover_art_read,
 };
 
-/*
- * The linked thumbnail is served in the image's native encoding rather
- * than the 200x200 JPEG the specification describes: scaling would mean
- * decoding images inside obexd. Controllers seen so far accept it.
- */
+/* Linked thumbnails use the common AVRCP 200x200 JPEG format. */
 static const struct obex_mime_type_driver thumbnail = {
 	.target = COVER_ART_TARGET,
 	.target_size = COVER_ART_TARGET_SIZE,

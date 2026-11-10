@@ -1338,7 +1338,7 @@ static uint8_t avrcp_handle_get_element_attributes(struct avrcp *session,
 			 * attribute shall only be included if a valid
 			 * image handle exists for the current track.
 			 * Returning it with an empty value makes some
-			 * head units (e.g. VW MIB) give up on Cover Art
+			 * head units give up on Cover Art
 			 * for the rest of the session.
 			 */
 			if (id == AVRCP_MEDIA_ATTRIBUTE_IMG_HANDLE &&

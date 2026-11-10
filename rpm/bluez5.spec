@@ -97,6 +97,8 @@ Conflicts:  bluez-tools
 
 %package obexd
 Summary:    OBEX server (bluez5)
+BuildRequires: pkgconfig(libpng)
+BuildRequires: pkgconfig(libjpeg)
 Requires:   %{name} = %{version}-%{release}
 Requires:   obex-capability
 Conflicts:  obexd
