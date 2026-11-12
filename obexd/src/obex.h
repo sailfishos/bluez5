@@ -21,6 +21,8 @@ struct obex_session;
 int obex_get_stream_start(struct obex_session *os, const char *filename);
 int obex_put_stream_start(struct obex_session *os, const char *filename);
 const char *obex_get_name(struct obex_session *os);
+const char *obex_get_img_handle(struct obex_session *os);
+const void *obex_get_img_descriptor(struct obex_session *os, size_t *len);
 const char *obex_get_destname(struct obex_session *os);
 void obex_set_name(struct obex_session *os, const char *name);
 ssize_t obex_get_size(struct obex_session *os);
