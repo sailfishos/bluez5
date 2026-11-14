@@ -26,6 +26,8 @@
 #include <glib.h>
 
 #include "gdbus/gdbus.h"
+#include "bluetooth/bluetooth.h"
+#include "bluetooth/uuid.h"
 
 #define BLUEZ_BUS_NAME "org.bluez"
 #define BLUEZ_PATH "/org/bluez"
@@ -57,6 +59,7 @@ static DBusConnection *session = NULL;
 static GDBusClient *client = NULL;
 static GDBusClient *obex_client;
 static GSList *players = NULL;
+static GSList *remote_proxies;
 static GSList *transports = NULL;
 static GSList *obex_sessions;
 
@@ -76,6 +79,7 @@ struct obex_session {
 };
 
 struct player {
+	gboolean hidden;
 	char *bus_name;
 	DBusConnection *conn;
 	GDBusProxy *proxy;
@@ -887,7 +891,7 @@ static const char *status_to_playback(const char *status)
 
 static const char *player_get_status(struct player *player)
 {
-	const char *status;
+	const char *status, *uuid;
 	DBusMessageIter value;
 
 	if (g_dbus_proxy_get_property(player->proxy, "Status", &value)) {
@@ -896,6 +900,15 @@ static const char *player_get_status(struct player *player)
 	}
 
 	if (player->transport == NULL)
+		goto done;
+
+	if (!g_dbus_proxy_get_property(player->transport, "UUID", &value))
+		goto done;
+
+	dbus_message_iter_get_basic(&value, &uuid);
+
+	/* Only incoming audio indicates playback by the remote player. */
+	if (strcasecmp(uuid, A2DP_SINK_UUID) != 0)
 		goto done;
 
 	if (!g_dbus_proxy_get_property(player->transport, "State", &value))
@@ -1950,6 +1963,7 @@ static char *mpris_busname(char *name)
 static GDBusProxy *find_transport_by_path(const char *path)
 {
 	GSList *l;
+	GDBusProxy *match = NULL;
 
 	for (l = transports; l; l = l->next) {
 		GDBusProxy *transport = l->data;
@@ -1961,11 +1975,25 @@ static GDBusProxy *find_transport_by_path(const char *path)
 
 		dbus_message_iter_get_basic(&iter, &value);
 
-		if (strcmp(path, value) == 0)
+		if (strcmp(path, value) != 0)
+			continue;
+
+		if (match == NULL)
+			match = transport;
+
+		if (!g_dbus_proxy_get_property(transport, "UUID", &iter))
+			continue;
+
+		dbus_message_iter_get_basic(&iter, &value);
+
+		if (strcasecmp(value, A2DP_SINK_UUID) == 0)
 			return transport;
+
+		if (strcasecmp(value, A2DP_SOURCE_UUID) == 0)
+			match = transport;
 	}
 
-	return NULL;
+	return match;
 }
 
 static struct player *find_player(GDBusProxy *proxy)
@@ -2102,6 +2130,54 @@ static struct obex_session *create_obex_session(GDBusProxy *device,
 	return session;
 }
 
+static gboolean transport_is_source(GDBusProxy *transport)
+{
+	DBusMessageIter iter;
+	const char *uuid;
+
+	if (!transport || !g_dbus_proxy_get_property(transport, "UUID", &iter))
+		return FALSE;
+
+	dbus_message_iter_get_basic(&iter, &uuid);
+
+	return strcasecmp(uuid, A2DP_SOURCE_UUID) == 0;
+}
+
+static void update_player_transport(struct player *player)
+{
+	const char *path = g_dbus_proxy_get_path(player->device);
+	GDBusProxy *transport = find_transport_by_path(path);
+	gboolean hidden = transport_is_source(transport);
+
+	if (transport != player->transport) {
+		if (player->transport)
+			g_dbus_proxy_unref(player->transport);
+
+		player->transport = transport ?
+					g_dbus_proxy_ref(transport) : NULL;
+		g_dbus_emit_property_changed(player->conn, MPRIS_PLAYER_PATH,
+				MPRIS_PLAYER_INTERFACE, "PlaybackStatus");
+		g_dbus_emit_property_changed(player->conn, MPRIS_PLAYER_PATH,
+					MPRIS_PLAYER_INTERFACE, "Volume");
+	}
+
+	if (player->hidden == hidden)
+		return;
+
+	/* Keep the connection and pending calls alive while hiding the name. */
+	if (hidden) {
+		int result;
+
+		result = dbus_bus_release_name(player->conn, player->bus_name,
+									NULL);
+		if (result != DBUS_RELEASE_NAME_REPLY_RELEASED)
+			return;
+	} else if (!g_dbus_request_name(player->conn, player->bus_name, NULL))
+		return;
+
+	player->hidden = hidden;
+}
+
 static void register_player(GDBusProxy *proxy)
 {
 	struct player *player;
@@ -2114,6 +2190,10 @@ static void register_player(GDBusProxy *proxy)
 		return;
 
 	dbus_message_iter_get_basic(&iter, &path);
+
+	transport = find_transport_by_path(path);
+	if (transport_is_source(transport))
+		return;
 
 	device = g_dbus_proxy_new(client, path, "org.bluez.Device1");
 	if (device == NULL)
@@ -2208,7 +2288,6 @@ static void register_player(GDBusProxy *proxy)
 		goto fail;
 	}
 
-	transport = find_transport_by_path(path);
 	if (transport)
 		player->transport = g_dbus_proxy_ref(transport);
 
@@ -2236,28 +2315,15 @@ static struct player *find_player_by_device(const char *device)
 
 static void register_transport(GDBusProxy *proxy)
 {
-	struct player *player;
 	DBusMessageIter iter;
-	const char *path;
 
 	if (g_slist_find(transports, proxy) != NULL)
-		return;
-
-	if (!g_dbus_proxy_get_property(proxy, "Volume", &iter))
 		return;
 
 	if (!g_dbus_proxy_get_property(proxy, "Device", &iter))
 		return;
 
-	dbus_message_iter_get_basic(&iter, &path);
-
 	transports = g_slist_append(transports, proxy);
-
-	player = find_player_by_device(path);
-	if (player == NULL || player->transport != NULL)
-		return;
-
-	player->transport = g_dbus_proxy_ref(proxy);
 }
 
 static struct player *find_player_by_item(const char *item)
@@ -2367,6 +2433,60 @@ static void register_item(struct player *player, GDBusProxy *proxy)
 	g_dbus_send_message(player->conn, signal);
 }
 
+static void register_remote_players(void)
+{
+	GSList *l, *child;
+
+	for (l = remote_proxies; l; l = l->next) {
+		GDBusProxy *proxy = l->data;
+		struct player *player;
+
+		if (strcmp(g_dbus_proxy_get_interface(proxy),
+						BLUEZ_MEDIA_PLAYER_INTERFACE))
+			continue;
+
+		player = find_player(proxy);
+		if (player) {
+			update_player_transport(player);
+			continue;
+		}
+
+		register_player(proxy);
+		player = find_player(proxy);
+		if (player == NULL)
+			continue;
+
+		/* Restore browsing objects received before publication. */
+		for (child = remote_proxies; child; child = child->next) {
+			GDBusProxy *object = child->data;
+			const char *interface;
+			const char *path = g_dbus_proxy_get_path(object);
+
+			interface = g_dbus_proxy_get_interface(object);
+
+			if (!strcmp(interface,
+						BLUEZ_MEDIA_FOLDER_INTERFACE) &&
+						find_player(object) == player)
+				register_tracklist(object);
+			else if (!strcmp(interface,
+						BLUEZ_MEDIA_ITEM_INTERFACE) &&
+					find_player_by_item(path) == player)
+				register_playlist(player, object);
+		}
+
+		for (child = remote_proxies; child; child = child->next) {
+			GDBusProxy *item = child->data;
+			const char *path = g_dbus_proxy_get_path(item);
+
+			if (!strcmp(g_dbus_proxy_get_interface(item),
+						BLUEZ_MEDIA_ITEM_INTERFACE) &&
+						player->playlist != item &&
+					find_player_by_item(path) == player)
+				register_item(player, item);
+		}
+	}
+}
+
 static void proxy_added(GDBusProxy *proxy, void *user_data)
 {
 	const char *interface;
@@ -2374,6 +2494,12 @@ static void proxy_added(GDBusProxy *proxy, void *user_data)
 
 	interface = g_dbus_proxy_get_interface(proxy);
 	path = g_dbus_proxy_get_path(proxy);
+
+	if (!strcmp(interface, BLUEZ_MEDIA_PLAYER_INTERFACE) ||
+			!strcmp(interface, BLUEZ_MEDIA_FOLDER_INTERFACE) ||
+			!strcmp(interface, BLUEZ_MEDIA_ITEM_INTERFACE))
+		remote_proxies = g_slist_append(remote_proxies,
+						g_dbus_proxy_ref(proxy));
 
 	if (!strcmp(interface, BLUEZ_ADAPTER_INTERFACE)) {
 		char buf[32] = { 0 };
@@ -2392,10 +2518,11 @@ static void proxy_added(GDBusProxy *proxy, void *user_data)
 		list_names(session);
 	} else if (!strcmp(interface, BLUEZ_MEDIA_PLAYER_INTERFACE)) {
 		printf("Bluetooth Player %s found\n", path);
-		register_player(proxy);
+		register_remote_players();
 	} else if (!strcmp(interface, BLUEZ_MEDIA_TRANSPORT_INTERFACE)) {
 		printf("Bluetooth Transport %s found\n", path);
 		register_transport(proxy);
+		register_remote_players();
 	} else if (!strcmp(interface, BLUEZ_MEDIA_FOLDER_INTERFACE)) {
 		printf("Bluetooth Folder %s found\n", path);
 		register_tracklist(proxy);
@@ -2456,6 +2583,11 @@ static void unregister_transport(GDBusProxy *proxy)
 	if (player == NULL)
 		return;
 
+	if (adapter) {
+		update_player_transport(player);
+		return;
+	}
+
 	g_dbus_proxy_unref(player->transport);
 	player->transport = NULL;
 }
@@ -2512,8 +2644,10 @@ static void proxy_removed(GDBusProxy *proxy, void *user_data)
 	const char *interface;
 	const char *path;
 
-	if (adapter == NULL)
-		return;
+	if (g_slist_find(remote_proxies, proxy)) {
+		remote_proxies = g_slist_remove(remote_proxies, proxy);
+		g_dbus_proxy_unref(proxy);
+	}
 
 	interface = g_dbus_proxy_get_interface(proxy);
 	path = g_dbus_proxy_get_path(proxy);
@@ -2536,6 +2670,8 @@ static void proxy_removed(GDBusProxy *proxy, void *user_data)
 	} else if (strcmp(interface, BLUEZ_MEDIA_TRANSPORT_INTERFACE) == 0) {
 		printf("Bluetooth Transport %s removed\n", path);
 		unregister_transport(proxy);
+		if (adapter)
+			register_remote_players();
 	} else if (strcmp(interface, BLUEZ_MEDIA_ITEM_INTERFACE) == 0) {
 		struct player *player;
 
@@ -2687,6 +2823,8 @@ static void player_property_changed(GDBusProxy *proxy, const char *name,
 	const char *property;
 	uint32_t position;
 	uint64_t value;
+
+	register_remote_players();
 
 	player = find_player(proxy);
 	if (player == NULL)
@@ -3043,6 +3181,7 @@ int main(int argc, char *argv[])
 	g_dbus_remove_watch(session, signal_watch);
 
 	g_dbus_client_unref(client);
+	g_slist_free_full(remote_proxies, (GDestroyNotify) g_dbus_proxy_unref);
 
 	dbus_connection_unref(session);
 	dbus_connection_unref(sys);
