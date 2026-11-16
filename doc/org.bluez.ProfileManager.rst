@@ -123,6 +123,16 @@ Possible options values:
 
 	Profile features (for SDP record)
 
+:uint8 SupportedMessageTypes:
+
+	MAP Message Access Server (MAS) message types (for SDP record).
+	Defaults to 0x0f.
+
+:uint32 SupportedFeatures:
+
+	MAP Message Access Server (MAS) supported features (for SDP record).
+	Defaults to 0x0000007f.
+
 Possible errors:
 
 :org.bluez.Error.InvalidArguments:

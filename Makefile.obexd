@@ -56,6 +56,7 @@ EXTRA_DIST += obexd/plugins/phonebook-dummy.c obexd/plugins/phonebook-ebook.c \
 obexd_builtin_modules += mas
 obexd_builtin_sources += obexd/plugins/mas.c obexd/src/map_ap.h \
 				obexd/plugins/messages.h \
+				obexd/plugins/map-mns.c obexd/plugins/map-mns.h \
 				obexd/plugins/messages-dummy.c
 
 obexd_builtin_modules += mns

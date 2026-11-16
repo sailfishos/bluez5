@@ -163,6 +163,7 @@ static void os_reset_session(struct obex_session *os)
 	os->offset = 0;
 	os->size = OBJECT_SIZE_DELETE;
 	os->headers_sent = FALSE;
+	os->put_pending = FALSE;
 	os->checked = FALSE;
 }
 
@@ -261,6 +262,11 @@ static void cmd_connect(GObex *obex, GObexPacket *req, void *user_data)
 	GObexHeader *hdr;
 	int err;
 
+	if (os->put_pending) {
+		os_set_response(os, -EBUSY);
+		return;
+	}
+
 	DBG("");
 
 	print_event(G_OBEX_OP_CONNECT, -1);
@@ -277,6 +283,7 @@ static void cmd_connect(GObex *obex, GObexPacket *req, void *user_data)
 
 	os->service_data = os->service->connect(os, &err);
 	if (err < 0) {
+		os->service = NULL;
 		os_set_response(os, err);
 		return;
 	}
@@ -304,6 +311,9 @@ static void cmd_disconnect(GObex *obex, GObexPacket *req, void *user_data)
 	DBG("session %p", os);
 
 	print_event(G_OBEX_OP_DISCONNECT, -1);
+
+	if (os->put_pending)
+		os_reset_session(os);
 
 	os->cmd = G_OBEX_OP_DISCONNECT;
 
@@ -403,6 +413,40 @@ static void transfer_complete(GObex *obex, GError *err, gpointer user_data)
 
 reset:
 	os_reset_session(os);
+}
+
+void obex_put_complete(struct obex_session *os, int err, const char *name)
+{
+	if (!os->put_pending)
+		return;
+
+	if (err < 0) {
+		os->aborted = TRUE;
+		os_set_response(os, err);
+	} else {
+		g_obex_send_rsp(os->obex, G_OBEX_RSP_SUCCESS, NULL,
+				G_OBEX_HDR_NAME, name, G_OBEX_HDR_INVALID);
+	}
+
+	os_reset_session(os);
+}
+
+static void finish_put(GObex *obex, GError *error, gpointer user_data)
+{
+	struct obex_session *os = user_data;
+	int err;
+
+	os->put_pending = TRUE;
+
+	if (os->size != OBJECT_SIZE_UNKNOWN && os->size != os->offset) {
+		obex_put_complete(os, -EBADR, NULL);
+		return;
+	}
+
+	err = os->driver->finish_put(os->object);
+
+	if (err < 0)
+		obex_put_complete(os, err, NULL);
 }
 
 static int driver_get_headers(struct obex_session *os)
@@ -605,6 +649,11 @@ static void cmd_get(GObex *obex, GObexPacket *req, gpointer user_data)
 	struct obex_session *os = user_data;
 	int err;
 
+	if (os->put_pending) {
+		os_set_response(os, -EBUSY);
+		return;
+	}
+
 	DBG("session %p", os);
 
 	print_event(G_OBEX_OP_GET, -1);
@@ -651,6 +700,11 @@ static void cmd_setpath(GObex *obex, GObexPacket *req, gpointer user_data)
 {
 	struct obex_session *os = user_data;
 	int err;
+
+	if (os->put_pending) {
+		os_set_response(os, -EBUSY);
+		return;
+	}
 
 	DBG("");
 
@@ -790,6 +844,11 @@ static void cmd_put(GObex *obex, GObexPacket *req, gpointer user_data)
 	struct obex_session *os = user_data;
 	int err;
 
+	if (os->put_pending) {
+		os_set_response(os, -EBUSY);
+		return;
+	}
+
 	DBG("");
 
 	print_event(G_OBEX_OP_PUT, -1);
@@ -841,8 +900,12 @@ static void cmd_put(GObex *obex, GObexPacket *req, gpointer user_data)
 
 	err = os->service->put(os, os->service_data);
 	if (err == 0) {
-		g_obex_put_rsp(obex, req, recv_data, transfer_complete, os,
-						NULL, G_OBEX_HDR_INVALID);
+		if (os->driver->finish_put)
+			g_obex_put_rsp_deferred(obex, req, recv_data,
+					transfer_complete, finish_put, os);
+		else
+			g_obex_put_rsp(obex, req, recv_data, transfer_complete,
+						os, NULL, G_OBEX_HDR_INVALID);
 		print_event(G_OBEX_OP_PUT, G_OBEX_RSP_CONTINUE);
 		return;
 	}
@@ -889,6 +952,11 @@ static void cmd_action(GObex *obex, GObexPacket *req, gpointer user_data)
 {
 	struct obex_session *os = user_data;
 	int err;
+
+	if (os->put_pending) {
+		os_set_response(os, -EBUSY);
+		return;
+	}
 
 	DBG("");
 

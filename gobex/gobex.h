@@ -104,6 +104,11 @@ guint g_obex_get_req_pkt(GObex *obex, GObexPacket *req,
 			GObexDataConsumer data_func, GObexFunc complete_func,
 			gpointer user_data, GError **err);
 
+/* On a completed upload, hand the final reply to the caller. */
+void g_obex_put_rsp_deferred(GObex *obex, GObexPacket *req,
+			GObexDataConsumer data_func, GObexFunc complete_func,
+			GObexFunc final_func, gpointer user_data);
+
 guint g_obex_put_rsp(GObex *obex, GObexPacket *req,
 			GObexDataConsumer data_func, GObexFunc complete_func,
 			gpointer user_data, GError **err,

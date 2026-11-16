@@ -20,6 +20,7 @@ struct obex_session;
 
 int obex_get_stream_start(struct obex_session *os, const char *filename);
 int obex_put_stream_start(struct obex_session *os, const char *filename);
+void obex_put_complete(struct obex_session *os, int err, const char *name);
 const char *obex_get_name(struct obex_session *os);
 const char *obex_get_destname(struct obex_session *os);
 void obex_set_name(struct obex_session *os, const char *name);

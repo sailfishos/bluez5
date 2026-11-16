@@ -330,3 +330,25 @@ int messages_set_delete(void *session, const char *handle, uint8_t value,
 void messages_abort(void *session)
 {
 }
+
+void messages_get_capabilities(uint8_t *types, uint32_t *features)
+{
+	*types = 0x0f;
+	*features = 0x00000004;
+}
+
+int messages_push_message(void *session, const char *name, unsigned long flags,
+		const size_t *size, messages_push_cb callback, void *user_data)
+{
+	return -ENOSYS;
+}
+
+ssize_t messages_push_write(void *session, const void *buf, size_t count)
+{
+	return -ENOSYS;
+}
+
+int messages_push_end(void *session)
+{
+	return -ENOSYS;
+}

@@ -15,6 +15,8 @@ struct obex_service_driver {
 	uint16_t service;
 	uint8_t channel;
 	uint16_t port;
+	uint8_t supported_message_types;
+	uint32_t supported_features;
 	gboolean secure;
 	const uint8_t *target;
 	unsigned int target_size;
