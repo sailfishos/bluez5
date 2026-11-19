@@ -15,7 +15,6 @@
 #endif
 
 #define _GNU_SOURCE
-#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2325,40 +2324,15 @@ static void vol_flag_notify(const struct l2cap_frame *frame)
 	print_vcs_flag(frame);
 }
 
-static char *name2utf8(const uint8_t *name, uint16_t len)
-{
-	char utf8_name[HCI_MAX_NAME_LENGTH + 2];
-	int i;
-
-	if (g_utf8_validate((const char *) name, len, NULL))
-		return g_strndup((char *) name, len);
-
-	len = MIN(len, sizeof(utf8_name) - 1);
-
-	memset(utf8_name, 0, sizeof(utf8_name));
-	strncpy(utf8_name, (char *) name, len);
-
-	/* Assume ASCII, and replace all non-ASCII with spaces */
-	for (i = 0; utf8_name[i] != '\0'; i++) {
-		if (!isascii(utf8_name[i]))
-			utf8_name[i] = ' ';
-	}
-
-	/* Remove leading and trailing whitespace characters */
-	g_strstrip(utf8_name);
-
-	return g_strdup(utf8_name);
-}
-
 static void print_mp_name(const struct l2cap_frame *frame)
 {
 	char *name;
 
-	name = name2utf8((uint8_t *)frame->data, frame->size);
+	name = str2utf8(frame->data, frame->size);
 
 	print_field("  Media Player Name: %s", name);
 
-	g_free(name);
+	free(name);
 }
 
 static void mp_name_read(const struct l2cap_frame *frame)
@@ -2385,11 +2359,11 @@ static void print_track_title(const struct l2cap_frame *frame)
 {
 	char *name;
 
-	name = name2utf8((uint8_t *)frame->data, frame->size);
+	name = str2utf8(frame->data, frame->size);
 
 	print_field("  Track Title: %s", name);
 
-	g_free(name);
+	free(name);
 }
 
 static void track_title_read(const struct l2cap_frame *frame)
@@ -2520,11 +2494,11 @@ static void print_bearer_name(const struct l2cap_frame *frame)
 {
 	char *name;
 
-	name = name2utf8((uint8_t *)frame->data, frame->size);
+	name = str2utf8(frame->data, frame->size);
 
 	print_field("  Bearer Name: %s", name);
 
-	g_free(name);
+	free(name);
 }
 
 static void bearer_name_read(const struct l2cap_frame *frame)
@@ -2541,11 +2515,11 @@ static void bearer_uci_read(const struct l2cap_frame *frame)
 {
 	char *name;
 
-	name = name2utf8((uint8_t *)frame->data, frame->size);
+	name = str2utf8(frame->data, frame->size);
 
 	print_field("  Bearer Uci Name: %s", name);
 
-	g_free(name);
+	free(name);
 }
 
 static void print_technology_name(const struct l2cap_frame *frame)
@@ -2612,11 +2586,11 @@ static void print_uri_scheme_list(const struct l2cap_frame *frame)
 {
 	char *name;
 
-	name = name2utf8((uint8_t *)frame->data, frame->size);
+	name = str2utf8(frame->data, frame->size);
 
 	print_field("  Uri scheme Name: %s", name);
 
-	g_free(name);
+	free(name);
 }
 
 static void bearer_uri_schemes_list_read(const struct l2cap_frame *frame)
@@ -2726,11 +2700,11 @@ static void print_call_list(const struct l2cap_frame *frame)
 
 	print_field("  call_flag: 0x%x", call_flag);
 
-	call_uri = name2utf8((uint8_t *)frame->data, frame->size);
+	call_uri = str2utf8(frame->data, frame->size);
 
 	print_field("  call_uri: %s", call_uri);
 
-	g_free(call_uri);
+	free(call_uri);
 
 done:
 	if (frame->size)
@@ -2816,11 +2790,11 @@ static void print_target_uri(const struct l2cap_frame *frame)
 
 	print_field("  call_idx: %x", call_idx);
 
-	name = name2utf8((uint8_t *)frame->data, frame->size);
+	name = str2utf8(frame->data, frame->size);
 
 	print_field("  Uri: %s", name);
 
-	g_free(name);
+	free(name);
 
 done:
 	if (frame->size)
@@ -2928,9 +2902,9 @@ static void print_call_cp(const struct l2cap_frame *frame)
 		break;
 	case 0x04:
 		str = "Originate";
-		name = name2utf8((uint8_t *)frame->data, frame->size);
+		name = str2utf8(frame->data, frame->size);
 		print_field("  Operation: %s  Uri: %s", str, name);
-		g_free(name);
+		free(name);
 		break;
 	case 0x05:
 		str = "Join";
@@ -3124,11 +3098,11 @@ static void print_incom_call(const struct l2cap_frame *frame)
 
 	print_field("  Call Index: %u", call_id);
 
-	name = name2utf8((uint8_t *)frame->data, frame->size);
+	name = str2utf8(frame->data, frame->size);
 
 	print_field("  call_string: %s", name);
 
-	g_free(name);
+	free(name);
 
 done:
 	if (frame->size)
@@ -3157,11 +3131,11 @@ static void print_call_friendly_name(const struct l2cap_frame *frame)
 
 	print_field("  Call Index: %u", call_id);
 
-	name = name2utf8((uint8_t *)frame->data, frame->size);
+	name = str2utf8(frame->data, frame->size);
 
 	print_field("  Friendly Name: %s", name);
 
-	g_free(name);
+	free(name);
 
 done:
 	if (frame->size)
@@ -5899,6 +5873,64 @@ static const char *att_opcode_to_str(uint8_t opcode)
 	return "Unknown";
 }
 
+/*
+ * ATT responses use the request opcode plus one, except for an Error
+ * Response which names the request it rejects. Only one request may be
+ * outstanding on a bearer, so the opcode itself identifies the transaction.
+ */
+static void att_req_str(uint16_t handle, uint16_t key, uint8_t opcode,
+			const void *data, uint16_t size, struct timeval *tv,
+			size_t num, char *str, size_t len)
+{
+	str[0] = '\0';
+
+	switch (opcode) {
+	/* Requests, and the indication which is answered by a confirmation */
+	case 0x02:
+	case 0x04:
+	case 0x06:
+	case 0x08:
+	case 0x0a:
+	case 0x0c:
+	case 0x0e:
+	case 0x10:
+	case 0x12:
+	case 0x16:
+	case 0x18:
+	case 0x1d:
+	case 0x20:
+		packet_req_add(handle, key, PACKET_PROTO_ATT, opcode, tv,
+								num);
+		return;
+	case 0x01:
+		/* The rejected request is named in the response */
+		if (size < 1)
+			return;
+		packet_req_str(handle, key, PACKET_PROTO_ATT,
+				*((const uint8_t *) data), tv, str, len);
+		return;
+	case 0x1e:
+		packet_req_str(handle, key, PACKET_PROTO_ATT, 0x1d, tv, str,
+									len);
+		return;
+	case 0x03:
+	case 0x05:
+	case 0x07:
+	case 0x09:
+	case 0x0b:
+	case 0x0d:
+	case 0x0f:
+	case 0x11:
+	case 0x13:
+	case 0x17:
+	case 0x19:
+	case 0x21:
+		packet_req_str(handle, key, PACKET_PROTO_ATT, opcode - 1, tv,
+								str, len);
+		return;
+	}
+}
+
 void att_packet(uint16_t index, bool in, uint16_t handle, uint16_t cid,
 					const void *data, uint16_t size)
 {
@@ -5906,6 +5938,9 @@ void att_packet(uint16_t index, bool in, uint16_t handle, uint16_t cid,
 	uint8_t opcode = *((const uint8_t *) data);
 	const struct att_opcode_data *opcode_data = NULL;
 	const char *opcode_color, *opcode_str;
+	char req_str[32];
+	struct timeval tv;
+	size_t num;
 	int i;
 
 	if (size < 1) {
@@ -5935,8 +5970,14 @@ void att_packet(uint16_t index, bool in, uint16_t handle, uint16_t cid,
 		opcode_str = "Unknown";
 	}
 
+	packet_get_context(&tv, &num);
+	att_req_str(handle, l2cap_chan_key(index, in, handle, cid), opcode,
+			data + 1, size - 1, &tv, num, req_str,
+			sizeof(req_str));
+
 	print_indent(6, opcode_color, "ATT: ", opcode_str, COLOR_OFF,
-				" (0x%2.2x) len %d", opcode, size - 1);
+				" (0x%2.2x) len %d%s%s", opcode, size - 1,
+				req_str[0] ? " " : "", req_str);
 
 	if (!opcode_data || !opcode_data->func) {
 		packet_hexdump(data + 1, size - 1);

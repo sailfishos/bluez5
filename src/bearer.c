@@ -56,6 +56,13 @@ struct btd_bearer {
 	 * additional connect messages.
 	 */
 	DBusMessage *connect; /* connect message */
+
+	/* LE connection parameters, only valid while connected */
+	bool conn_params;
+	uint32_t interval; /* in microseconds */
+	uint16_t latency;
+	uint16_t supv_timeout; /* in milliseconds */
+	uint16_t subrate;
 };
 
 static void bearer_free_dbus_message(void *data)
@@ -66,6 +73,9 @@ static void bearer_free_dbus_message(void *data)
 static void bearer_free(void *data)
 {
 	struct btd_bearer *bearer = data;
+
+	if (bearer->disconn_timer)
+		timeout_remove(bearer->disconn_timer);
 
 	free(bearer);
 }
@@ -196,9 +206,8 @@ static DBusMessage *bearer_disconnect(DBusConnection *conn, DBusMessage *msg,
 }
 
 static const GDBusMethodTable bearer_methods[] = {
-	{ GDBUS_EXPERIMENTAL_ASYNC_METHOD("Connect", NULL, NULL,
-						bearer_connect) },
-	{ GDBUS_EXPERIMENTAL_ASYNC_METHOD("Disconnect", NULL, NULL,
+	{ GDBUS_ASYNC_METHOD("Connect", NULL, NULL, bearer_connect) },
+	{ GDBUS_ASYNC_METHOD("Disconnect", NULL, NULL,
 						bearer_disconnect) },
 	{}
 };
@@ -249,6 +258,111 @@ static gboolean bearer_get_connected(const GDBusPropertyTable *property,
 	return TRUE;
 }
 
+static gboolean bearer_get_connectable(const GDBusPropertyTable *property,
+					DBusMessageIter *iter, void *data)
+{
+	struct btd_bearer *bearer = data;
+	dbus_bool_t connectable;
+
+	connectable = btd_device_bdaddr_type_connectable(bearer->device,
+								bearer->type);
+
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_BOOLEAN, &connectable);
+
+	return TRUE;
+}
+
+static gboolean bearer_connectable_exists(const GDBusPropertyTable *property,
+								void *data)
+{
+	struct btd_bearer *bearer = data;
+
+	if (bearer->type == BDADDR_BREDR)
+		return TRUE;
+
+	return btd_device_bdaddr_type_seen(bearer->device, bearer->type);
+}
+
+static gboolean bearer_get_role(const GDBusPropertyTable *property,
+					DBusMessageIter *iter, void *data)
+{
+	struct btd_bearer *bearer = data;
+	const char *role;
+
+	/* The initiator of an LE connection is always the central */
+	if (btd_device_bdaddr_type_initiator(bearer->device, bearer->type))
+		role = "peripheral";
+	else
+		role = "central";
+
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_STRING, &role);
+
+	return TRUE;
+}
+
+static gboolean bearer_role_exists(const GDBusPropertyTable *property,
+								void *data)
+{
+	struct btd_bearer *bearer = data;
+
+	if (bearer->type == BDADDR_BREDR)
+		return FALSE;
+
+	return btd_device_bdaddr_type_connected(bearer->device, bearer->type);
+}
+
+static gboolean bearer_get_interval(const GDBusPropertyTable *property,
+					DBusMessageIter *iter, void *data)
+{
+	struct btd_bearer *bearer = data;
+
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_UINT32,
+							&bearer->interval);
+
+	return TRUE;
+}
+
+static gboolean bearer_get_latency(const GDBusPropertyTable *property,
+					DBusMessageIter *iter, void *data)
+{
+	struct btd_bearer *bearer = data;
+
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_UINT16,
+							&bearer->latency);
+
+	return TRUE;
+}
+
+static gboolean bearer_get_supv_timeout(const GDBusPropertyTable *property,
+					DBusMessageIter *iter, void *data)
+{
+	struct btd_bearer *bearer = data;
+
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_UINT16,
+							&bearer->supv_timeout);
+
+	return TRUE;
+}
+
+static gboolean bearer_get_subrate(const GDBusPropertyTable *property,
+					DBusMessageIter *iter, void *data)
+{
+	struct btd_bearer *bearer = data;
+
+	dbus_message_iter_append_basic(iter, DBUS_TYPE_UINT16,
+							&bearer->subrate);
+
+	return TRUE;
+}
+
+static gboolean bearer_conn_params_exists(const GDBusPropertyTable *property,
+								void *data)
+{
+	struct btd_bearer *bearer = data;
+
+	return bearer->conn_params;
+}
+
 static const GDBusSignalTable bearer_signals[] = {
 	{ GDBUS_SIGNAL("Disconnected",
 			GDBUS_ARGS({ "name", "s" }, { "message", "s" })) },
@@ -256,14 +370,21 @@ static const GDBusSignalTable bearer_signals[] = {
 };
 
 static const GDBusPropertyTable bearer_properties[] = {
-	{ "Adapter", "o", bearer_get_adapter, NULL, NULL,
-			G_DBUS_PROPERTY_FLAG_EXPERIMENTAL },
-	{ "Paired", "b", bearer_get_paired, NULL, NULL,
-			G_DBUS_PROPERTY_FLAG_EXPERIMENTAL },
-	{ "Bonded", "b", bearer_get_bonded, NULL, NULL,
-			G_DBUS_PROPERTY_FLAG_EXPERIMENTAL },
-	{ "Connected", "b", bearer_get_connected, NULL, NULL,
-			G_DBUS_PROPERTY_FLAG_EXPERIMENTAL },
+	{ "Adapter", "o", bearer_get_adapter },
+	{ "Paired", "b", bearer_get_paired },
+	{ "Bonded", "b", bearer_get_bonded },
+	{ "Connected", "b", bearer_get_connected },
+	{ "Connectable", "b", bearer_get_connectable, NULL,
+					bearer_connectable_exists },
+	{ "Role", "s", bearer_get_role, NULL, bearer_role_exists },
+	{ "Interval", "u", bearer_get_interval, NULL,
+					bearer_conn_params_exists },
+	{ "Latency", "q", bearer_get_latency, NULL,
+					bearer_conn_params_exists },
+	{ "SupervisionTimeout", "q", bearer_get_supv_timeout, NULL,
+					bearer_conn_params_exists },
+	{ "Subrate", "q", bearer_get_subrate, NULL,
+					bearer_conn_params_exists },
 	{}
 };
 
@@ -354,6 +475,69 @@ void btd_bearer_bonded(struct btd_bearer *bearer)
 					"Bonded");
 }
 
+void btd_bearer_connectable(struct btd_bearer *bearer)
+{
+	if (!bearer || !bearer->path)
+		return;
+
+	g_dbus_emit_property_changed(btd_get_dbus_connection(), bearer->path,
+					bearer_interface(bearer->type),
+					"Connectable");
+}
+
+static void bearer_conn_param_changed(struct btd_bearer *bearer,
+							const char *name)
+{
+	g_dbus_emit_property_changed(btd_get_dbus_connection(), bearer->path,
+					bearer_interface(bearer->type), name);
+}
+
+void btd_bearer_conn_params(struct btd_bearer *bearer, uint32_t interval,
+				uint16_t latency, uint16_t supv_timeout,
+				uint16_t subrate)
+{
+	bool added;
+
+	if (!bearer || !bearer->path)
+		return;
+
+	added = !bearer->conn_params;
+	bearer->conn_params = true;
+
+	if (added || bearer->interval != interval) {
+		bearer->interval = interval;
+		bearer_conn_param_changed(bearer, "Interval");
+	}
+
+	if (added || bearer->latency != latency) {
+		bearer->latency = latency;
+		bearer_conn_param_changed(bearer, "Latency");
+	}
+
+	if (added || bearer->supv_timeout != supv_timeout) {
+		bearer->supv_timeout = supv_timeout;
+		bearer_conn_param_changed(bearer, "SupervisionTimeout");
+	}
+
+	if (added || bearer->subrate != subrate) {
+		bearer->subrate = subrate;
+		bearer_conn_param_changed(bearer, "Subrate");
+	}
+}
+
+static void bearer_clear_conn_params(struct btd_bearer *bearer)
+{
+	if (!bearer->conn_params)
+		return;
+
+	bearer->conn_params = false;
+
+	bearer_conn_param_changed(bearer, "Interval");
+	bearer_conn_param_changed(bearer, "Latency");
+	bearer_conn_param_changed(bearer, "SupervisionTimeout");
+	bearer_conn_param_changed(bearer, "Subrate");
+}
+
 void btd_bearer_connected(struct btd_bearer *bearer, int err)
 {
 	DBusMessage *reply;
@@ -378,6 +562,12 @@ void btd_bearer_connected(struct btd_bearer *bearer, int err)
 	g_dbus_emit_property_changed(btd_get_dbus_connection(), bearer->path,
 					bearer_interface(bearer->type),
 					"Connected");
+
+	if (!err && bearer->type != BDADDR_BREDR)
+		g_dbus_emit_property_changed(btd_get_dbus_connection(),
+					bearer->path,
+					bearer_interface(bearer->type),
+					"Role");
 }
 
 void btd_bearer_disconnected(struct btd_bearer *bearer, uint8_t reason)
@@ -389,6 +579,12 @@ void btd_bearer_disconnected(struct btd_bearer *bearer, uint8_t reason)
 
 	if (!bearer || !bearer->path)
 		return;
+
+	/* cancel disconnect timer if ACL link has already dropped */
+	if (bearer->disconn_timer) {
+		timeout_remove(bearer->disconn_timer);
+		bearer->disconn_timer = 0;
+	}
 
 	if (!btd_device_is_connected(bearer->device))
 		device_disconnect_watches_callback(bearer->device);
@@ -405,6 +601,14 @@ void btd_bearer_disconnected(struct btd_bearer *bearer, uint8_t reason)
 	g_dbus_emit_property_changed(btd_get_dbus_connection(), bearer->path,
 					bearer_interface(bearer->type),
 					"Connected");
+
+	if (bearer->type != BDADDR_BREDR)
+		g_dbus_emit_property_changed(btd_get_dbus_connection(),
+					bearer->path,
+					bearer_interface(bearer->type),
+					"Role");
+
+	bearer_clear_conn_params(bearer);
 
 	switch (reason) {
 	case MGMT_DEV_DISCONN_UNKNOWN:

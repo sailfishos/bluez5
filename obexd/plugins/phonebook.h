@@ -61,7 +61,7 @@ struct apparam_field {
  * Contacts will be returned in the vcard format.
  */
 typedef void (*phonebook_cb) (const char *buffer, size_t bufsize,
-		int vcards, int missed, gboolean lastpart, void *user_data);
+		int vcards, uint8_t missed, gboolean lastpart, void *user_data);
 
 /*
  * Interface between the PBAP core and backends to
@@ -79,8 +79,18 @@ typedef void (*phonebook_entry_cb) (const char *id, uint32_t handle,
 typedef void (*phonebook_cache_ready_cb) (void *user_data);
 
 
+/*
+ * Set up and tear down the phonebook back-end. The back-end is shared by
+ * the pbap and the irmc plugin, which are loaded and unloaded independently
+ * of each other, so the calls are reference counted: only the first
+ * phonebook_init() and the last phonebook_exit() reach the back-end.
+ */
 int phonebook_init(void);
 void phonebook_exit(void);
+
+/* Implemented by the back-end, only called through the pair above. */
+int phonebook_driver_init(void);
+void phonebook_driver_exit(void);
 
 /*
  * Changes the current folder in the phonebook back-end. The PBAP core

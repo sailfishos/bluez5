@@ -152,6 +152,7 @@ static const char *gatt_options[] = {
 	"ExchangeMTU",
 	"Channels",
 	"Client",
+	"NotifyMultiple",
 	"ExportClaimedServices",
 	"Security",
 	NULL
@@ -161,6 +162,7 @@ static const char *const bcs_options[] = {
 	"Role",
 	"CsSyncAntennaSel",
 	"MaxTxPower",
+	"OndemandRanging",
 	NULL
 };
 
@@ -1193,6 +1195,35 @@ static void parse_gatt_seclevel(GKeyFile *config)
 	g_free(str);
 }
 
+static void parse_gatt_mnotify(GKeyFile *config)
+{
+	char *str = NULL;
+	char *endptr = NULL;
+	long val;
+
+	parse_config_string(config, "GATT", "NotifyMultiple", &str);
+	if (!str)
+		return;
+
+	if (!strcmp(str, "false") || !strcmp(str, "no") ||
+				!strcmp(str, "off")) {
+		btd_opts.gatt_mnotify = -1;
+	} else if (!strcmp(str, "true") || !strcmp(str, "yes") ||
+				!strcmp(str, "on")) {
+		btd_opts.gatt_mnotify = 0;
+	} else {
+		val = strtol(str, &endptr, 0);
+		if (!endptr || *endptr != '\0' || val < 0 || val > INT_MAX)
+			error("Invalid value for NotifyMultiple=%s", str);
+		else
+			btd_opts.gatt_mnotify = val;
+	}
+
+	DBG("NotifyMultiple=%d", btd_opts.gatt_mnotify);
+
+	g_free(str);
+}
+
 static void parse_gatt(GKeyFile *config)
 {
 	parse_gatt_cache(config);
@@ -1202,6 +1233,7 @@ static void parse_gatt(GKeyFile *config)
 	parse_config_u8(config, "GATT", "Channels", &btd_opts.gatt_channels,
 				1, 6);
 	parse_config_bool(config, "GATT", "Client", &btd_opts.gatt_client);
+	parse_gatt_mnotify(config);
 	parse_gatt_export(config);
 	parse_gatt_seclevel(config);
 }
@@ -1305,6 +1337,8 @@ static void parse_le_cs_config(GKeyFile *config)
 	parse_config_signed_int(config, "ChannelSounding",
 			"MaxTxPower", &btd_opts.defaults.bcs.max_tx_power,
 			INT8_MIN, INT8_MAX);
+	parse_config_bool(config, "ChannelSounding", "OndemandRanging",
+			&btd_opts.defaults.bcs.ondemand_ranging);
 }
 
 static void parse_avdtp_session_mode(GKeyFile *config)
@@ -1426,6 +1460,7 @@ static void init_defaults(void)
 	btd_opts.gatt_mtu = BT_ATT_MAX_LE_MTU;
 	btd_opts.gatt_channels = 1;
 	btd_opts.gatt_client = true;
+	btd_opts.gatt_mnotify = 0;
 	btd_opts.gatt_export = BT_GATT_EXPORT_READ_ONLY;
 	btd_opts.gatt_seclevel = BT_ATT_SECURITY_AUTO;
 
@@ -1441,6 +1476,7 @@ static void init_defaults(void)
 	btd_opts.defaults.bcs.role = 0x03;
 	btd_opts.defaults.bcs.cs_sync_ant_sel = 0xFF;
 	btd_opts.defaults.bcs.max_tx_power = 0x14;
+	btd_opts.defaults.bcs.ondemand_ranging = false;
 }
 
 static void log_handler(const gchar *log_domain, GLogLevelFlags log_level,

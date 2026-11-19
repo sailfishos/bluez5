@@ -141,7 +141,7 @@
 #define AVRCP_PACKET_TYPE_END		0x03
 
 /* player attributes */
-#define AVRCP_ATTRIBUTE_ILEGAL		0x00
+#define AVRCP_ATTRIBUTE_ILLEGAL		0x00
 #define AVRCP_ATTRIBUTE_EQUALIZER	0x01
 #define AVRCP_ATTRIBUTE_REPEAT_MODE	0x02
 #define AVRCP_ATTRIBUTE_SHUFFLE		0x03
@@ -462,7 +462,7 @@ static const char *pt2str(uint8_t pt)
 static const char *attr2str(uint8_t attr)
 {
 	switch (attr) {
-	case AVRCP_ATTRIBUTE_ILEGAL:
+	case AVRCP_ATTRIBUTE_ILLEGAL:
 		return "Illegal";
 	case AVRCP_ATTRIBUTE_EQUALIZER:
 		return "Equalizer ON/OFF Status";
@@ -480,7 +480,7 @@ static const char *attr2str(uint8_t attr)
 static const char *value2str(uint8_t attr, uint8_t value)
 {
 	switch (attr) {
-	case AVRCP_ATTRIBUTE_ILEGAL:
+	case AVRCP_ATTRIBUTE_ILLEGAL:
 		return "Illegal";
 	case AVRCP_ATTRIBUTE_EQUALIZER:
 		switch (value) {
@@ -1049,16 +1049,16 @@ response:
 
 		print_field("%*cStringLength: 0x%02x", (indent - 8), ' ', len);
 
-		printf("String: ");
+		display_printf("String: ");
 		for (; len > 0; len--) {
 			uint8_t c;
 
 			if (!l2cap_frame_get_u8(frame, &c))
 				return false;
 
-			printf("%1c", isprint(c) ? c : '.');
+			display_printf("%1c", isprint(c) ? c : '.');
 		}
-		printf("\n");
+		display_printf("\n");
 	}
 
 	return true;
@@ -1125,16 +1125,16 @@ response:
 
 		print_field("%*cStringLength: 0x%02x", (indent - 8), ' ', len);
 
-		printf("String: ");
+		display_printf("String: ");
 		for (; len > 0; len--) {
 			uint8_t c;
 
 			if (!l2cap_frame_get_u8(frame, &c))
 				return false;
 
-			printf("%1c", isprint(c) ? c : '.');
+			display_printf("%1c", isprint(c) ? c : '.');
 		}
-		printf("\n");
+		display_printf("\n");
 	}
 
 	return true;
@@ -1405,16 +1405,16 @@ response:
 								' ', status);
 		switch (status) {
 		case 0x00:
-			printf("(POWER_ON)\n");
+			display_printf("(POWER_ON)\n");
 			break;
 		case 0x01:
-			printf("(POWER_OFF)\n");
+			display_printf("(POWER_OFF)\n");
 			break;
 		case 0x02:
-			printf("(UNPLUGGED)\n");
+			display_printf("(UNPLUGGED)\n");
 			break;
 		default:
-			printf("(UNKNOWN)\n");
+			display_printf("(UNKNOWN)\n");
 			break;
 		}
 		break;
@@ -1873,16 +1873,16 @@ static bool avrcp_media_player_item(struct avctp_frame *avctp_frame,
 	print_field("%*cPlayStatus: 0x%02x (%s)", indent, ' ',
 						status, playstatus2str(status));
 
-	printf("%*cFeatures: 0x", indent+8, ' ');
+	display_printf("%*cFeatures: 0x", indent+8, ' ');
 
 	for (i = 0; i < 16; i++) {
 		if (!l2cap_frame_get_u8(frame, &features[i]))
 			return false;
 
-		printf("%02x", features[i]);
+		display_printf("%02x", features[i]);
 	}
 
-	printf("\n");
+	display_printf("\n");
 
 	print_features(features, indent + 2);
 
@@ -1898,15 +1898,15 @@ static bool avrcp_media_player_item(struct avctp_frame *avctp_frame,
 	print_field("%*cNameLength: 0x%04x (%u)", indent, ' ',
 						namelen, namelen);
 
-	printf("%*cName: ", indent+8, ' ');
+	display_printf("%*cName: ", indent+8, ' ');
 	for (; namelen > 0; namelen--) {
 		uint8_t c;
 
 		if (!l2cap_frame_get_u8(frame, &c))
 			return false;
-		printf("%1c", isprint(c) ? c : '.');
+		display_printf("%1c", isprint(c) ? c : '.');
 	}
-	printf("\n");
+	display_printf("\n");
 
 	return true;
 }
@@ -1920,7 +1920,7 @@ static bool avrcp_folder_item(struct avctp_frame *avctp_frame,
 	uint64_t uid;
 
 	if (frame->size < 14) {
-		printf("PDU Malformed\n");
+		display_printf("PDU Malformed\n");
 		return false;
 	}
 
@@ -1954,15 +1954,15 @@ static bool avrcp_folder_item(struct avctp_frame *avctp_frame,
 	print_field("%*cNameLength: 0x%04x (%u)", indent, ' ',
 					namelen, namelen);
 
-	printf("%*cName: ", indent+8, ' ');
+	display_printf("%*cName: ", indent+8, ' ');
 	for (; namelen > 0; namelen--) {
 		uint8_t c;
 		if (!l2cap_frame_get_u8(frame, &c))
 			return false;
 
-		printf("%1c", isprint(c) ? c : '.');
+		display_printf("%1c", isprint(c) ? c : '.');
 	}
-	printf("\n");
+	display_printf("\n");
 
 	return true;
 }
@@ -1994,16 +1994,16 @@ static bool avrcp_attribute_entry_list(struct avctp_frame *avctp_frame,
 		print_field("%*cAttributeLength: 0x%04x (%u)", indent, ' ',
 						len, len);
 
-		printf("%*cAttributeValue: ", indent+8, ' ');
+		display_printf("%*cAttributeValue: ", indent+8, ' ');
 		for (; len > 0; len--) {
 			uint8_t c;
 
 			if (!l2cap_frame_get_u8(frame, &c))
 				return false;
 
-			printf("%1c", isprint(c) ? c : '.');
+			display_printf("%1c", isprint(c) ? c : '.');
 		}
-		printf("\n");
+		display_printf("\n");
 	}
 
 	return true;
@@ -2041,15 +2041,15 @@ static bool avrcp_media_element_item(struct avctp_frame *avctp_frame,
 	print_field("%*cNameLength: 0x%04x (%u)", indent, ' ',
 					namelen, namelen);
 
-	printf("%*cName: ", indent+8, ' ');
+	display_printf("%*cName: ", indent+8, ' ');
 	for (; namelen > 0; namelen--) {
 		uint8_t c;
 		if (!l2cap_frame_get_u8(frame, &c))
 			return false;
 
-		printf("%1c", isprint(c) ? c : '.');
+		display_printf("%1c", isprint(c) ? c : '.');
 	}
-	printf("\n");
+	display_printf("\n");
 
 	if (!l2cap_frame_get_u8(frame, &count))
 		return false;
@@ -2097,7 +2097,7 @@ static bool avrcp_get_total_number_of_items(struct avctp_frame *avctp_frame)
 		goto response;
 
 	if (frame->size < 4) {
-		printf("PDU Malformed\n");
+		display_printf("PDU Malformed\n");
 		packet_hexdump(frame->data, frame->size);
 		return false;
 	}
@@ -2146,7 +2146,7 @@ static bool avrcp_search_item(struct avctp_frame *avctp_frame)
 		goto response;
 
 	if (frame->size < 4) {
-		printf("PDU Malformed\n");
+		display_printf("PDU Malformed\n");
 		packet_hexdump(frame->data, frame->size);
 		return false;
 	}
@@ -2162,17 +2162,17 @@ static bool avrcp_search_item(struct avctp_frame *avctp_frame)
 
 	print_field("%*cLength: 0x%04x (%u)", indent, ' ', namelen, namelen);
 
-	printf("%*cString: ", indent+8, ' ');
+	display_printf("%*cString: ", indent+8, ' ');
 	for (; namelen > 0; namelen--) {
 		uint8_t c;
 
 		if (!l2cap_frame_get_u8(frame, &c))
 			return false;
 
-		printf("%1c", isprint(c) ? c : '.');
+		display_printf("%1c", isprint(c) ? c : '.');
 	}
 
-	printf("\n");
+	display_printf("\n");
 
 	return true;
 
@@ -2426,16 +2426,16 @@ response:
 			continue;
 		}
 
-		printf("%*cFolder: ", indent+8, ' ');
+		display_printf("%*cFolder: ", indent+8, ' ');
 		for (; len > 0; len--) {
 			uint8_t c;
 
 			if (!l2cap_frame_get_u8(frame, &c))
 				return false;
 
-			printf("%1c", isprint(c) ? c : '.');
+			display_printf("%1c", isprint(c) ? c : '.');
 		}
-		printf("\n");
+		display_printf("\n");
 	}
 
 	return true;
@@ -2512,6 +2512,8 @@ void avctp_packet(const struct l2cap_frame *frame)
 	struct l2cap_frame *l2cap_frame;
 	struct avctp_frame avctp_frame;
 	const char *pdu_color;
+	char req_str[32];
+	uint16_t key;
 
 	l2cap_frame_pull(&avctp_frame.l2cap_frame, frame, 0);
 
@@ -2529,12 +2531,30 @@ void avctp_packet(const struct l2cap_frame *frame)
 	else
 		pdu_color = COLOR_BLUE;
 
+	/*
+	 * A command is answered by a response carrying the same transaction
+	 * label, which is what pairs the two.
+	 */
+	key = l2cap_chan_key(frame->index, frame->in, frame->handle,
+								frame->cid);
+	req_str[0] = '\0';
+	if (avctp_frame.hdr & 0x02)
+		packet_req_str(frame->handle, key, PACKET_PROTO_AVCTP,
+				avctp_frame.hdr >> 4,
+				(struct timeval *)&frame->tv,
+				req_str, sizeof(req_str));
+	else
+		packet_req_add(frame->handle, key, PACKET_PROTO_AVCTP,
+				avctp_frame.hdr >> 4,
+				(struct timeval *)&frame->tv, frame->num);
+
 	print_indent(6, pdu_color, "AVCTP", "", COLOR_OFF,
-				" %s: %s: type 0x%02x label %d PID 0x%04x",
+				" %s: %s: type 0x%02x label %d PID 0x%04x%s%s",
 				frame->psm == 23 ? "Control" : "Browsing",
 				avctp_frame.hdr & 0x02 ? "Response" : "Command",
 				avctp_frame.hdr & 0x0c, avctp_frame.hdr >> 4,
-				avctp_frame.pid);
+				avctp_frame.pid,
+				req_str[0] ? " " : "", req_str);
 
 	if (avctp_frame.pid == 0x110e || avctp_frame.pid == 0x110c)
 		avrcp_packet(&avctp_frame);

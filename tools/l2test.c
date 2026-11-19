@@ -16,6 +16,7 @@
 
 #define _GNU_SOURCE
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <errno.h>
 #include <ctype.h>
@@ -334,6 +335,15 @@ bool use_color(void)
 	return false;
 }
 
+void display_printf(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	vprintf(fmt, ap);
+	va_end(ap);
+}
+
 static const struct bitfield_data phy_table[] = {
 	{  0, "BR1M1SLOT" },
 	{  1, "BR1M3SLOT" },
@@ -358,7 +368,8 @@ static int print_info(int sk, struct l2cap_options *opts)
 	struct sockaddr_l2 addr;
 	socklen_t optlen;
 	struct l2cap_conninfo conn;
-	int prio, phy;
+	int prio;
+	uint32_t phy;
 	char ba[18];
 
 	/* Get connection information */
@@ -413,6 +424,8 @@ static int print_info(int sk, struct l2cap_options *opts)
 		conn.hci_handle, conn.dev_class[2], conn.dev_class[1],
 		conn.dev_class[0], prio, rcvbuf);
 
+
+	optlen = sizeof(phy);
 
 	if (!getsockopt(sk, SOL_BLUETOOTH, BT_PHY, &phy, &optlen)) {
 		syslog(LOG_INFO, "Supported PHY: 0x%08x", phy);

@@ -29,6 +29,7 @@
 #include "src/shared/gatt-client.h"
 #include "src/shared/bap.h"
 #include "src/shared/ascs.h"
+#include "src/shared/lc3.h"
 #include "src/shared/bap-debug.h"
 
 /* Maximum number of ASE(s) */
@@ -47,20 +48,12 @@
 	}
 
 #define BAP_PROCESS_TIMEOUT 10
+#define BAP_STATE_TIMEOUT 1000
 
-#define BAP_FREQ_LTV_TYPE 1
-#define BAP_DURATION_LTV_TYPE 2
-#define BAP_CHANNEL_ALLOCATION_LTV_TYPE 3
-#define BAP_FRAME_LEN_LTV_TYPE 4
 #define CODEC_SPECIFIC_CONFIGURATION_MASK (\
-		(1<<BAP_FREQ_LTV_TYPE)|\
-		(1<<BAP_DURATION_LTV_TYPE)|\
-		(1<<BAP_FRAME_LEN_LTV_TYPE))
-
-#define BAP_METADATA_PREF_CONTEXT_LTV_TYPE	0x01
-#define BAP_METADATA_CONTEXT_LTV_TYPE		0x02
-#define BAP_METADATA_PROGRAM_INFO_LTV_TYPE	0x03
-#define BAP_METADATA_LANGUAGE_LTV_TYPE		0x04
+		(1<<BT_BAP_CC_FREQ)|\
+		(1<<BT_BAP_CC_DURATION)|\
+		(1<<BT_BAP_CC_FRAME_LENGTH))
 
 struct bt_bap_pac_changed {
 	unsigned int id;
@@ -164,6 +157,10 @@ struct bt_bap_req {
 	size_t len;
 	bt_bap_stream_func_t func;
 	void *user_data;
+	uint8_t state;
+	bool wait;
+	bool has_rsp;
+	struct bt_ascs_ase_rsp rsp;
 };
 
 typedef void (*bap_notify_t)(struct bt_bap *bap, uint16_t value_handle,
@@ -184,6 +181,8 @@ struct bt_bap {
 	struct bt_gatt_client *client;
 	struct bt_att *att;
 	struct bt_bap_req *req;
+	unsigned int wait_id;
+	struct bt_ascs_ase_rsp wait_rsp;
 
 	unsigned int cp_id;
 	unsigned int process_id;
@@ -293,6 +292,7 @@ struct bt_bap_stream {
 	uint8_t old_state;
 	uint8_t state;
 	unsigned int state_id;
+	bool state_defer;
 	struct queue *pending_states;
 	bool no_cache_config;
 	bool client;
@@ -1278,6 +1278,10 @@ static void bap_req_complete(struct bt_bap_req *req,
 {
 	struct queue *group;
 
+	/* Use the response of the request own ASE if there is one */
+	if (req->has_rsp)
+		rsp = &req->rsp;
+
 	if (!req->func)
 		goto done;
 
@@ -1307,26 +1311,175 @@ static bool match_req_stream(const void *data, const void *match_data)
 	return req->stream == match_data;
 }
 
-static void bap_req_abort(void *data)
+static bool req_is_waiting(const void *data, const void *user_data)
+{
+	const struct bt_bap_req *req = data;
+
+	return req->wait;
+}
+
+static bool bap_req_waiting(struct bt_bap_req *req)
+{
+	return req->wait || queue_find(req->group, req_is_waiting, NULL);
+}
+
+static void bap_wait_complete(struct bt_bap *bap)
+{
+	struct bt_bap_req *req = bap->req;
+	struct bt_ascs_ase_rsp rsp = bap->wait_rsp;
+
+	if (bap->wait_id) {
+		timeout_remove(bap->wait_id);
+		bap->wait_id = 0;
+	}
+
+	bap->req = NULL;
+	bap_req_complete(req, &rsp);
+}
+
+static bool bap_process_queue(void *data);
+
+/* Complete the request once no stream is waiting for its ASE state */
+static void bap_wait_check(struct bt_bap *bap)
+{
+	if (!bap->req || !bap->wait_id || bap_req_waiting(bap->req))
+		return;
+
+	bap_wait_complete(bap);
+	bap_process_queue(bap);
+}
+
+static void req_clear_wait(void *data, void *user_data)
 {
 	struct bt_bap_req *req = data;
-	struct bt_bap *bap = req->stream->bap;
 
-	DBG(bap, "req %p", req);
-	bap_req_complete(req, NULL);
+	/* Ignore notifications that don't change the state, e.g. metadata */
+	if (req->stream == user_data && req->stream->ep->state != req->state)
+		req->wait = false;
+}
+
+static void bap_wait_state_changed(struct bt_bap *bap,
+					struct bt_bap_stream *stream)
+{
+	if (!bap->req || !bap->wait_id)
+		return;
+
+	req_clear_wait(bap->req, stream);
+	queue_foreach(bap->req->group, req_clear_wait, stream);
+
+	bap_wait_check(bap);
+}
+
+/* Keep a request without callback in place of a cancelled request whose
+ * CP notification is still pending, so it is not taken as the response of
+ * the next request.
+ */
+static struct bt_bap_req *bap_req_placeholder(struct bt_bap *bap,
+						uint8_t op)
+{
+	struct bt_bap_req *req;
+
+	req = new0(struct bt_bap_req, 1);
+	req->op = op;
+
+	DBG(bap, "req %p placeholder for op 0x%02x", req, op);
+
+	return req;
+}
+
+static void bap_schedule_queue(struct bt_bap *bap)
+{
+	if (bap->req || bap->process_id || queue_isempty(bap->reqs))
+		return;
+
+	bap->process_id = timeout_add(BAP_PROCESS_TIMEOUT, bap_process_queue,
+								bap, NULL);
+}
+
+/* Unlink the requests of a stream from a request and its group into
+ * removed, if the stream is the leader the next member of the group is
+ * promoted.
+ */
+static struct bt_bap_req *bap_req_unlink_stream(struct bt_bap_req *req,
+						struct bt_bap_stream *stream,
+						struct queue *removed)
+{
+	struct bt_bap_req *member;
+
+	while ((member = queue_remove_if(req->group, match_req_stream,
+								stream)))
+		queue_push_tail(removed, member);
+
+	if (req->stream != stream)
+		return req;
+
+	member = queue_pop_head(req->group);
+	if (member) {
+		member->group = req->group;
+		req->group = NULL;
+	}
+
+	queue_push_tail(removed, req);
+
+	return member;
+}
+
+static void bap_req_complete_all(struct queue *reqs,
+					const struct bt_ascs_ase_rsp *rsp)
+{
+	struct bt_bap_req *req;
+
+	while ((req = queue_pop_head(reqs)))
+		bap_req_complete(req, rsp);
+
+	queue_destroy(reqs, NULL);
 }
 
 static void bap_abort_stream_req(struct bt_bap *bap,
 						struct bt_bap_stream *stream)
 {
-	queue_remove_all(bap->reqs, match_req_stream, stream, bap_req_abort);
+	struct queue *reqs = bap->reqs;
+	struct queue *aborted = queue_new();
+	struct queue *completed = queue_new();
+	struct bt_ascs_ase_rsp rsp = bap->wait_rsp;
+	struct bt_bap_req *req;
 
-	if (bap->req && bap->req->stream == stream) {
-		struct bt_bap_req *req = bap->req;
+	/* Unlink all requests of the stream before completing them, so the
+	 * callbacks see the remaining requests.
+	 */
+	bap->reqs = queue_new();
 
-		bap->req = NULL;
-		bap_req_complete(req, NULL);
+	while ((req = queue_pop_head(reqs))) {
+		req = bap_req_unlink_stream(req, stream, aborted);
+		if (req)
+			queue_push_tail(bap->reqs, req);
 	}
+
+	queue_destroy(reqs, NULL);
+
+	if (bap->req) {
+		uint8_t op = bap->req->op;
+
+		/* If the request is waiting for the ASE state the CP operation
+		 * has already succeeded, so complete it with its response.
+		 */
+		bap->req = bap_req_unlink_stream(bap->req, stream,
+					bap->wait_id ? completed : aborted);
+		if (!bap->req) {
+			if (bap->wait_id) {
+				timeout_remove(bap->wait_id);
+				bap->wait_id = 0;
+			} else {
+				bap->req = bap_req_placeholder(bap, op);
+			}
+		}
+	}
+
+	bap_req_complete_all(aborted, NULL);
+	bap_req_complete_all(completed, &rsp);
+
+	bap_wait_check(bap);
+	bap_schedule_queue(bap);
 }
 
 static void bt_bap_stream_unref(void *data)
@@ -1495,10 +1648,7 @@ static void bap_stream_state_changed(struct bt_bap_stream *stream)
 	/* Post notification updates */
 	switch (stream->ep->state) {
 	case BT_ASCS_ASE_STATE_IDLE:
-		if (bap->req && bap->req->stream == stream) {
-			bap_req_complete(bap->req, NULL);
-			bap->req = NULL;
-		}
+		bap_abort_stream_req(bap, stream);
 
 		if (stream->ops && stream->ops->detach)
 			stream->ops->detach(stream);
@@ -1658,6 +1808,9 @@ static void append_group(void *data, void *user_data)
 	struct iovec *iov = user_data;
 	size_t i;
 
+	if (req->stream)
+		req->state = req->stream->ep->state;
+
 	for (i = 0; i < req->len; i++)
 		util_iov_push_mem(iov, req->iov[i].iov_len,
 					req->iov[i].iov_base);
@@ -1690,6 +1843,9 @@ static bool bap_send(struct bt_bap *bap, struct bt_bap_req *req)
 
 	iov.iov_base = alloca(iov.iov_len);
 	iov.iov_len = 0;
+
+	if (req->stream)
+		req->state = req->stream->ep->state;
 
 	hdr.op = req->op;
 	hdr.num = 1 + queue_length(req->group);
@@ -1727,6 +1883,10 @@ static bool bap_process_queue(void *data)
 		timeout_remove(bap->process_id);
 		bap->process_id = 0;
 	}
+
+	/* Wait for the outstanding request to complete */
+	if (bap->req)
+		return false;
 
 	while ((req = queue_pop_head(bap->reqs))) {
 		if (bap_send(bap, req))
@@ -1849,17 +2009,32 @@ static void bap_ucast_set_state(struct bt_bap_stream *stream, uint8_t state)
 	if (stream->client)
 		goto done;
 
-	if (!stream->bap->in_cp_write)
+	if (!stream->bap->in_cp_write) {
 		stream_notify_state(stream);
-	else if (!stream->state_id)
-		stream->state_id = timeout_add(BAP_PROCESS_TIMEOUT,
-						stream_notify_state,
-						bt_bap_stream_ref(stream),
-						bt_bap_stream_unref);
-	else /* If a state_id is already pending then queue the old one */
+	} else if (stream->state_id || stream->state_defer) {
+		/* If a notification is already pending then queue the old
+		 * state.
+		 */
 		queue_push_tail(stream->pending_states,
 				UINT_TO_PTR(ep->old_state));
-
+	} else {
+		/* Defer ASE state notifications until the mainloop is idle so
+		 * the CP notification is sent first while still allowing them
+		 * to be grouped into the same Notify Multiple PDU. This is
+		 * scheduled after the state callbacks so any I/O they setup,
+		 * e.g. on CIS loss, is processed first.
+		 */
+		stream->state_defer = true;
+		bt_bap_stream_ref(stream);
+		bap_stream_state_changed(stream);
+		stream->state_defer = false;
+		if (!stream->state_id)
+			stream->state_id = timeout_add(0, stream_notify_state,
+						bt_bap_stream_ref(stream),
+						bt_bap_stream_unref);
+		bt_bap_stream_unref(stream);
+		return;
+	}
 
 done:
 	bap_stream_state_changed(stream);
@@ -2277,6 +2452,11 @@ static uint8_t stream_metadata(struct bt_bap_stream *stream, struct iovec *meta,
 	util_iov_free(stream->meta, 1);
 	stream->meta = util_iov_dup(meta, 1);
 
+	/* Local client metadata does not confirm the peer config. */
+	if (stream->client && bt_bap_stream_get_state(stream) ==
+					BT_BAP_STREAM_STATE_CONFIG)
+		return 0;
+
 	switch (bt_bap_stream_get_state(stream)) {
 	case BT_BAP_STREAM_STATE_IDLE:
 		/* Initial metadata */
@@ -2554,7 +2734,7 @@ static void bap_sink_get_allocation(size_t i, uint8_t l, uint8_t t,
 {
 	uint32_t location32;
 
-	if (!v)
+	if (!v || l != sizeof(location32))
 		return;
 
 	memcpy(&location32, v, l);
@@ -2563,7 +2743,7 @@ static void bap_sink_get_allocation(size_t i, uint8_t l, uint8_t t,
 
 static unsigned int bap_bcast_get_location(struct bt_bap_stream *stream)
 {
-	uint8_t type = BAP_CHANNEL_ALLOCATION_LTV_TYPE;
+	uint8_t type = BT_BAP_CC_LOCATION;
 	uint32_t allocation = 0;
 	struct iovec *caps;
 
@@ -3166,6 +3346,7 @@ static uint8_t ep_config(struct bt_bap_endpoint *ep, struct bt_bap *bap,
 	struct iovec cc;
 	const struct queue_entry *e;
 	struct bt_bap_codec codec;
+	uint8_t *ltv;
 
 	DBG(bap, "ep %p id 0x%02x dir 0x%02x", ep, ep->id, ep->dir);
 
@@ -3199,6 +3380,19 @@ static uint8_t ep_config(struct bt_bap_endpoint *ep, struct bt_bap *bap,
 		return 0;
 	}
 
+	ltv = cc.iov_base;
+
+	if (req->codec.id == LC3_ID && cc.iov_len == 3 &&
+			ltv[0] == 0x02 &&
+			ltv[1] == LC3_CONFIG_DURATION &&
+			ltv[2] != LC3_CONFIG_DURATION_7_5 &&
+			ltv[2] != LC3_CONFIG_DURATION_10) {
+		ascs_ase_rsp_add(rsp, req->ase,
+				BT_ASCS_RSP_CONF_INVALID,
+				BT_ASCS_REASON_CODEC_DATA);
+		return 0;
+	}
+
 	switch (ep->dir) {
 	case BT_BAP_SINK:
 		e = queue_get_entries(bap->ldb->sinks);
@@ -3215,6 +3409,13 @@ static uint8_t ep_config(struct bt_bap_endpoint *ep, struct bt_bap *bap,
 	codec.id = req->codec.id;
 	codec.cid = le16_to_cpu(req->codec.cid);
 	codec.vid = le16_to_cpu(req->codec.vid);
+
+	if (codec.id != 0xff && (codec.cid || codec.vid)) {
+		ascs_ase_rsp_add(rsp, req->ase,
+				BT_ASCS_RSP_CONF_INVALID,
+				BT_ASCS_REASON_CODEC);
+		return 0;
+	}
 
 	for (; e; e = e->next) {
 		struct bt_bap_pac *pac = e->data;
@@ -3303,6 +3504,32 @@ static uint8_t ep_qos(struct bt_bap_endpoint *ep, struct bt_bap *bap,
 		return 0;
 	}
 
+	if (ep->stream->lpac->codec.id == LC3_ID &&
+			qos->ucast.io_qos.interval < 0x0000ff) {
+		ascs_ase_rsp_add(rsp, ep->id,
+				BT_ASCS_RSP_CONF_INVALID,
+				BT_ASCS_REASON_INTERVAL);
+		return 0;
+	}
+
+	if (qos->ucast.framing != BT_ASCS_QOS_FRAMING_UNFRAMED &&
+			qos->ucast.framing != BT_ASCS_QOS_FRAMING_FRAMED) {
+		ascs_ase_rsp_add(rsp, ep->id,
+				BT_ASCS_RSP_CONF_INVALID,
+				BT_ASCS_REASON_FRAMING);
+		return 0;
+	}
+
+	if (!qos->ucast.io_qos.phys ||
+			(qos->ucast.io_qos.phys & ~(BT_BAP_CONFIG_PHY_1M |
+					BT_BAP_CONFIG_PHY_2M |
+					BT_BAP_CONFIG_PHY_CODEC))) {
+		ascs_ase_rsp_add(rsp, ep->id,
+				BT_ASCS_RSP_CONF_INVALID,
+				BT_ASCS_REASON_PHY);
+		return 0;
+	}
+
 	return stream_qos(ep->stream, qos, rsp);
 }
 
@@ -3365,35 +3592,102 @@ static uint8_t stream_enable(struct bt_bap_stream *stream, struct iovec *meta,
 	return 0;
 }
 
-static bool ascs_metadata_rsp(struct bt_bap_endpoint *ep, struct iovec *meta,
-							struct iovec *rsp)
+struct bap_metadata_process {
+	struct bt_bap_endpoint *ep;
+	uint16_t context;
+	struct iovec *rsp;
+	uint8_t err;
+};
+
+static void bap_metadata_process(size_t i, uint8_t l, uint8_t t, uint8_t *v,
+					void *user_data)
 {
-	struct bt_ltv *ltv;
-	uint16_t supported_context = 0;
+	struct bap_metadata_process *data = user_data;
 	uint16_t context;
 
-	if (ep->stream && ep->stream->lpac)
-		supported_context = ep->stream->lpac->qos.supported_context;
-
-	ltv = meta->iov_base;
-	if (meta->iov_len >= sizeof(*ltv) &&
-			(ltv->type < BAP_METADATA_PREF_CONTEXT_LTV_TYPE ||
-			ltv->type > BAP_METADATA_LANGUAGE_LTV_TYPE)) {
-		ascs_ase_rsp_add(rsp, ep->id,
-				BT_ASCS_RSP_METADATA_UNSUPPORTED, ltv->type);
-		return true;
-	}
-
-	if (meta->iov_len >= sizeof(*ltv) + sizeof(context) &&
-			ltv->type == BAP_METADATA_CONTEXT_LTV_TYPE &&
-			ltv->len == sizeof(context) + 1) {
-		context = get_le16(ltv->value);
-		if (!context || (context & ~supported_context)) {
-			ascs_ase_rsp_add(rsp, ep->id,
-					BT_ASCS_RSP_METADATA_INVALID,
-					ltv->type);
-			return true;
+	switch (t) {
+	case BT_BAP_META_PREFERRED_CONTEXT:
+		break;
+	case BT_BAP_META_CONTEXT:
+		if (l != sizeof(context)) {
+			ascs_ase_rsp_add(data->rsp, data->ep->id,
+					BT_ASCS_RSP_METADATA_INVALID, t);
+			data->err = BT_ASCS_RSP_METADATA_INVALID;
+			break;
 		}
+
+		context = get_le16(v);
+		if (!context || (context & ~data->context)) {
+			ascs_ase_rsp_add(data->rsp, data->ep->id,
+					BT_ASCS_RSP_METADATA_INVALID, t);
+			data->err = BT_ASCS_RSP_METADATA_INVALID;
+		}
+
+		break;
+	case BT_BAP_META_PROGRAM_INFO:
+	case BT_BAP_META_LANGUAGE:
+	case BT_BAP_META_CCID_LIST:
+	case BT_BAP_META_PROGRAM_INFO_URI:
+		break;
+	case BT_BAP_META_BROADCAST_NAME:
+		if (l < 4 || l > 128) {
+			ascs_ase_rsp_add(data->rsp, data->ep->id,
+					BT_ASCS_RSP_METADATA_INVALID, t);
+			data->err = BT_ASCS_RSP_METADATA_INVALID;
+		}
+		break;
+	case BT_BAP_META_BCAST_IMMEDIATE:
+		if (l) {
+			ascs_ase_rsp_add(data->rsp, data->ep->id,
+					BT_ASCS_RSP_METADATA_INVALID, t);
+			data->err = BT_ASCS_RSP_METADATA_INVALID;
+		}
+		break;
+	case BT_BAP_META_EXTENDED:
+	case BT_BAP_META_VENDOR:
+		if (l < sizeof(uint16_t)) {
+			ascs_ase_rsp_add(data->rsp, data->ep->id,
+					BT_ASCS_RSP_METADATA_INVALID, t);
+			data->err = BT_ASCS_RSP_METADATA_INVALID;
+		}
+		break;
+	case BT_BAP_META_PARENTAL_RATING:
+	case BT_BAP_META_AUDIO_ACTIVE_STATE:
+	case BT_BAP_META_ASSISTED_LISTENING:
+		if (l != sizeof(uint8_t)) {
+			ascs_ase_rsp_add(data->rsp, data->ep->id,
+					BT_ASCS_RSP_METADATA_INVALID, t);
+			data->err = BT_ASCS_RSP_METADATA_INVALID;
+		}
+		break;
+	default:
+		ascs_ase_rsp_add(data->rsp, data->ep->id,
+					BT_ASCS_RSP_METADATA_UNSUPPORTED,
+					t);
+		data->err = BT_ASCS_RSP_METADATA_UNSUPPORTED;
+		break;
+	};
+}
+
+static bool ascs_metadata_rsp(struct bt_bap_endpoint *ep, struct bt_bap *bap,
+				struct iovec *meta, struct iovec *rsp)
+{
+	struct bap_metadata_process data = {
+		.ep = ep,
+		.rsp = rsp,
+		.err = 0,
+	};
+
+	if (ep->stream && ep->stream->lpac)
+		data.context = ep->stream->lpac->qos.supported_context;
+
+	util_ltv_foreach(meta->iov_base, meta->iov_len, NULL,
+				bap_metadata_process, &data);
+
+	if (data.err) {
+		DBG(bap, "ep %p id 0x%02x metadata error 0x%02x", ep, ep->id,
+				data.err);
+		return true;
 	}
 
 	return false;
@@ -3430,7 +3724,7 @@ static uint8_t ep_enable(struct bt_bap_endpoint *ep, struct bt_bap *bap,
 		return 0;
 	}
 
-	if (ascs_metadata_rsp(ep, &meta, rsp))
+	if (ascs_metadata_rsp(ep, bap, &meta, rsp))
 		return 0;
 
 	if (!ep->stream) {
@@ -3666,7 +3960,7 @@ static uint8_t ep_metadata(struct bt_bap_endpoint *ep,
 	meta.iov_base = util_iov_pull_mem(iov, req->len);
 	meta.iov_len = req->len;
 
-	if (ascs_metadata_rsp(ep, &meta, rsp))
+	if (ascs_metadata_rsp(ep, stream->bap, &meta, rsp))
 		return 0;
 
 	return stream_metadata(ep->stream, &meta, rsp);
@@ -4438,6 +4732,14 @@ struct iovec *bt_bap_pac_get_metadata(struct bt_bap_pac *pac)
 	return pac->metadata;
 }
 
+bool bt_bap_stream_is_client(struct bt_bap_stream *stream)
+{
+	if (!stream)
+		return false;
+
+	return stream->client;
+}
+
 uint8_t bt_bap_stream_get_type(struct bt_bap_stream *stream)
 {
 	if (!stream)
@@ -4657,6 +4959,7 @@ static void bap_free(void *data)
 	struct bt_bap *bap = data;
 
 	timeout_remove(bap->process_id);
+	timeout_remove(bap->wait_id);
 
 	bt_bap_detach(bap);
 
@@ -5398,6 +5701,7 @@ static void bap_ep_set_status(struct bt_bap *bap, struct bt_bap_endpoint *ep,
 					const uint8_t *value, uint16_t length)
 {
 	struct bt_ascs_ase_status *rsp;
+	struct bt_bap_stream *stream;
 	struct iovec iov = {
 		.iov_base = (void *) value,
 		.iov_len = length,
@@ -5438,7 +5742,13 @@ static void bap_ep_set_status(struct bt_bap *bap, struct bt_bap_endpoint *ep,
 	if (!ep->stream)
 		return;
 
-	bap_stream_state_changed(ep->stream);
+	stream = ep->stream;
+
+	bap_stream_state_changed(stream);
+
+	/* Complete the request if it was waiting for the ASE state */
+	if (ep->stream == stream)
+		bap_wait_state_changed(bap, stream);
 }
 
 static void read_ase_status(bool success, uint8_t att_ecode,
@@ -5538,6 +5848,139 @@ static void bap_endpoint_attach(struct bt_bap *bap, struct bt_bap_endpoint *ep)
 						bap_endpoint_notify, ep);
 }
 
+struct req_rsp_data {
+	struct bt_bap *bap;
+	const struct bt_ascs_ase_rsp *rsp;
+};
+
+static void req_set_rsp(void *data, void *user_data)
+{
+	struct bt_bap_req *req = data;
+	struct req_rsp_data *rsp = user_data;
+
+	if (!req->stream || !queue_find(rsp->bap->streams, NULL, req->stream))
+		return;
+
+	if (req->stream->ep->id != rsp->rsp->ase)
+		return;
+
+	req->rsp = *rsp->rsp;
+	req->has_rsp = true;
+}
+
+static void req_default_rsp(void *data, void *user_data)
+{
+	struct bt_bap_req *req = data;
+	struct req_rsp_data *rsp = user_data;
+
+	if (req->has_rsp)
+		return;
+
+	req->rsp = *rsp->rsp;
+	req->has_rsp = true;
+}
+
+static bool bap_req_needs_wait(struct bt_bap *bap, struct bt_bap_req *req)
+{
+	struct bt_bap_endpoint *ep;
+
+	if (!req->stream || !queue_find(bap->streams, NULL, req->stream))
+		return false;
+
+	/* Only wait if the operation succeeded for the ASE */
+	if (!req->has_rsp || req->rsp.code != BT_ASCS_RSP_SUCCESS)
+		return false;
+
+	ep = req->stream->ep;
+
+	/* ASE state has already been notified */
+	if (ep->state != req->state)
+		return false;
+
+	switch (req->op) {
+	case BT_ASCS_CONFIG:
+		return req->state != BT_ASCS_ASE_STATE_CONFIG;
+	case BT_ASCS_QOS:
+		return req->state != BT_ASCS_ASE_STATE_QOS;
+	case BT_ASCS_ENABLE:
+	case BT_ASCS_START:
+	case BT_ASCS_DISABLE:
+	case BT_ASCS_STOP:
+	case BT_ASCS_RELEASE:
+		return true;
+	}
+
+	return false;
+}
+
+static void req_set_wait(void *data, void *user_data)
+{
+	struct bt_bap_req *req = data;
+	struct bt_bap *bap = user_data;
+
+	req->wait = bap_req_needs_wait(bap, req);
+}
+
+static bool bap_wait_timeout(void *data)
+{
+	struct bt_bap *bap = data;
+
+	DBG(bap, "req %p timeout waiting for ASE state", bap->req);
+
+	bap->wait_id = 0;
+	bap_wait_complete(bap);
+	bap_process_queue(bap);
+
+	return false;
+}
+
+/* Wait for the ASE state notifications before completing the request, as
+ * the CP notification may arrive first. Further requests are not sent
+ * until then, so each request waits for the states it caused.
+ */
+static bool bap_req_wait(struct bt_bap *bap, struct bt_bap_req *req,
+				const struct bt_ascs_ase_rsp *rsp)
+{
+	struct req_rsp_data data = {
+		.bap = bap,
+		.rsp = rsp,
+	};
+
+	if (!rsp)
+		return false;
+
+	/* ASEs without a response of their own use the last one */
+	req_default_rsp(req, &data);
+	queue_foreach(req->group, req_default_rsp, &data);
+
+	req_set_wait(req, bap);
+	queue_foreach(req->group, req_set_wait, bap);
+
+	if (!bap_req_waiting(req))
+		return false;
+
+	DBG(bap, "req %p wait for ASE state", req);
+
+	bap->wait_rsp = *rsp;
+	bap->wait_id = timeout_add(BAP_STATE_TIMEOUT, bap_wait_timeout, bap,
+									NULL);
+
+	return bap->wait_id != 0;
+}
+
+/* Store the response of each ASE in its request */
+static void bap_req_set_rsp(struct bt_bap *bap, struct bt_bap_req *req,
+				const struct bt_ascs_ase_rsp *ase_rsp)
+{
+	struct req_rsp_data rsp = {
+		.bap = bap,
+		.rsp = ase_rsp,
+	};
+
+	req_set_rsp(req, &rsp);
+	queue_foreach(req->group, req_set_rsp, &rsp);
+}
+
 static void bap_cp_notify(struct bt_bap *bap, uint16_t value_handle,
 				const uint8_t *value, uint16_t length,
 				void *user_data)
@@ -5547,11 +5990,11 @@ static void bap_cp_notify(struct bt_bap *bap, uint16_t value_handle,
 	struct bt_bap_req *req;
 	int i;
 
-	if (!bap->req)
+	/* Ignore if there is no request or it is waiting for ASE state */
+	if (!bap->req || bap->wait_id)
 		return;
 
 	req = bap->req;
-	bap->req = NULL;
 
 	if (length < sizeof(*rsp)) {
 		DBG(bap, "Invalid ASE CP notification: length %u < %zu",
@@ -5580,9 +6023,16 @@ static void bap_cp_notify(struct bt_bap *bap, uint16_t value_handle,
 		}
 
 		ase_rsp = &rsp->rsp[i];
+		length -= sizeof(*ase_rsp);
+
+		bap_req_set_rsp(bap, req, ase_rsp);
 	}
 
 done:
+	if (bap_req_wait(bap, req, ase_rsp))
+		return;
+
+	bap->req = NULL;
 	bap_req_complete(req, ase_rsp);
 	bap_process_queue(bap);
 }
@@ -5875,9 +6325,16 @@ void bt_bap_detach(struct bt_bap *bap)
 		return;
 
 	/* Cancel ongoing request */
+	if (bap->wait_id) {
+		timeout_remove(bap->wait_id);
+		bap->wait_id = 0;
+	}
+
 	if (bap->req) {
-		bap_req_detach(bap->req);
+		struct bt_bap_req *req = bap->req;
+
 		bap->req = NULL;
+		bap_req_detach(req);
 	}
 
 	bt_gatt_client_idle_unregister(bap->client, bap->idle_id);
@@ -6891,26 +7348,76 @@ static bool match_name(const void *data, const void *match_data)
 	return (!strcmp(pac->name, name));
 }
 
+/* Remove the request matching id from a request and its group, if it is the
+ * leader the next member of the group is promoted.
+ */
+static struct bt_bap_req *bap_req_cancel(struct bt_bap_req *req,
+						unsigned int id)
+{
+	struct bt_bap_req *member;
+
+	member = queue_remove_if(req->group, match_req_id, UINT_TO_PTR(id));
+	if (member) {
+		bap_req_free(member);
+		return req;
+	}
+
+	if (req->id != id)
+		return req;
+
+	member = queue_pop_head(req->group);
+	if (member) {
+		member->group = req->group;
+		req->group = NULL;
+	}
+
+	bap_req_free(req);
+
+	return member;
+}
+
 int bt_bap_stream_cancel(struct bt_bap_stream *stream, unsigned int id)
 {
-	struct bt_bap_req *req;
+	struct bt_bap *bap;
+	const struct queue_entry *entry;
 
 	if (!stream)
 		return -EINVAL;
 
-	if (stream->bap->req && stream->bap->req->id == id) {
-		req = stream->bap->req;
-		stream->bap->req = NULL;
-		bap_req_free(req);
-		return 0;
+	bap = stream->bap;
+
+	/* The outstanding request has already been sent, so only drop its
+	 * callback and keep waiting for its CP notification and ASE state
+	 * before sending the next request.
+	 */
+	if (bap->req) {
+		struct bt_bap_req *req = bap->req;
+
+		if (req->id != id)
+			req = queue_find(req->group, match_req_id,
+							UINT_TO_PTR(id));
+		if (req) {
+			req->func = NULL;
+			req->user_data = NULL;
+			return 0;
+		}
 	}
 
-	req = queue_remove_if(stream->bap->reqs, match_req_id,
-						UINT_TO_PTR(id));
-	if (!req)
-		return 0;
+	for (entry = queue_get_entries(bap->reqs); entry;
+						entry = entry->next) {
+		struct bt_bap_req *req = entry->data;
+		struct bt_bap_req *leader = bap_req_cancel(req, id);
 
-	bap_req_free(req);
+		if (leader == req)
+			continue;
+
+		if (leader)
+			queue_push_after(bap->reqs, req, leader);
+
+		queue_remove(bap->reqs, req);
+
+		break;
+	}
 
 	return 0;
 }
@@ -7468,7 +7975,7 @@ static void set_base_subgroup(void *data, void *user_data)
 		for (entry = queue_get_entries(base->subgroups);
 						entry; entry = entry->next) {
 			subgroup = entry->data;
-			same_meta = compare_ltv(subgroup->meta,	stream->meta);
+			same_meta = compare_ltv(subgroup->meta, stream->meta);
 			if (same_meta)
 				break;
 		}
@@ -7560,17 +8067,17 @@ static void check_pac_caps_ltv(size_t i, uint8_t l, uint8_t t, uint8_t *v,
 	uint16_t frame_len;
 
 	switch (t) {
-	case BAP_FREQ_LTV_TYPE:
+	case BT_BAP_CAP_FREQ:
 		mask = get_le16(v);
 
 		if (mask & (1 << (bis_v[0] - 1)))
 			compare_data->data32 |= 1<<t;
 		break;
-	case BAP_DURATION_LTV_TYPE:
+	case BT_BAP_CAP_DURATION:
 		if ((v[0]) & (1 << bis_v[0]))
 			compare_data->data32 |= 1<<t;
 		break;
-	case BAP_FRAME_LEN_LTV_TYPE:
+	case BT_BAP_CAP_FRAME_LENGTH:
 		min = get_le16(v);
 		max = get_le16(v + 2);
 		frame_len = get_le16(bis_v);
@@ -7682,7 +8189,7 @@ static void bap_sink_match_allocation(size_t i, uint8_t l, uint8_t t,
 	struct bt_ltv_match *data = user_data;
 	uint32_t location32;
 
-	if (!v)
+	if (!v || l != sizeof(location32))
 		return;
 
 	memcpy(&location32, v, l);
@@ -7709,7 +8216,7 @@ static struct bt_ltv_match bap_check_bis(uint32_t sink_loc, struct queue *pacs,
 	compare_data.found = true;
 
 	if (sink_loc) {
-		uint8_t type = BAP_CHANNEL_ALLOCATION_LTV_TYPE;
+		uint8_t type = BT_BAP_CC_LOCATION;
 
 		compare_data.data32 = sink_loc;
 		util_ltv_foreach(bis_data->iov_base, bis_data->iov_len, &type,

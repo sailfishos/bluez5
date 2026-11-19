@@ -66,6 +66,20 @@ void bthost_hci_connect(struct bthost *bthost, const uint8_t *bdaddr,
 void bthost_hci_ext_connect(struct bthost *bthost, const uint8_t *bdaddr,
 							uint8_t addr_type);
 
+struct bthost_conn_rate {
+	uint16_t interval_min;
+	uint16_t interval_max;
+	uint16_t subrate_min;
+	uint16_t subrate_max;
+	uint16_t max_latency;
+	uint16_t cont_num;
+	uint16_t supv_timeout;
+};
+
+/* Send LE Connection Rate Request for the given connection handle. */
+void bthost_le_conn_rate(struct bthost *bthost, uint16_t handle,
+					const struct bthost_conn_rate *rate);
+
 void bthost_hci_disconnect(struct bthost *bthost, uint16_t handle,
 								uint8_t reason);
 
@@ -111,6 +125,10 @@ typedef void (*bthost_l2cap_rsp_cb) (uint8_t code, const void *data,
 bool bthost_l2cap_req(struct bthost *bthost, uint16_t handle, uint8_t req,
 				const void *data, uint16_t len,
 				bthost_l2cap_rsp_cb cb, void *user_data);
+
+uint8_t bthost_l2cap_sig_raw(struct bthost *bthost, uint16_t handle,
+						uint8_t req, uint8_t ident,
+						const void *data, uint16_t len);
 
 void bthost_write_scan_enable(struct bthost *bthost, uint8_t scan);
 

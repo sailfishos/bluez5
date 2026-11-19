@@ -60,6 +60,7 @@
 
 #define MCS_UUID_STR	"00001848-0000-1000-8000-00805f9b34fb"
 #define GMCS_UUID_STR	"00001849-0000-1000-8000-00805f9b34fb"
+#define MCS_SEEK_OFFSET_USEC	(10 * G_USEC_PER_SEC)
 
 
 /*
@@ -72,26 +73,6 @@ struct remote_player {
 	struct media_player *mp;
 	uint8_t playing_order;
 };
-
-static char *name2utf8(const uint8_t *name, uint16_t len)
-{
-	char *utf8_name;
-
-	utf8_name = malloc(len + 1);
-	if (!utf8_name)
-		return NULL;
-
-	if (len)
-		memcpy(utf8_name, name, len);
-
-	utf8_name[len] = 0;
-	strtoutf8(utf8_name, len);
-
-	/* Remove leading and trailing whitespace characters */
-	g_strstrip(utf8_name);
-
-	return utf8_name;
-}
 
 static const char *mcp_status_val_to_string(uint8_t status)
 {
@@ -118,7 +99,7 @@ static void remote_media_player_name(void *data, const uint8_t *value,
 	struct remote_player *remote = data;
 	char *name;
 
-	name = name2utf8(value, length);
+	name = str2utf8(value, length);
 	if (!name)
 		return;
 
@@ -145,7 +126,7 @@ static void remote_track_title(void *data, const uint8_t *value,
 	char *name;
 	uint16_t len;
 
-	name = name2utf8(value, length);
+	name = str2utf8(value, length);
 	if (!name)
 		return;
 
@@ -272,35 +253,35 @@ static int remote_mp_play(struct media_player *mp, void *user_data)
 {
 	struct remote_player *remote = user_data;
 
-	return bt_mcp_play(remote->mcp, remote->ccid);
+	return bt_mcp_play(remote->mcp, remote->ccid) ? 0 : -EIO;
 }
 
 static int remote_mp_pause(struct media_player *mp, void *user_data)
 {
 	struct remote_player *remote = user_data;
 
-	return bt_mcp_pause(remote->mcp, remote->ccid);
+	return bt_mcp_pause(remote->mcp, remote->ccid) ? 0 : -EIO;
 }
 
 static int remote_mp_stop(struct media_player *mp, void *user_data)
 {
 	struct remote_player *remote = user_data;
 
-	return bt_mcp_stop(remote->mcp, remote->ccid);
+	return bt_mcp_stop(remote->mcp, remote->ccid) ? 0 : -EIO;
 }
 
 static int remote_mp_next(struct media_player *mp, void *user_data)
 {
 	struct remote_player *remote = user_data;
 
-	return bt_mcp_next_track(remote->mcp, remote->ccid);
+	return bt_mcp_next_track(remote->mcp, remote->ccid) ? 0 : -EIO;
 }
 
 static int remote_mp_previous(struct media_player *mp, void *user_data)
 {
 	struct remote_player *remote = user_data;
 
-	return bt_mcp_previous_track(remote->mcp, remote->ccid);
+	return bt_mcp_previous_track(remote->mcp, remote->ccid) ? 0 : -EIO;
 }
 
 static bool remote_mp_set_setting(struct media_player *mp, const char *key,
@@ -460,6 +441,7 @@ struct mcs_instance {
 	struct bt_mcs *mcs;
 	struct queue *player_links;
 	bool at_start;
+	int8_t seeking_speed;
 
 	/* GMCS-specific */
 	struct bt_uinput *uinput;
@@ -512,6 +494,11 @@ static void mcs_update_media_state(struct mcs_instance *mcs)
 		state = BT_MCS_STATE_SEEKING;
 	} else {
 		state = BT_MCS_STATE_INACTIVE;
+	}
+
+	if (state != BT_MCS_STATE_SEEKING && mcs->seeking_speed) {
+		mcs->seeking_speed = 0;
+		bt_mcs_changed(mcs->mcs, MCS_SEEKING_SPEED_CHRC_UUID);
 	}
 
 	bt_mcs_set_media_state(mcs->mcs, state);
@@ -576,6 +563,11 @@ static void lp_track_position(uint32_t old_ms, uint32_t new_ms, void *user_data)
 
 	if (!player_link_is_active(p))
 		return;
+
+	if (mcs->seeking_speed) {
+		mcs_update_media_state(mcs);
+		return;
+	}
 
 	bt_mcs_changed(mcs->mcs, MCS_TRACK_POSITION_CHRC_UUID);
 }
@@ -676,6 +668,33 @@ static bool mcs_pause(void *data)
 	return mcs_command(mcs, BT_MCS_CMD_PAUSE);
 }
 
+/* MPRIS Seek uses signed offsets: negative rewinds, positive advances. */
+static bool mcs_fast_rewind(void *data)
+{
+	struct mcs_instance *mcs = data;
+	struct player_link *p = mcs_get_active(mcs);
+
+	if (!p || !local_player_seek(p->lp, -MCS_SEEK_OFFSET_USEC))
+		return false;
+
+	mcs->seeking_speed = -1;
+	bt_mcs_changed(mcs->mcs, MCS_SEEKING_SPEED_CHRC_UUID);
+	return true;
+}
+
+static bool mcs_fast_forward(void *data)
+{
+	struct mcs_instance *mcs = data;
+	struct player_link *p = mcs_get_active(mcs);
+
+	if (!p || !local_player_seek(p->lp, MCS_SEEK_OFFSET_USEC))
+		return false;
+
+	mcs->seeking_speed = 1;
+	bt_mcs_changed(mcs->mcs, MCS_SEEKING_SPEED_CHRC_UUID);
+	return true;
+}
+
 static bool mcs_stop(void *data)
 {
 	struct mcs_instance *mcs = data;
@@ -772,6 +791,13 @@ static int32_t mcs_track_position(void *data)
 	return local_player_get_position(p->lp) / 10;
 }
 
+static int8_t mcs_seeking_speed(void *data)
+{
+	struct mcs_instance *mcs = data;
+
+	return mcs->seeking_speed;
+}
+
 static uint8_t mcs_playing_order(void *data)
 {
 	struct mcs_instance *mcs = data;
@@ -815,8 +841,26 @@ static uint16_t mcs_playing_order_supported(void *data)
 
 static bool mcs_set_track_position(void *data, int32_t value)
 {
-	/* TODO: add support to setting position in org.bluez.MediaPlayer */
-	return false;
+	struct mcs_instance *mcs = data;
+	struct player_link *p = mcs_get_active(mcs);
+	int64_t position_centisec = value;
+
+	if (!p)
+		return false;
+
+	if (value < 0) {
+		int32_t duration_centisec = mcs_track_duration(mcs);
+
+		if (duration_centisec == BT_MCS_DURATION_UNAVAILABLE)
+			return false;
+
+		position_centisec += duration_centisec;
+	}
+
+	/* Convert MCS centiseconds to a relative MPRIS microsecond offset. */
+	return local_player_seek(p->lp, (position_centisec * 10 -
+				local_player_get_position(p->lp)) *
+				G_TIME_SPAN_MILLISECOND);
 }
 
 static bool mcs_set_playing_order(void *data, uint8_t value)
@@ -878,12 +922,15 @@ static const struct bt_mcs_callback gmcs_cb = {
 	.track_title = mcs_track_title,
 	.track_duration = mcs_track_duration,
 	.track_position = mcs_track_position,
+	.seeking_speed = mcs_seeking_speed,
 	.playing_order = mcs_playing_order,
 	.playing_order_supported = mcs_playing_order_supported,
 	.set_track_position = mcs_set_track_position,
 	.set_playing_order = mcs_set_playing_order,
 	.play = mcs_play,
 	.pause = mcs_pause,
+	.fast_rewind = mcs_fast_rewind,
+	.fast_forward = mcs_fast_forward,
 	.stop = mcs_stop,
 	.next_track = mcs_next_track,
 	.previous_track = mcs_previous_track,

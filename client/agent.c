@@ -255,8 +255,14 @@ static DBusMessage *cancel_request(DBusConnection *conn,
 	bt_shell_printf("Request canceled\n");
 
 	agent_release_prompt();
-	dbus_message_unref(pending_message);
-	pending_message = NULL;
+
+	/* There is no pending request with the auto agent, which replies
+	 * right away, or if it has already been replied.
+	 */
+	if (pending_message) {
+		dbus_message_unref(pending_message);
+		pending_message = NULL;
+	}
 
 	return dbus_message_new_method_return(msg);
 }
@@ -403,11 +409,21 @@ void agent_register(DBusConnection *conn, GDBusProxy *manager,
 
 	agent_capability = capability;
 
-	if (!strcasecmp(agent_capability, "auto")) {
+	if (!strncasecmp(agent_capability, "auto", 4) &&
+			(!agent_capability[4] || agent_capability[4] == ':')) {
 		bt_shell_printf("Warning: setting auto response is not secure, "
 				"it bypass user confirmation/authorization, it "
 				"shall only be used for test automation.\n");
-		agent_capability = "";
+		/* The capability to register with can be given after a
+		 * colon, e.g. auto:NoInputNoOutput, so the pairing does
+		 * not choose a method the auto response cannot answer,
+		 * like the entry of a passkey.
+		 */
+		if (agent_capability[4])
+			agent_capability += 5;
+		else
+			agent_capability = "";
+
 		methods = auto_methods;
 	}
 

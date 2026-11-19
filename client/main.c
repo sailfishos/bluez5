@@ -28,6 +28,7 @@
 #include "src/shared/util.h"
 #include "src/shared/ad.h"
 #include "gdbus/gdbus.h"
+#include "main.h"
 #include "print.h"
 #include "agent.h"
 #include "gatt.h"
@@ -39,6 +40,7 @@
 #include "assistant.h"
 #include "hci.h"
 #include "telephony.h"
+#include "cs.h"
 
 /* String display constants */
 #define COLORED_NEW	COLOR_GREEN "NEW" COLOR_OFF
@@ -68,6 +70,8 @@ static char *default_local_attr;
 static GDBusProxy *default_attr;
 static GList *ctrl_list;
 static GList *battery_proxies;
+static GList *ranging_proxies;
+static GList *ranging_manager_proxies;
 
 static const char *agent_arguments[] = {
 	"on",
@@ -120,10 +124,16 @@ static void disconnect_handler(DBusConnection *connection, void *user_data)
 
 	g_list_free_full(ctrl_list, proxy_leak);
 	g_list_free_full(battery_proxies, proxy_leak);
+	g_list_free_full(ranging_proxies, proxy_leak);
+	g_list_free_full(ranging_manager_proxies, proxy_leak);
 	ctrl_list = NULL;
 	battery_proxies = NULL;
+	ranging_proxies = NULL;
+	ranging_manager_proxies = NULL;
 
 	default_ctrl = NULL;
+	cs_set_device_list(NULL);
+	cs_disconnected();
 }
 
 static void print_adapter(GDBusProxy *proxy, const char *description)
@@ -173,6 +183,19 @@ static struct set_discovery_filter_args {
 	.set = true,
 };
 
+static bool device_is_broadcaster(GDBusProxy *proxy)
+{
+	DBusMessageIter iter;
+	dbus_bool_t connectable;
+
+	if (!g_dbus_proxy_get_property(proxy, "Connectable", &iter))
+		return false;
+
+	dbus_message_iter_get_basic(&iter, &connectable);
+
+	return !connectable;
+}
+
 static void print_device(GDBusProxy *proxy, const char *description)
 {
 	DBusMessageIter iter;
@@ -208,6 +231,20 @@ static void print_device(GDBusProxy *proxy, const char *description)
 			return;
 
 		bt_shell_printf("%s%s%s" COLOR_BOLDGRAY "Device %s %s"
+					COLOR_OFF "\n",
+					description ? "[" : "",
+					description ? : "",
+					description ? "] " : "",
+					address, name);
+
+		return;
+	}
+
+	/* Print discoverable broadcasters in red to warn the user they cannot
+	 * be connected to despite being discoverable.
+	 */
+	if (device_is_broadcaster(proxy)) {
+		bt_shell_printf("%s%s%s" COLOR_RED "Device %s %s"
 					COLOR_OFF "\n",
 					description ? "[" : "",
 					description ? : "",
@@ -356,6 +393,65 @@ static void battery_removed(GDBusProxy *proxy)
 	battery_proxies = g_list_remove(battery_proxies, proxy);
 }
 
+static void ranging_added(GDBusProxy *proxy)
+{
+	ranging_proxies = g_list_append(ranging_proxies, proxy);
+}
+
+static void ranging_removed(GDBusProxy *proxy)
+{
+	ranging_proxies = g_list_remove(ranging_proxies, proxy);
+}
+
+static GDBusProxy *find_proxies_by_path(GList *source, const char *path);
+
+/* Hand cs.c the RangingProviderManager1 of the default controller, if it
+ * has one. Called whenever either side changes, since the manager proxy
+ * and the adapter proxy can arrive in either order and the default
+ * controller can be changed later with "select".
+ */
+static void update_ranging_manager(void)
+{
+	GDBusProxy *manager = NULL;
+
+	if (default_ctrl)
+		manager = find_proxies_by_path(ranging_manager_proxies,
+				g_dbus_proxy_get_path(default_ctrl->proxy));
+
+	cs_set_ranging_manager(manager);
+}
+
+static void ranging_manager_added(GDBusProxy *proxy)
+{
+	ranging_manager_proxies = g_list_append(ranging_manager_proxies,
+									proxy);
+	update_ranging_manager();
+}
+
+static void ranging_manager_removed(GDBusProxy *proxy)
+{
+	ranging_manager_proxies = g_list_remove(ranging_manager_proxies,
+									proxy);
+	update_ranging_manager();
+}
+
+static void print_distance_cm(GDBusProxy *proxy, const char *label)
+{
+	DBusMessageIter iter;
+	dbus_uint32_t mm;
+
+	if (g_dbus_proxy_get_property(proxy, "Distance",
+						&iter) == FALSE)
+		return;
+
+	if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_UINT32)
+		return;
+
+	dbus_message_iter_get_basic(&iter, &mm);
+
+	bt_shell_printf("\t%s: %.1f cm\n", label, mm / 10.0);
+}
+
 static void device_added(GDBusProxy *proxy)
 {
 	DBusMessageIter iter;
@@ -391,8 +487,11 @@ static struct adapter *adapter_new(GDBusProxy *proxy)
 
 	ctrl_list = g_list_append(ctrl_list, adapter);
 
-	if (!default_ctrl)
+	if (!default_ctrl) {
 		default_ctrl = adapter;
+		cs_set_device_list(&adapter->devices);
+		update_ranging_manager();
+	}
 
 	return adapter;
 }
@@ -525,6 +624,12 @@ static void proxy_added(GDBusProxy *proxy, void *user_data)
 		bearer_added(proxy);
 	} else if (!strcmp(interface, "org.bluez.Bearer.LE1")) {
 		bearer_added(proxy);
+	} else if (!strcmp(interface, "org.bluez.ChannelSounding1")) {
+		cs_proxy_added(proxy);
+	} else if (!strcmp(interface, "org.bluez.Ranging1")) {
+		ranging_added(proxy);
+	} else if (!strcmp(interface, "org.bluez.RangingProviderManager1")) {
+		ranging_manager_added(proxy);
 	}
 }
 
@@ -656,6 +761,12 @@ static void proxy_removed(GDBusProxy *proxy, void *user_data)
 		bearer_removed(proxy);
 	} else if (!strcmp(interface, "org.bluez.Bearer.LE1")) {
 		bearer_removed(proxy);
+	} else if (!strcmp(interface, "org.bluez.ChannelSounding1")) {
+		cs_proxy_removed(proxy);
+	} else if (!strcmp(interface, "org.bluez.Ranging1")) {
+		ranging_removed(proxy);
+	} else if (!strcmp(interface, "org.bluez.RangingProviderManager1")) {
+		ranging_manager_removed(proxy);
 	}
 }
 
@@ -728,6 +839,10 @@ static void property_changed(GDBusProxy *proxy, const char *name,
 					set_default_device(proxy, NULL);
 				else if (!connected && default_dev == proxy)
 					set_default_device(NULL, NULL);
+
+				if (!connected)
+					cs_device_disconnected(
+						g_dbus_proxy_get_path(proxy));
 
 				/* If the device is connected and the filter
 				 * is auto_connect and it matches the pattern,
@@ -821,6 +936,23 @@ static void property_changed(GDBusProxy *proxy, const char *name,
 			print_iter(str, name, iter);
 			g_free(str);
 		}
+	} else if (!strcmp(interface, "org.bluez.ChannelSounding1")) {
+		if (!strcmp(name, "Active")) {
+			dbus_bool_t active;
+
+			dbus_message_iter_get_basic(iter, &active);
+			if (active)
+				cs_measurement_started(proxy);
+			else
+				cs_measurement_stopped(proxy);
+		}
+	} else if (!strcmp(interface, "org.bluez.Ranging1")) {
+		if (!strcmp(name, "Distance")) {
+			const char *path = g_dbus_proxy_get_path(proxy);
+			const char *leaf = strrchr(path, '/');
+
+			print_distance_cm(proxy, leaf ? leaf + 1 : path);
+		}
 	}
 }
 
@@ -879,6 +1011,14 @@ static struct adapter *find_ctrl_by_address(GList *source, const char *address)
 	}
 
 	return NULL;
+}
+
+GDBusProxy *bluetoothctl_get_default_controller(void)
+{
+	if (!default_ctrl)
+		return NULL;
+
+	return default_ctrl->proxy;
 }
 
 static GDBusProxy *find_proxies_by_iface(GList *source, const char *path,
@@ -1090,6 +1230,8 @@ static void cmd_select(int argc, char *argv[])
 		return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 
 	default_ctrl = adapter;
+	cs_set_device_list(&adapter->devices);
+	update_ranging_manager();
 	print_adapter(adapter->proxy, NULL);
 
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
@@ -1302,9 +1444,17 @@ static void cmd_agent(int argc, char *argv[])
 	dbus_bool_t enable;
 	const char *capability;
 
-	if (!parse_argument(argc, argv, agent_arguments, "capability",
-						&enable, &capability))
+	/* The capability of the auto response is given after a colon,
+	 * e.g. auto:NoInputNoOutput, so it cannot be looked up in the
+	 * list of arguments.
+	 */
+	if (argc > 1 && !strncasecmp(argv[1], "auto:", 5)) {
+		enable = TRUE;
+		capability = argv[1];
+	} else if (!parse_argument(argc, argv, agent_arguments, "capability",
+						&enable, &capability)) {
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
 
 	if (enable == TRUE) {
 		g_free(auto_register_agent);
@@ -1859,6 +2009,8 @@ static void cmd_info(int argc, char *argv[])
 {
 	GDBusProxy *proxy;
 	GDBusProxy *battery_proxy;
+	GDBusProxy *cs_proxy;
+	GDBusProxy *ranging_proxy;
 	GDBusProxy *bearer;
 	DBusMessageIter iter;
 	const char *address;
@@ -1895,12 +2047,15 @@ static void cmd_info(int argc, char *argv[])
 	print_property(proxy, "WakeAllowed");
 	print_property(proxy, "LegacyPairing");
 	print_property(proxy, "CablePairing");
+	print_property(proxy, "SecurityLevel");
+	print_property(proxy, "EncryptionType");
 	print_uuids(proxy);
 	print_property(proxy, "Modalias");
 	print_property(proxy, "ManufacturerData");
 	print_property(proxy, "ServiceData");
 	print_property(proxy, "RSSI");
 	print_property(proxy, "TxPower");
+	print_property(proxy, "Connectable");
 	print_property(proxy, "AdvertisingFlags");
 	print_property(proxy, "AdvertisingData");
 	print_property(proxy, "Sets");
@@ -1911,6 +2066,16 @@ static void cmd_info(int argc, char *argv[])
 	print_property_with_label(battery_proxy, "Percentage",
 					"Battery Percentage");
 
+	cs_proxy = cs_find_proxy(g_dbus_proxy_get_path(proxy));
+	if (cs_proxy)
+		print_property_with_label(cs_proxy, "Active",
+				"CS Session Active");
+
+	ranging_proxy = find_proxies_by_path(ranging_proxies,
+				g_dbus_proxy_get_path(proxy));
+	if (ranging_proxy)
+		print_distance_cm(ranging_proxy, "Ranging Distance");
+
 	bearer = find_proxies_by_iface(default_ctrl->bearers,
 				      g_dbus_proxy_get_path(proxy),
 				      "org.bluez.Bearer.BREDR1");
@@ -1919,6 +2084,8 @@ static void cmd_info(int argc, char *argv[])
 		print_property_with_label(bearer, "Bonded", "BREDR.Bonded");
 		print_property_with_label(bearer, "Connected",
 							"BREDR.Connected");
+		print_property_with_label(bearer, "Connectable",
+							"BREDR.Connectable");
 	}
 
 	bearer = find_proxies_by_iface(default_ctrl->bearers,
@@ -1928,10 +2095,21 @@ static void cmd_info(int argc, char *argv[])
 		print_property_with_label(bearer, "Paired", "LE.Paired");
 		print_property_with_label(bearer, "Bonded", "LE.Bonded");
 		print_property_with_label(bearer, "Connected", "LE.Connected");
+		print_property_with_label(bearer, "Connectable",
+							"LE.Connectable");
+		print_property_with_label(bearer, "Role", "LE.Role");
+		print_property_with_label(bearer, "Interval", "LE.Interval");
+		print_property_with_label(bearer, "Latency", "LE.Latency");
+		print_property_with_label(bearer, "SupervisionTimeout",
+						"LE.SupervisionTimeout");
+		print_property_with_label(bearer, "Subrate", "LE.Subrate");
 	}
 
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
+
+static const char *proxy_address(GDBusProxy *proxy);
+static void connect_device(GDBusProxy *proxy);
 
 static void pair_reply(DBusMessage *message, void *user_data)
 {
@@ -1966,10 +2144,30 @@ static const char *proxy_address(GDBusProxy *proxy)
 static void cmd_pair(int argc, char *argv[])
 {
 	GDBusProxy *proxy;
+	DBusMessageIter iter;
+	dbus_bool_t paired;
 
 	proxy = find_device(argc, argv);
 	if (!proxy)
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+
+	/* Pairing a device that is already paired is rejected with
+	 * AlreadyExists, so connect it instead: the bond is there, which
+	 * is what pairing it again would be for, and removing it first is
+	 * what actually pairs it anew.
+	 */
+	if (g_dbus_proxy_get_property(proxy, "Paired", &iter)) {
+		dbus_message_iter_get_basic(&iter, &paired);
+
+		if (paired) {
+			bt_shell_printf("Device %s is already paired, "
+					"connecting instead, remove it first "
+					"to pair it again\n",
+					proxy_address(proxy));
+			connect_device(proxy);
+			return;
+		}
+	}
 
 	if (g_dbus_proxy_method_call(proxy, "Pair", NULL, pair_reply,
 							NULL, NULL) == FALSE) {
@@ -2230,6 +2428,23 @@ static void connect_reply(DBusMessage *message, void *user_data)
 	return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 }
 
+static void connect_device(GDBusProxy *proxy)
+{
+	struct connection_data *data;
+
+	data = new0(struct connection_data, 1);
+	data->proxy = proxy;
+
+	if (g_dbus_proxy_method_call(proxy, "Connect", connection_setup,
+					connect_reply, data, NULL) == FALSE) {
+		bt_shell_printf("Failed to connect\n");
+		g_free(data);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	bt_shell_printf("Attempting to connect to %s\n", proxy_address(proxy));
+}
+
 static void prompt_scan_connect(const char *input, void *user_data)
 {
 	char *address = user_data;
@@ -2267,6 +2482,8 @@ static void cmd_connect(int argc, char *argv[])
 	const char *method = "Connect";
 	char profile[128] = "";
 	GDBusProxy *proxy;
+	dbus_bool_t discovering;
+	DBusMessageIter iter;
 
 	if (check_default_ctrl() == FALSE)
 		return bt_shell_noninteractive_quit(EXIT_FAILURE);
@@ -2274,8 +2491,18 @@ static void cmd_connect(int argc, char *argv[])
 	proxy = find_proxy_by_address(default_ctrl->devices, argv[1]);
 	if (!proxy) {
 		bt_shell_printf("Device %s not available\n", argv[1]);
-		bt_shell_prompt_input(argv[1], "Scan and connect (yes,no):",
-				      prompt_scan_connect, strdup(argv[1]));
+
+		if (g_dbus_proxy_get_property(default_ctrl->proxy,
+					"Discovering", &iter)) {
+			dbus_message_iter_get_basic(&iter, &discovering);
+
+			if (!discovering)
+				bt_shell_prompt_input(argv[1],
+					"Scan and connect (yes,no):",
+					prompt_scan_connect,
+					strdup(argv[1]));
+
+		}
 		return;
 	}
 
@@ -3896,7 +4123,7 @@ static const struct bt_shell_menu main_menu = {
 							NULL },
 	{ "discoverable-timeout", "[value]", cmd_discoverable_timeout,
 					"Set discoverable timeout", NULL },
-	{ "agent",        "<on/off/auto/capability>", cmd_agent,
+	{ "agent",        "<on/off/auto[:capability]/capability>", cmd_agent,
 				"Enable/disable agent with given capability",
 							capability_generator},
 	{ "default-agent",NULL,       cmd_default_agent,
@@ -3982,6 +4209,7 @@ static bool timeout_quit(void *user_data)
 int main(int argc, char *argv[])
 {
 	GDBusClient *client;
+	DBusError error;
 	int status;
 	int timeout;
 	unsigned int timeout_id;
@@ -4003,6 +4231,7 @@ int main(int argc, char *argv[])
 	assistant_add_submenu();
 	hci_add_submenu();
 	telephony_add_submenu();
+	cs_add_submenu();
 	bt_shell_set_prompt(PROMPT_OFF, NULL);
 
 	bt_shell_handle_non_interactive_help();
@@ -4012,8 +4241,20 @@ int main(int argc, char *argv[])
 	else
 		auto_register_agent = g_strdup("");
 
-	dbus_conn = g_dbus_setup_bus(DBUS_BUS_SYSTEM, NULL, NULL);
+	dbus_error_init(&error);
+	dbus_conn = g_dbus_setup_bus(DBUS_BUS_SYSTEM, NULL, &error);
+	if (!dbus_conn) {
+		fprintf(stderr, "Failed to connect to system D-Bus: %s\n",
+			error.message ? error.message : "unavailable");
+		dbus_error_free(&error);
+		g_free(auto_register_agent);
+		bt_shell_cleanup();
+		return EXIT_FAILURE;
+	}
+
+	dbus_error_free(&error);
 	g_dbus_attach_object_manager(dbus_conn);
+	cs_set_dbus_conn(dbus_conn);
 
 	bt_shell_set_env("DBUS_CONNECTION", dbus_conn);
 
@@ -4044,6 +4285,7 @@ int main(int argc, char *argv[])
 	assistant_remove_submenu();
 	hci_remove_submenu();
 	telephony_remove_submenu();
+	cs_remove_submenu();
 
 	g_dbus_client_unref(client);
 

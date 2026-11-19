@@ -12,6 +12,8 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
+#include <glib.h>
 
 #include "bluetooth/bluetooth.h"
 #include "bluetooth/hci.h"
@@ -19,12 +21,28 @@
 
 #include "src/shared/queue.h"
 #include "src/shared/util.h"
-#include "src/shared/timeout.h"
 #include "src/shared/att.h"
 #include "src/shared/gatt-db.h"
 #include "src/shared/gatt-server.h"
 #include "src/shared/gatt-client.h"
+#include "src/shared/timeout.h"
 #include "src/shared/rap.h"
+
+/* Watchdog for a RAS Control Point request the initiator is awaiting a
+ * response for. Guards against a lost/dropped notification leaving
+ * ras_ondemand_client permanently stuck waiting.
+ */
+#define RAS_CP_RESPONSE_TIMEOUT (5 * 1000)
+#define RAS_SEGMENT_TIMEOUT (1 * 1000)
+#define RAS_REALTIME_FIRST_SEGMENT_TIMEOUT (5 * 1000)
+/* Delay between On-demand ranging-data notification segments, see
+ * send_ondemand_segment_data_cb().
+ */
+#define RAS_SEGMENT_NFY_PACE_MS 5
+/* Upper bound on real-time segments awaiting delivery, so a peer that is
+ * slow to confirm indications cannot grow the queue without limit.
+ */
+#define RAS_REALTIME_MAX_SEGMENTS 256
 
 #define DBG(_rap, fmt, ...) \
 	rap_debug(_rap, "%s:%s() " fmt, __FILE__, __func__, ##__VA_ARGS__)
@@ -151,6 +169,16 @@ static inline uint8_t ranging_header_get_antenna_mask(
 	return hdr->antenna_pct & 0x0F;
 }
 
+static inline uint16_t ranging_header_get_counter(
+					const struct ranging_header *hdr)
+{
+	if (!hdr)
+		return 0;
+
+	return (uint16_t)(hdr->counter_config[0] |
+			  ((hdr->counter_config[1] & 0x0F) << 8));
+}
+
 static inline uint8_t antenna_mask_count_paths(uint8_t antenna_mask)
 {
 	uint8_t count = 0;
@@ -206,11 +234,23 @@ enum cs_role {
 };
 
 #define CS_INVALID_CONFIG_ID   0xFF
+#define CS_RANGING_COUNTER_MASK   0x0FFF
+
 /* Minimal enums (align to controller values if needed) */
 enum cs_procedure_done_status {
 	CS_PROC_ALL_RESULTS_COMPLETE = 0x00,
 	CS_PROC_PARTIAL_RESULTS      = 0x01,
-	CS_PROC_ABORTED              = 0x02
+	CS_PROC_ABORTED              = 0x0F
+};
+
+/* Per-procedure tracking - one entry per HCI procedure counter */
+struct cs_proc_state {
+	uint16_t proc_counter;
+	struct bcs_procedure_data bcs_data;
+	enum cs_procedure_done_status local_status;
+	bool                          local_has_complete_subevent;
+	enum cs_procedure_done_status remote_status;
+	bool                          remote_has_complete_subevent;
 };
 
 /* Main cs_procedure_data  */
@@ -253,6 +293,86 @@ struct cstracker {
 	struct ranging_header   ranging_header_;
 	/* Client - subsequent segments appended using iovec */
 	struct iovec segment_data;
+	/* Client - segment reassembly continuity tracking: true from a
+	 * valid first segment until a detected gap, an append failure,
+	 * or bt_rap_detach(). NOT cleared on last_segment - a ranging
+	 * procedure's later subevents can arrive as further first/last
+	 * cycles without repeating first_segment=1, so this stays active
+	 * across them (see ras_reassemble_segment_notify()).
+	 */
+	bool                     reassembly_active;
+	/* Client - rolling_segment_counter value the next segment must
+	 * carry; only meaningful while reassembly_active is true.
+	 */
+	uint8_t                  expected_segment_counter;
+
+	/* Session-level config template and per-procedure state */
+	struct bcs_procedure_data     bcs_proc_data;
+	struct queue                  *proc_states;
+	uint8_t                       procedure_sequence_after_enable;
+	uint64_t                      proc_start_timestamp_nanos;
+};
+
+/* RAS Control Point op codes */
+enum ras_cp_opcode {
+	RAS_CP_OP_GET_RANGING_DATA = 0x00,
+	RAS_CP_OP_ACK_RANGING_DATA = 0x01,
+	RAS_CP_OP_ABORT_OPERATION = 0x03,
+	/* 0x02 Retrieve_Lost_Ranging_Data_Segments,
+	 * 0x04 Set_Filter - optional, not implemented
+	 */
+};
+
+/* RAS Control Point response op codes */
+enum ras_cp_rsp_opcode {
+	RAS_CP_RSP_COMPLETE_RANGING_DATA = 0x00,
+	RAS_CP_RSP_RESPONSE_CODE         = 0x02,
+};
+
+/* RAS Control Point response code values */
+enum ras_cp_response_code {
+	RAS_CP_RSP_CODE_SUCCESS                 = 0x01,
+	RAS_CP_RSP_CODE_OPCODE_NOT_SUPPORTED    = 0x02,
+	RAS_CP_RSP_CODE_INVALID_PARAMETER       = 0x03,
+	RAS_CP_RSP_CODE_PROCEDURE_NOT_COMPLETED = 0x06,
+	RAS_CP_RSP_CODE_SERVER_BUSY             = 0x07,
+	RAS_CP_RSP_CODE_NO_RECORDS_FOUND        = 0x08,
+};
+
+/* Single-slot buffer for a completed CS Procedure's Ranging Data Body,
+ * retained until the client sends ACK_Ranging_Data. Lives on struct bt_rap
+ * (one per remote connection) rather than on the shared struct ras (one
+ * per local adapter GATT database) so that concurrently connected
+ * centrals cannot evict or receive each other's cached ranging data.
+ */
+struct ras_ondemand_cache {
+	bool     valid;
+	bool     sending;
+	uint16_t counter;
+	struct iovec data;
+	uint16_t send_index;
+	struct segmentation_header seg_hdr;
+	unsigned int send_id;
+	unsigned int ind_id;
+};
+
+/* Initiator role: which RAS Control Point request the client is
+ * currently awaiting a response for.
+ */
+enum ras_cp_pending {
+	RAS_CP_PENDING_NONE = 0,
+	RAS_CP_PENDING_GET,
+	RAS_CP_PENDING_ACK,
+};
+
+struct ras_ondemand_client {
+	enum ras_cp_pending pending_op;
+	uint16_t            pending_counter;
+	/* Watchdog for the outstanding request named above; fires if the
+	 * peer never sends a Control Point response.
+	 */
+	unsigned int        cp_timeout_id;
+	bool                abort_operation;
 };
 
 /* Ranging Service context */
@@ -272,16 +392,50 @@ struct ras {
 	struct gatt_db_attribute *ready_ccc;
 	struct gatt_db_attribute *overwritten_chrc;
 	struct gatt_db_attribute *overwritten_ccc;
+	uint16_t ready_counter;
+	uint16_t overwritten_counter;
 
-	/* CCC state tracking for mutual exclusivity */
-	uint16_t realtime_ccc_value;
-	uint16_t ondemand_ccc_value;
+	/* Initiator role: pending RAS Control Point request state */
+	struct ras_ondemand_client client;
 };
+
+/* Responder role: CCC values written by the client of one connection. */
+struct ras_ccc_state {
+	uint16_t realtime;
+	uint16_t ondemand;
+	uint16_t ready;
+	uint16_t overwritten;
+};
+
+/* Initiator role: forward declaration needed by bt_rap_detach() below;
+ * defined alongside the other RAS Control Point client helpers.
+ */
+static void ras_ondemand_client_reset(struct ras *ras);
+static void ras_realtime_segments_clear(struct bt_rap *rap);
+static void ras_ondemand_cache_clear(struct bt_rap *rap);
+static bool ras_cp_write_op(struct bt_rap *rap, struct ras *ras,
+				uint8_t opcode, uint16_t counter);
 
 struct bt_rap_db {
 	struct gatt_db *db;
 	struct ras *ras;
 };
+
+struct ras_realtime_segment {
+	uint8_t *value;
+	uint16_t len;
+};
+
+static void ras_realtime_segment_free(void *data)
+{
+	struct ras_realtime_segment *segment = data;
+
+	if (!segment)
+		return;
+
+	free(segment->value);
+	free(segment);
+}
 
 struct bt_rap {
 	int ref_count;
@@ -291,6 +445,7 @@ struct bt_rap {
 	struct bt_att *att;
 
 	unsigned int idle_id;
+	unsigned int disconn_id;
 
 	struct queue *notify;
 	struct queue *pending;
@@ -300,9 +455,55 @@ struct bt_rap {
 	bt_rap_destroy_func_t debug_destroy;
 	void *debug_data;
 	void *user_data;
+
+	bt_rap_procedure_data_func_t  procedure_data_cb;
+	bt_rap_destroy_func_t         procedure_data_destroy;
+	void                         *procedure_data_user_data;
+
+	/* CS capabilities sw_time and connection interval for config param */
+	uint8_t local_sw_time;
+	uint8_t remote_sw_time;
+	uint16_t conn_interval;
 	struct cstracker *resptracker;
 	struct cstracker *reqtracker;
+
+	/* Initiator role: false = real-time (default), true = on-demand.
+	 * Must be set before the RAS Features read completes during
+	 * bt_rap_attach() to take effect.
+	 */
+	bool ondemand_mode;
+	uint16_t realtime_ccc_value;
+	uint16_t ondemand_ccc_value;
+	unsigned int realtime_notify_id;
+	unsigned int realtime_timeout_id;
+	unsigned int ondemand_notify_id;
+	unsigned int cp_notify_id;
+	unsigned int ready_notify_id;
+	unsigned int overwritten_notify_id;
+	uint32_t ras_features;
+
+	/* Responder role: this connection's on-demand ranging data cache.
+	 * Per-connection (not on the shared struct ras) so that concurrent
+	 * centrals cannot evict or receive each other's cached data.
+	 */
+	struct ras_ondemand_cache cache;
+
+	/* Responder role: this connection's RAS CCC values, so one central's
+	 * subscription cannot select what another central receives.
+	 */
+	struct ras_ccc_state ras_ccc;
+
+	/* Serialized real-time segments await transport-paced delivery. */
+	struct queue *realtime_segments;
+	unsigned int realtime_send_id;
+	unsigned int realtime_ind_id;
+	bool realtime_indicating;
 };
+
+static inline bool ras_is_ondemand_mode(const struct bt_rap *rap)
+{
+	return rap && rap->ras_ccc.ondemand != 0;
+}
 
 static struct queue *rap_db;
 static struct queue *bt_rap_cbs;
@@ -542,6 +743,178 @@ static bool cs_pd_ras_commit_subevent(struct cs_procedure_data *d,
 	return true;
 }
 
+/* ---------- bcs_procedure_data helpers ----------------------------------- */
+static uint64_t get_time_nanos(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_REALTIME, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+static void bcs_proc_data_clear(struct bcs_procedure_data *proc)
+{
+	uint32_t i;
+
+	if (!proc)
+		return;
+
+	for (i = 0; i < proc->initiator_subevent_count; i++)
+		free(proc->initiator_subevent_results[i].step_data);
+	free(proc->initiator_subevent_results);
+	proc->initiator_subevent_results = NULL;
+	proc->initiator_subevent_count = 0;
+
+	for (i = 0; i < proc->reflector_subevent_count; i++)
+		free(proc->reflector_subevent_results[i].step_data);
+	free(proc->reflector_subevent_results);
+	proc->reflector_subevent_results = NULL;
+	proc->reflector_subevent_count = 0;
+}
+
+static bool bcs_proc_data_add_initiator_subevent(
+					struct bcs_procedure_data *proc,
+					uint16_t start_acl_evt,
+					uint16_t freq_comp,
+					int8_t ref_pwr,
+					uint8_t num_ant_paths,
+					uint8_t abort_reason,
+					uint64_t timestamp_nanos,
+					struct cs_step_data *steps,
+					uint32_t num_steps)
+{
+	struct cs_subevent_result_data *arr;
+	uint32_t new_count;
+
+	if (!proc)
+		return false;
+
+	new_count = proc->initiator_subevent_count + 1;
+	arr = realloc(proc->initiator_subevent_results,
+					new_count * sizeof(*arr));
+	if (!arr) {
+		free(steps);
+		return false;
+	}
+
+	arr[new_count - 1].start_acl_conn_evt_counter = start_acl_evt;
+	arr[new_count - 1].freq_comp = freq_comp;
+	arr[new_count - 1].ref_pwr_lvl = ref_pwr;
+	arr[new_count - 1].num_ant_paths = num_ant_paths;
+	arr[new_count - 1].subevent_abort_reason = abort_reason;
+	arr[new_count - 1].timestamp_nanos = timestamp_nanos;
+	arr[new_count - 1].num_steps = num_steps;
+	arr[new_count - 1].step_data = steps;
+
+	proc->initiator_subevent_results = arr;
+	proc->initiator_subevent_count = new_count;
+	return true;
+}
+
+static bool bcs_proc_data_add_reflector_subevent(
+					struct bcs_procedure_data *proc,
+					uint16_t start_acl_evt,
+					uint16_t freq_comp,
+					int8_t ref_pwr,
+					uint8_t num_ant_paths,
+					uint8_t abort_reason,
+					uint64_t timestamp_nanos,
+					struct cs_step_data *steps,
+					uint32_t num_steps)
+{
+	struct cs_subevent_result_data *arr;
+	uint32_t new_count;
+
+	if (!proc)
+		return false;
+
+	new_count = proc->reflector_subevent_count + 1;
+	arr = realloc(proc->reflector_subevent_results,
+					new_count * sizeof(*arr));
+	if (!arr) {
+		free(steps);
+		return false;
+	}
+
+	arr[new_count - 1].start_acl_conn_evt_counter = start_acl_evt;
+	arr[new_count - 1].freq_comp = freq_comp;
+	arr[new_count - 1].ref_pwr_lvl = ref_pwr;
+	arr[new_count - 1].num_ant_paths = num_ant_paths;
+	arr[new_count - 1].subevent_abort_reason = abort_reason;
+	arr[new_count - 1].timestamp_nanos = timestamp_nanos;
+	arr[new_count - 1].num_steps = num_steps;
+	arr[new_count - 1].step_data = steps;
+
+	proc->reflector_subevent_results = arr;
+	proc->reflector_subevent_count = new_count;
+	return true;
+}
+
+static bool match_proc_counter(const void *data, const void *match_data)
+{
+	const struct cs_proc_state *s = data;
+	uint16_t proc_counter = PTR_TO_UINT(match_data);
+
+	return s->proc_counter == proc_counter;
+}
+
+static void free_proc_state(void *data)
+{
+	struct cs_proc_state *s = data;
+
+	bcs_proc_data_clear(&s->bcs_data);
+	free(s);
+}
+
+static struct cs_proc_state *find_or_create_proc_state(struct cstracker *t,
+							uint16_t proc_counter)
+{
+	struct cs_proc_state *s;
+
+	s = queue_find(t->proc_states, match_proc_counter,
+					UINT_TO_PTR(proc_counter));
+	if (s)
+		return s;
+
+	s = new0(struct cs_proc_state, 1);
+	s->proc_counter  = proc_counter;
+	s->local_status  = CS_PROC_PARTIAL_RESULTS;
+	s->remote_status = CS_PROC_PARTIAL_RESULTS;
+	/* Copy session-level config from template */
+	s->bcs_data.proc_enable_config = t->bcs_proc_data.proc_enable_config;
+	s->bcs_data.cs_config = t->bcs_proc_data.cs_config;
+	s->bcs_data.t_sw_time_us_supported_by_local =
+			t->bcs_proc_data.t_sw_time_us_supported_by_local;
+	s->bcs_data.t_sw_time_us_supported_by_remote =
+			t->bcs_proc_data.t_sw_time_us_supported_by_remote;
+	s->bcs_data.ble_conn_interval = t->bcs_proc_data.ble_conn_interval;
+	s->bcs_data.initiator_selected_tx_power =
+			t->bcs_proc_data.initiator_selected_tx_power;
+	s->bcs_data.procedure_counter = proc_counter;
+
+	queue_push_tail(t->proc_states, s);
+
+	return s;
+}
+
+static struct cs_proc_state *find_proc_state_for_ras(struct cstracker *t,
+						uint16_t ranging_counter)
+{
+	const struct queue_entry *entry;
+
+	for (entry = queue_get_entries(t->proc_states); entry;
+							entry = entry->next) {
+		struct cs_proc_state *s = entry->data;
+
+		if ((s->proc_counter & CS_RANGING_COUNTER_MASK) ==
+		    ranging_counter)
+			return s;
+	}
+	return NULL;
+}
+
+/* ---------- end bcs helpers ---------------------------------------------- */
+
 static struct ras *rap_get_ras(struct bt_rap *rap)
 {
 	if (!rap)
@@ -564,14 +937,109 @@ static void rap_detached(void *data, void *user_data)
 	cb->detached(rap, cb->user_data);
 }
 
+static void rap_attached(void *data, void *user_data)
+{
+	struct bt_rap_cb *cb = data;
+	struct bt_rap *rap = user_data;
+
+	if (!cb->attached)
+		return;
+
+	cb->attached(rap, cb->user_data);
+}
+
+static void rap_disconnected(int err, void *user_data)
+{
+	struct bt_rap *rap = user_data;
+
+	rap->disconn_id = 0;
+
+	bt_rap_detach(rap);
+}
+
+static void rap_attach_att(struct bt_rap *rap, struct bt_att *att)
+{
+	if (rap->disconn_id) {
+		if (att == bt_rap_get_att(rap))
+			return;
+		bt_att_unregister_disconnect(rap->att, rap->disconn_id);
+	}
+
+	rap->att = att;
+	rap->disconn_id = bt_att_register_disconnect(rap->att,
+							rap_disconnected,
+							rap, NULL);
+}
+
 void bt_rap_detach(struct bt_rap *rap)
 {
 	if (!queue_remove(sessions, rap))
 		return;
 
+	/* Cancel queued and in-flight real-time segments while the ATT
+	 * transport is still reachable.
+	 */
+	ras_realtime_segments_clear(rap);
+
 	bt_gatt_client_idle_unregister(rap->client, rap->idle_id);
 	bt_gatt_client_unref(rap->client);
 	rap->client = NULL;
+	if (rap->realtime_timeout_id) {
+		timeout_remove(rap->realtime_timeout_id);
+		rap->realtime_timeout_id = 0;
+	}
+	rap->realtime_notify_id = 0;
+	rap->ondemand_notify_id = 0;
+	rap->cp_notify_id = 0;
+	rap->ready_notify_id = 0;
+	rap->overwritten_notify_id = 0;
+
+	bt_att_unregister_disconnect(rap->att, rap->disconn_id);
+	rap->att = NULL;
+
+	/* Segment reassembly state (reqtracker) is not tied to any one
+	 * connection instance - drop it here too, otherwise a stale
+	 * expected_segment_counter/ranging_header_/segment_data left over
+	 * from before the disconnect could be fed by a continuation
+	 * segment on the next connection whose rolling counter happens to
+	 * collide (it is only 6 bits wide).
+	 */
+	if (rap->reqtracker) {
+		free(rap->reqtracker->segment_data.iov_base);
+		rap->reqtracker->segment_data.iov_base = NULL;
+		rap->reqtracker->segment_data.iov_len = 0;
+		rap->reqtracker->reassembly_active = false;
+		rap->reqtracker->expected_segment_counter = 0;
+	}
+
+	/* Responder role: drop any un-ACKed on-demand cache for this
+	 * connection so a reconnect (by this or another central) cannot
+	 * be served stale ranging data via Get_Ranging_Data.
+	 */
+	ras_ondemand_cache_clear(rap);
+
+	if (rap->rrapdb && rap->rrapdb->ras) {
+		struct ras *ras = rap->rrapdb->ras;
+
+		ras_ondemand_client_reset(ras);
+
+		/* foreach_rap_char() only (re-)issues the RAS Features
+		 * read and its resulting notify subscriptions when a
+		 * *_chrc pointer is NULL. Clear all of them here so the
+		 * next bt_rap_attach()'s rediscovery pass re-arms
+		 * subscriptions against the freshly cloned client
+		 * instead of silently staying unsubscribed - or, if the
+		 * remote GATT db was rebuilt (unbonded device,
+		 * GattCacheDisable, service-changed), holding onto
+		 * gatt_db_attribute pointers that no longer exist.
+		 */
+		ras->feat_chrc = NULL;
+		ras->realtime_chrc = NULL;
+		ras->ondemand_chrc = NULL;
+		ras->cp_chrc = NULL;
+		ras->ready_chrc = NULL;
+		ras->overwritten_chrc = NULL;
+	}
 
 	queue_foreach(bt_rap_cbs, rap_detached, rap);
 }
@@ -607,15 +1075,26 @@ static void rap_free(void *data)
 
 	rap_db_free(rap->rrapdb);
 
+	free(rap->cache.data.iov_base);
+	if (rap->realtime_send_id)
+		timeout_remove(rap->realtime_send_id);
+	queue_destroy(rap->realtime_segments, ras_realtime_segment_free);
+
 	if (rap->resptracker) {
+		free(rap->resptracker->segment_data.iov_base);
 		free(rap->resptracker);
 		rap->resptracker = NULL;
 	}
 
 	if (rap->reqtracker) {
+		queue_destroy(rap->reqtracker->proc_states, free_proc_state);
+		free(rap->reqtracker->segment_data.iov_base);
 		free(rap->reqtracker);
 		rap->reqtracker = NULL;
 	}
+
+	if (rap->procedure_data_destroy)
+		rap->procedure_data_destroy(rap->procedure_data_user_data);
 
 	queue_destroy(rap->notify, free);
 	queue_destroy(rap->pending, NULL);
@@ -651,6 +1130,34 @@ struct bt_att *bt_rap_get_att(struct bt_rap *rap)
 		return rap->att;
 
 	return bt_gatt_client_get_att(rap->client);
+}
+
+struct bt_rap *bt_rap_get_session(struct bt_att *att, struct gatt_db *db)
+{
+	const struct queue_entry *entry;
+	struct bt_rap *rap;
+
+	for (entry = queue_get_entries(sessions); entry; entry = entry->next) {
+		rap = entry->data;
+
+		if (att == bt_rap_get_att(rap))
+			return rap;
+	}
+
+	rap = bt_rap_new(db, NULL);
+	if (!rap)
+		return NULL;
+
+	rap->att = att;
+
+	/*
+	 * A rejected attach (e.g. a duplicate session for a device that
+	 * already has one) leaves rap already freed - don't touch it.
+	 */
+	if (!bt_rap_attach(rap, NULL))
+		return NULL;
+
+	return rap;
 }
 
 struct bt_rap *bt_rap_ref(struct bt_rap *rap)
@@ -702,6 +1209,24 @@ bool bt_rap_set_debug(struct bt_rap *rap, bt_rap_debug_func_t func,
 	return true;
 }
 
+bool bt_rap_set_procedure_data_cb(struct bt_rap *rap,
+				  bt_rap_procedure_data_func_t cb,
+				  void *user_data,
+				  bt_rap_destroy_func_t destroy)
+{
+	if (!rap)
+		return false;
+
+	if (rap->procedure_data_destroy)
+		rap->procedure_data_destroy(rap->procedure_data_user_data);
+
+	rap->procedure_data_cb      = cb;
+	rap->procedure_data_destroy = destroy;
+	rap->procedure_data_user_data = user_data;
+
+	return true;
+}
+
 static void cs_tracker_init(struct cstracker *t)
 {
 	if (!t)
@@ -716,6 +1241,7 @@ static void cs_tracker_init(struct cstracker *t)
 	t->last_start_acl_conn_evt_counter = 0;
 	t->last_freq_comp = 0;
 	t->last_ref_pwr_lvl = 0;
+	t->proc_states = queue_new();
 
 	/* Initialize ranging header using helper functions */
 	memset(&t->ranging_header_, 0, sizeof(t->ranging_header_));
@@ -729,31 +1255,26 @@ static void ras_features_read_cb(struct gatt_db_attribute *attrib,
 				 uint8_t opcode, struct bt_att *att,
 				 void *user_data)
 {
-	/*
-	 * Feature mask: bits 0-2 set:
-	 *  - Real-time ranging
-	 *  - Retrieve stored results
-	 *  - Abort operation
-	 */
-	uint8_t value[4] = { 0x01, 0x00, 0x00, 0x00 };
+	struct ras *ras = user_data;
+	/* Real-time ranging and Abort Operation are supported. */
+	uint8_t value[4] = { 0x05, 0x00, 0x00, 0x00 };
+
+	if (ras)
+		bt_rap_get_session(att, ras->rapdb->db);
 
 	gatt_db_attribute_read_result(attrib, id, 0, value, sizeof(value));
 }
 
-static void ras_ondemand_read_cb(struct gatt_db_attribute *attrib,
-				 unsigned int id, uint16_t offset,
-				 uint8_t opcode, struct bt_att *att,
-				 void *user_data)
-{
-	/* No static read data – on‑demand data is pushed via
-	 * notifications
-	 */
-	gatt_db_attribute_read_result(attrib, id, 0, NULL, 0);
-}
+static void ras_cp_send_response_code(struct bt_rap *rap, struct ras *ras,
+					uint8_t response_code);
+static void ras_cp_send_complete_ranging_data(struct bt_rap *rap,
+					struct ras *ras, uint16_t counter);
+static void send_ondemand_segment_data(struct bt_rap *rap, struct ras *ras);
+static void ras_ondemand_cancel_ind(struct bt_rap *rap);
 
 /*
- * Control point handler.
- * Parses the opcode and acts on queued data (implementation TBD).
+ * RAS Control Point handler, dispatches Get_Ranging_Data and
+ * ACK_Ranging_Data. The remaining optional op codes are not implemented.
  */
 static void ras_control_point_write_cb(struct gatt_db_attribute *attrib,
 				       unsigned int id, uint16_t offset,
@@ -761,30 +1282,133 @@ static void ras_control_point_write_cb(struct gatt_db_attribute *attrib,
 				       uint8_t opcode, struct bt_att *att,
 				       void *user_data)
 {
-	/* Control point handler - implementation TBD */
+	struct ras *ras = user_data;
+	struct bt_rap *rap;
+	uint16_t counter;
+
+	if (!ras) {
+		gatt_db_attribute_write_result(attrib, id,
+						BT_ATT_ERROR_UNLIKELY);
+		return;
+	}
+
+	rap = bt_rap_get_session(att, ras->rapdb->db);
+
+	if (!rap) {
+		gatt_db_attribute_write_result(attrib, id,
+						BT_ATT_ERROR_UNLIKELY);
+		return;
+	}
+
+	if (!len) {
+		gatt_db_attribute_write_result(attrib, id, 0);
+		return;
+	}
+
+	if (rap->cache.sending && value[0] != RAS_CP_OP_ABORT_OPERATION) {
+		ras_cp_send_response_code(rap, ras,
+					RAS_CP_RSP_CODE_SERVER_BUSY);
+		goto done;
+	}
+
+	DBG(rap, "CP write: opcode=0x%02x len=%zu", value[0], len);
+
+	switch (value[0]) {
+	case RAS_CP_OP_GET_RANGING_DATA:
+		if (len != 3) {
+			ras_cp_send_response_code(rap, ras,
+					RAS_CP_RSP_CODE_INVALID_PARAMETER);
+			break;
+		}
+
+		counter = get_le16(value + 1);
+
+		if (!rap->cache.valid || rap->cache.counter != counter) {
+			ras_cp_send_response_code(rap, ras,
+					RAS_CP_RSP_CODE_NO_RECORDS_FOUND);
+			break;
+		}
+
+		send_ondemand_segment_data(rap, ras);
+		break;
+	case RAS_CP_OP_ABORT_OPERATION:
+		if (len != 1) {
+			ras_cp_send_response_code(rap, ras,
+					RAS_CP_RSP_CODE_INVALID_PARAMETER);
+			break;
+		}
+
+		if (rap->cache.sending) {
+			if (rap->cache.send_id)
+				timeout_remove(rap->cache.send_id);
+			rap->cache.send_id = 0;
+			rap->cache.sending = false;
+			/* Keep a stale confirmation from driving a later
+			 * transfer.
+			 */
+			ras_ondemand_cancel_ind(rap);
+		}
+
+		ras_cp_send_response_code(rap, ras, RAS_CP_RSP_CODE_SUCCESS);
+		break;
+	case RAS_CP_OP_ACK_RANGING_DATA:
+		if (len != 3) {
+			ras_cp_send_response_code(rap, ras,
+					RAS_CP_RSP_CODE_INVALID_PARAMETER);
+			break;
+		}
+
+		counter = get_le16(value + 1);
+
+		if (!rap->cache.valid || rap->cache.counter != counter) {
+			ras_cp_send_response_code(rap, ras,
+					RAS_CP_RSP_CODE_NO_RECORDS_FOUND);
+			break;
+		}
+
+		ras_ondemand_cache_clear(rap);
+
+		ras_cp_send_response_code(rap, ras, RAS_CP_RSP_CODE_SUCCESS);
+		break;
+	default:
+		ras_cp_send_response_code(rap, ras,
+					RAS_CP_RSP_CODE_OPCODE_NOT_SUPPORTED);
+		break;
+	}
+
+done:
+	gatt_db_attribute_write_result(attrib, id, 0);
 }
 
-/* Data Ready – returns the latest ranging counter. */
+/* Data Ready - returns the latest ranging counter. */
 static void ras_data_ready_read_cb(struct gatt_db_attribute *attrib,
 				   unsigned int id, uint16_t offset,
 				   uint8_t opcode, struct bt_att *att,
 				   void *user_data)
 {
-	uint16_t counter = 0;
+	struct ras *ras = user_data;
 	uint8_t value[2];
 
-	put_le16(counter, value);
+	if (ras)
+		bt_rap_get_session(att, ras->rapdb->db);
+
+	put_le16(ras ? ras->ready_counter : 0, value);
 	gatt_db_attribute_read_result(attrib, id, 0, value, sizeof(value));
 }
 
-/* Data Overwritten – indicates how many results were overwritten. */
+/* Data Overwritten - indicates how many results were overwritten. */
 static void ras_data_overwritten_read_cb(struct gatt_db_attribute *attrib,
 					 unsigned int id, uint16_t offset,
 					 uint8_t opcode, struct bt_att *att,
 					 void *user_data)
 {
-	uint8_t value[2] = { 0x00, 0x00 };
+	struct ras *ras = user_data;
+	uint8_t value[2];
 
+	if (ras)
+		bt_rap_get_session(att, ras->rapdb->db);
+
+	put_le16(ras ? ras->overwritten_counter : 0, value);
 	gatt_db_attribute_read_result(attrib, id, 0, value, sizeof(value));
 }
 
@@ -795,12 +1419,20 @@ static void ras_ranging_data_ccc_write_cb(struct gatt_db_attribute *attrib,
 					void *user_data)
 {
 	struct ras *ras = user_data;
+	struct bt_rap *rap;
 	uint16_t ccc_value;
 	bool is_realtime;
 	uint16_t *this_ccc;
 	uint16_t *other_ccc;
 
 	if (!ras) {
+		gatt_db_attribute_write_result(attrib, id,
+					BT_ATT_ERROR_UNLIKELY);
+		return;
+	}
+
+	rap = bt_rap_get_session(att, ras->rapdb->db);
+	if (!rap) {
 		gatt_db_attribute_write_result(attrib, id,
 					BT_ATT_ERROR_UNLIKELY);
 		return;
@@ -829,10 +1461,10 @@ static void ras_ranging_data_ccc_write_cb(struct gatt_db_attribute *attrib,
 
 	/* Determine which CCC this is */
 	is_realtime = (attrib == ras->realtime_chrc_ccc);
-	this_ccc = is_realtime ? &ras->realtime_ccc_value :
-				 &ras->ondemand_ccc_value;
-	other_ccc = is_realtime ? &ras->ondemand_ccc_value :
-				  &ras->realtime_ccc_value;
+	this_ccc = is_realtime ? &rap->ras_ccc.realtime :
+				 &rap->ras_ccc.ondemand;
+	other_ccc = is_realtime ? &rap->ras_ccc.ondemand :
+				  &rap->ras_ccc.realtime;
 
 	/* Check mutual exclusivity: reject if trying to enable realtime
 	 * while ondemand is already enabled.
@@ -852,7 +1484,85 @@ static void ras_ranging_data_ccc_write_cb(struct gatt_db_attribute *attrib,
 	gatt_db_attribute_write_result(attrib, id, 0);
 }
 
-/* Service registration – store attribute pointers */
+/* Track the Ready / Overwritten CCC value so their notifications are sent with
+ * the transport the client subscribed to (notification vs indication). Both
+ * characteristics support NOTIFY and INDICATE; a headless RAS server must honor
+ * whichever the client enabled (e.g. RCO/BV-05-C uses Indication, BV-06-C
+ * uses Notification).
+ */
+static void ras_ready_overwritten_ccc_write_cb(struct gatt_db_attribute *attrib,
+					unsigned int id, uint16_t offset,
+					const uint8_t *value, size_t len,
+					uint8_t opcode, struct bt_att *att,
+					void *user_data)
+{
+	struct ras *ras = user_data;
+	struct bt_rap *rap;
+	uint16_t ccc_value;
+
+	if (!ras) {
+		gatt_db_attribute_write_result(attrib, id,
+					BT_ATT_ERROR_UNLIKELY);
+		return;
+	}
+
+	rap = bt_rap_get_session(att, ras->rapdb->db);
+	if (!rap) {
+		gatt_db_attribute_write_result(attrib, id,
+					BT_ATT_ERROR_UNLIKELY);
+		return;
+	}
+
+	if (offset) {
+		gatt_db_attribute_write_result(attrib, id,
+					BT_ATT_ERROR_INVALID_OFFSET);
+		return;
+	}
+
+	if (len != 2) {
+		gatt_db_attribute_write_result(attrib, id,
+			BT_ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LEN);
+		return;
+	}
+
+	ccc_value = get_le16(value);
+
+	if (ccc_value != 0x0000 && ccc_value != 0x0001 &&
+	    ccc_value != 0x0002 && ccc_value != 0x0003) {
+		gatt_db_attribute_write_result(attrib, id,
+					BT_ERROR_WRITE_REQUEST_REJECTED);
+		return;
+	}
+
+	if (attrib == ras->ready_ccc)
+		rap->ras_ccc.ready = ccc_value;
+	else if (attrib == ras->overwritten_ccc)
+		rap->ras_ccc.overwritten = ccc_value;
+
+	gatt_db_attribute_write_result(attrib, id, 0);
+}
+
+/* Pick the notify transport for Ranging Data Ready / Ranging Data Overwritten
+ * from a tracked CCC value. RAS 3.4.2 and 3.5.2 require indications when both
+ * transports are enabled (0x0003), so notification is used only when it is the
+ * sole enabled transport. The On-demand and Real-time Ranging Data
+ * characteristics take the opposite rule and must not use this helper.
+ */
+static bool ras_ccc_use_indication(uint16_t ccc_value)
+{
+	return !(ccc_value & 0x0001) || (ccc_value & 0x0002);
+}
+
+/* Pick the notify transport for On-demand / Real-time Ranging Data. RAS 3.2.2
+ * and 3.2.3.1 require notifications when both transports are enabled (0x0003),
+ * so indication is used only when it is the sole enabled transport.
+ */
+static bool ras_data_ccc_use_indication(uint16_t ccc_value)
+{
+	return !(ccc_value & 0x0001);
+}
+
+/* Service registration - store attribute pointers */
 static struct ras *register_ras_service(struct gatt_db *db)
 {
 	struct ras *ras;
@@ -909,8 +1619,7 @@ static struct ras *register_ras_service(struct gatt_db *db)
 						  BT_ATT_PERM_READ_ENCRYPT,
 						  BT_GATT_CHRC_PROP_NOTIFY |
 						  BT_GATT_CHRC_PROP_INDICATE,
-						  ras_ondemand_read_cb, NULL,
-						  ras);
+						  NULL, NULL, ras);
 
 	ras->ondemand_ccc = gatt_db_service_add_ccc_custom(ras->svc,
 					BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
@@ -943,8 +1652,10 @@ static struct ras *register_ras_service(struct gatt_db *db)
 						  ras_data_ready_read_cb, NULL,
 						  ras);
 
-	ras->ready_ccc = gatt_db_service_add_ccc(ras->svc,
-					BT_ATT_PERM_READ | BT_ATT_PERM_WRITE);
+	ras->ready_ccc = gatt_db_service_add_ccc_custom(ras->svc,
+					BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
+					ras_ready_overwritten_ccc_write_cb,
+					ras);
 
 	/* RAS Data Overwritten */
 	bt_uuid16_create(&uuid, RAS_DATA_OVERWRITTEN_UUID);
@@ -958,8 +1669,10 @@ static struct ras *register_ras_service(struct gatt_db *db)
 						  ras_data_overwritten_read_cb,
 						  NULL, ras);
 
-	ras->overwritten_ccc = gatt_db_service_add_ccc(ras->svc,
-					BT_ATT_PERM_READ | BT_ATT_PERM_WRITE);
+	ras->overwritten_ccc = gatt_db_service_add_ccc_custom(ras->svc,
+					BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
+					ras_ready_overwritten_ccc_write_cb,
+					ras);
 
 	/* Activate the service */
 	gatt_db_service_set_active(ras->svc, true);
@@ -1170,10 +1883,478 @@ static bool ras_maybe_prepend_ranging_header(struct cs_procedure_data *d)
 	return ok;
 }
 
+static void ras_ondemand_cancel_ind(struct bt_rap *rap)
+{
+	if (!rap->cache.ind_id)
+		return;
+
+	bt_att_cancel(bt_rap_get_att(rap), rap->cache.ind_id);
+	rap->cache.ind_id = 0;
+}
+
+static void ras_ondemand_cache_clear(struct bt_rap *rap)
+{
+	if (!rap)
+		return;
+
+	if (rap->cache.send_id)
+		timeout_remove(rap->cache.send_id);
+
+	ras_ondemand_cancel_ind(rap);
+
+	free(rap->cache.data.iov_base);
+	rap->cache.data.iov_base = NULL;
+	rap->cache.data.iov_len = 0;
+	rap->cache.valid = false;
+	rap->cache.counter = 0;
+	rap->cache.send_index = 0;
+	rap->cache.send_id = 0;
+	rap->cache.sending = false;
+}
+
+static void ras_ondemand_cache_store(struct bt_rap *rap,
+					struct cs_procedure_data *proc)
+{
+	if (!rap || !proc)
+		return;
+
+	rap->cache.data = proc->ras_raw_data_;
+	rap->cache.counter = proc->counter;
+	rap->cache.valid = true;
+	rap->cache.send_index = 0;
+	memset(&rap->cache.seg_hdr, 0, sizeof(rap->cache.seg_hdr));
+
+	proc->ras_raw_data_.iov_base = NULL;
+	proc->ras_raw_data_.iov_len = 0;
+	proc->ras_raw_data_index_ = 0;
+}
+
+static void ras_send_ranging_data_ready(struct bt_rap *rap, struct ras *ras,
+					uint16_t counter)
+{
+	uint8_t value[2];
+
+	if (!rap || !ras || !ras->ready_chrc)
+		return;
+
+	ras->ready_counter = counter;
+	put_le16(counter, value);
+	if (ras_ccc_use_indication(rap->ras_ccc.ready))
+		gatt_db_attribute_indicate(ras->ready_chrc, value,
+					sizeof(value), bt_rap_get_att(rap));
+	else
+		gatt_db_attribute_notify(ras->ready_chrc, value,
+					sizeof(value), bt_rap_get_att(rap));
+}
+
+static void ras_send_ranging_data_overwritten(struct bt_rap *rap,
+					struct ras *ras, uint16_t counter)
+{
+	uint8_t value[2];
+
+	if (!rap || !ras || !ras->overwritten_chrc)
+		return;
+
+	ras->overwritten_counter = counter;
+	put_le16(counter, value);
+	if (ras_ccc_use_indication(rap->ras_ccc.overwritten))
+		gatt_db_attribute_indicate(ras->overwritten_chrc, value,
+					sizeof(value), bt_rap_get_att(rap));
+	else
+		gatt_db_attribute_notify(ras->overwritten_chrc, value,
+					sizeof(value), bt_rap_get_att(rap));
+}
+
+static void ras_cp_send_response_code(struct bt_rap *rap, struct ras *ras,
+					uint8_t response_code)
+{
+	uint8_t value[2] = { RAS_CP_RSP_RESPONSE_CODE, response_code };
+
+	if (!rap || !ras || !ras->cp_chrc)
+		return;
+
+	DBG(rap, "CP send Response Code: rsp=0x%02x", response_code);
+	gatt_db_attribute_indicate(ras->cp_chrc, value, sizeof(value),
+						bt_rap_get_att(rap));
+}
+
+static void ras_cp_send_complete_ranging_data(struct bt_rap *rap,
+					struct ras *ras, uint16_t counter)
+{
+	uint8_t value[3];
+
+	if (!rap || !ras || !ras->cp_chrc)
+		return;
+
+	value[0] = RAS_CP_RSP_COMPLETE_RANGING_DATA;
+	put_le16(counter, value + 1);
+
+	gatt_db_attribute_indicate(ras->cp_chrc, value, sizeof(value),
+						bt_rap_get_att(rap));
+}
+
+static bool send_ondemand_segment_data_cb(void *user_data);
+
+/* Pending indications hold a reference so their confirmation callback
+ * cannot run on a freed session.
+ */
+static void rap_ind_destroy(void *user_data)
+{
+	bt_rap_unref(user_data);
+}
+
+/*
+ * Confirmation callback for an on-demand ranging-data Indication segment.
+ * Invoked (opcode == BT_ATT_OP_HANDLE_CONF) when the client confirms the
+ * segment. Only then do we send the next segment (confirm-driven flow control),
+ * so at most one indication is in-flight and an Abort (which clears
+ * cache.sending) stops the transfer immediately.
+ */
+static void ondemand_ind_conf_cb(uint8_t opcode, const void *pdu,
+					uint16_t length, void *user_data)
+{
+	struct bt_rap *rap = user_data;
+	struct ras *ras = rap && rap->lrapdb ? rap->lrapdb->ras : NULL;
+
+	if (!rap)
+		return;
+
+	rap->cache.ind_id = 0;
+
+	if (!ras || !rap->cache.valid || !rap->cache.sending)
+		return;
+
+	/* All data sent and confirmed: finish with Complete Ranging Data. */
+	if (rap->cache.send_index >= rap->cache.data.iov_len) {
+		rap->cache.sending = false;
+		ras_cp_send_complete_ranging_data(rap, ras, rap->cache.counter);
+		return;
+	}
+
+	/* Otherwise send the next segment. */
+	send_ondemand_segment_data_cb(rap);
+}
+
+static bool send_ondemand_segment_data_cb(void *user_data)
+{
+	struct bt_rap *rap = user_data;
+	struct ras *ras = rap && rap->lrapdb ? rap->lrapdb->ras : NULL;
+	uint16_t value_max;
+	const uint16_t header_len = ras_segment_header_size;
+	uint16_t raw_payload_size;
+
+	if (!rap || !ras || !rap->cache.valid || !rap->cache.sending)
+		return false;
+
+	rap->cache.send_id = 0;
+
+	value_max = ras_att_value_payload_max(rap);
+
+	if (value_max <= header_len) {
+		DBG(rap, "value_max(%u) too small for header", value_max);
+		/* Tell the initiator now instead of leaving it waiting
+		 * indefinitely for a Complete_Ranging_Data response that
+		 * will never come; the cached data is left intact so a
+		 * later retry (e.g. after MTU/DLE negotiation) can still
+		 * succeed.
+		 */
+		ras_cp_send_response_code(rap, ras,
+					RAS_CP_RSP_CODE_SERVER_BUSY);
+		rap->cache.sending = false;
+		return false;
+	}
+
+	raw_payload_size = (uint16_t)(value_max - header_len);
+
+	{
+		size_t total_len = rap->cache.data.iov_len;
+		size_t index = rap->cache.send_index;
+		size_t unsent_data_size = total_len - index;
+		uint16_t copy_size;
+		uint16_t seg_len;
+		uint8_t *seg;
+		uint16_t wr = 0;
+		bool ok;
+
+		rap->cache.seg_hdr.last_segment =
+			(unsent_data_size <= raw_payload_size) ? 1 : 0;
+
+		copy_size = (uint16_t)((unsent_data_size < raw_payload_size) ?
+				unsent_data_size : raw_payload_size);
+		seg_len = (uint16_t)(header_len + copy_size);
+		seg = (uint8_t *)malloc(seg_len);
+
+		if (!seg) {
+			DBG(rap, "OOM (%u)", seg_len);
+			ras_cp_send_response_code(rap, ras,
+					RAS_CP_RSP_CODE_SERVER_BUSY);
+			rap->cache.sending = false;
+			return false;
+		}
+
+		wr += (uint16_t)
+			serialize_segmentation_header(&rap->cache.seg_hdr,
+			seg + wr, seg_len - wr);
+		memcpy(seg + wr,
+			(const uint8_t *)rap->cache.data.iov_base + index,
+			copy_size);
+		wr += copy_size;
+
+		/*
+		 * On-demand transfer flow control by transport:
+		 *
+		 * - Indication: send one segment as an ATT Handle Value
+		 *   Indication via bt_att_send() and advance/schedule the NEXT
+		 *   segment only from its confirmation callback
+		 *   (ondemand_ind_conf_cb). This keeps at most one segment
+		 *   in-flight, so an Abort Operation that clears cache.sending
+		 *   actually stops the transfer instead of a large backlog
+		 *   draining out of the att indication queue.
+		 * - Notification: fire-and-forget, so there is no confirmation
+		 *   to gate on. Notifications go to the att write queue, which
+		 *   pick_next_send_op() drains ahead of the request queue and
+		 *   without flow control of its own, so queueing the whole
+		 *   transfer at once would starve incoming ATT operations until
+		 *   the last segment is written. Queue the next segment from
+		 *   the next event loop iteration instead, which keeps one
+		 *   segment outstanding.
+		 *
+		 * The delay has to be non-zero for a client to be able to
+		 * abort a transfer it no longer wants. A zero timeout yields
+		 * the event loop but does not wait, since poll() returns at
+		 * once when nothing is pending on the socket, so a Control
+		 * Point write is only seen here once it has already arrived,
+		 * and the transfer can be over by then.
+		 *
+		 * What the peer gets is the transfer time, segments times this
+		 * delay, and it has to cover a connection event for an Abort
+		 * Operation to reach us at all. A short transfer is therefore
+		 * the constraining case, not a long one, and the rate at which
+		 * the controller reports ranging data does not help: the
+		 * segments of one subevent still go out back to back.
+		 * RAS/SR/SPE/BI-05-C, which writes an invalid Abort Operation
+		 * mid-transfer and expects Invalid Parameter rather than
+		 * Complete Ranging Data, fails at 0 ms and passes at 5 ms.
+		 *
+		 * The delay also bounds a transfer, so keep it short: at a
+		 * 247 byte MTU a 13 KB procedure is 57 segments.
+		 */
+		if (ras_data_ccc_use_indication(rap->ras_ccc.ondemand)) {
+			uint16_t vhandle =
+				gatt_db_attribute_get_handle(
+					gatt_db_attribute_get_value(
+						ras->ondemand_chrc));
+			uint8_t *pdu = malloc(2 + wr);
+			unsigned int id = 0;
+			bool ref = false;
+
+			if (pdu) {
+				ref = true;
+				put_le16(vhandle, pdu);
+				memcpy(pdu + 2, seg, wr);
+				id = bt_att_send(bt_rap_get_att(rap),
+						BT_ATT_OP_HANDLE_IND,
+						pdu, 2 + wr,
+						ondemand_ind_conf_cb,
+						bt_rap_ref(rap),
+						rap_ind_destroy);
+				free(pdu);
+			}
+
+			free(seg);
+
+			rap->cache.ind_id = id;
+
+			if (!id) {
+				DBG(rap, "Failed to send on-demand indication");
+				ras_cp_send_response_code(rap, ras,
+						RAS_CP_RSP_CODE_SERVER_BUSY);
+				rap->cache.sending = false;
+				/* bt_att_send() did not take the reference */
+				if (ref)
+					bt_rap_unref(rap);
+				return false;
+			}
+
+			/* Advance now; last-segment completion and scheduling
+			 * of the next segment happen in the confirmation cb.
+			 */
+			rap->cache.send_index += copy_size;
+			rap->cache.seg_hdr.first_segment = 0;
+			rap->cache.seg_hdr.rolling_segment_counter =
+				(uint8_t)((rap->cache.seg_hdr
+					.rolling_segment_counter + 1) & 0x3F);
+			return false;
+		}
+
+		/* Reached whenever the client enabled notifications, so
+		 * gatt_db_attribute_notify() picks the notification transport.
+		 */
+		ok = gatt_db_attribute_notify(ras->ondemand_chrc, seg, wr,
+						bt_rap_get_att(rap));
+
+		free(seg);
+
+		if (!ok) {
+			DBG(rap, "Failed to send on-demand RAS notification");
+			ras_cp_send_response_code(rap, ras,
+					RAS_CP_RSP_CODE_SERVER_BUSY);
+			rap->cache.sending = false;
+			return false;
+		}
+
+		rap->cache.send_index += copy_size;
+		rap->cache.seg_hdr.first_segment = 0;
+		rap->cache.seg_hdr.rolling_segment_counter =
+			(uint8_t)((rap->cache.seg_hdr
+				.rolling_segment_counter + 1) & 0x3F);
+
+		if (rap->cache.seg_hdr.last_segment) {
+			rap->cache.sending = false;
+			ras_cp_send_complete_ranging_data(rap, ras,
+							rap->cache.counter);
+			return false;
+		}
+	}
+
+	rap->cache.send_id = timeout_add(RAS_SEGMENT_NFY_PACE_MS,
+						send_ondemand_segment_data_cb,
+						rap, NULL);
+	if (!rap->cache.send_id) {
+		ras_cp_send_response_code(rap, ras,
+					RAS_CP_RSP_CODE_SERVER_BUSY);
+		rap->cache.sending = false;
+	}
+
+	return false;
+}
+
+static void send_ondemand_segment_data(struct bt_rap *rap, struct ras *ras)
+{
+	if (!rap || !ras || !rap->cache.valid || rap->cache.sending)
+		return;
+
+	/* Ranging data must only reach a client that subscribed to it. */
+	if (!rap->ras_ccc.ondemand) {
+		ras_cp_send_response_code(rap, ras,
+					RAS_CP_RSP_CODE_SERVER_BUSY);
+		return;
+	}
+
+	rap->cache.sending = true;
+	rap->cache.send_index = 0;
+	rap->cache.seg_hdr.first_segment = 1;
+	rap->cache.seg_hdr.last_segment = 0;
+	rap->cache.seg_hdr.rolling_segment_counter = 0;
+
+	send_ondemand_segment_data_cb(rap);
+}
+
+static bool send_realtime_segment_cb(void *user_data);
+
+static void ras_realtime_segments_clear(struct bt_rap *rap)
+{
+	if (!rap)
+		return;
+
+	if (rap->realtime_send_id) {
+		timeout_remove(rap->realtime_send_id);
+		rap->realtime_send_id = 0;
+	}
+
+	if (rap->realtime_ind_id) {
+		bt_att_cancel(bt_rap_get_att(rap), rap->realtime_ind_id);
+		rap->realtime_ind_id = 0;
+	}
+
+	rap->realtime_indicating = false;
+
+	queue_destroy(rap->realtime_segments, ras_realtime_segment_free);
+	rap->realtime_segments = queue_new();
+}
+
+static void realtime_ind_conf_cb(uint8_t opcode, const void *pdu,
+				uint16_t length, void *user_data)
+{
+	struct bt_rap *rap = user_data;
+
+	if (!rap)
+		return;
+
+	rap->realtime_ind_id = 0;
+	rap->realtime_indicating = false;
+	send_realtime_segment_cb(rap);
+}
+
+static bool send_realtime_segment_cb(void *user_data)
+{
+	struct bt_rap *rap = user_data;
+	struct ras *ras = rap && rap->lrapdb ? rap->lrapdb->ras : NULL;
+	struct ras_realtime_segment *segment;
+
+	if (!rap || !ras || !rap->realtime_segments)
+		return false;
+
+	rap->realtime_send_id = 0;
+	if (rap->realtime_indicating || queue_isempty(rap->realtime_segments))
+		return false;
+
+	segment = queue_pop_head(rap->realtime_segments);
+	if (!segment)
+		return false;
+
+	if (ras_data_ccc_use_indication(rap->ras_ccc.realtime)) {
+		uint16_t vhandle = gatt_db_attribute_get_handle(
+					gatt_db_attribute_get_value(
+						ras->realtime_chrc));
+		uint8_t *pdu = malloc(2 + segment->len);
+		unsigned int id = 0;
+		bool ref = false;
+
+		if (pdu) {
+			ref = true;
+			put_le16(vhandle, pdu);
+			memcpy(pdu + 2, segment->value, segment->len);
+			id = bt_att_send(bt_rap_get_att(rap),
+					BT_ATT_OP_HANDLE_IND, pdu,
+					2 + segment->len,
+					realtime_ind_conf_cb, bt_rap_ref(rap),
+					rap_ind_destroy);
+			free(pdu);
+		}
+
+		ras_realtime_segment_free(segment);
+		if (!id) {
+			DBG(rap, "Failed to send real-time indication");
+			/* bt_att_send() did not take the reference */
+			if (ref)
+				bt_rap_unref(rap);
+			return false;
+		}
+
+		rap->realtime_ind_id = id;
+		rap->realtime_indicating = true;
+		return false;
+	}
+
+	/* Reached whenever the client enabled notifications, so
+	 * gatt_db_attribute_notify() picks the notification transport.
+	 */
+	if (!gatt_db_attribute_notify(ras->realtime_chrc, segment->value,
+					segment->len, bt_rap_get_att(rap)))
+		DBG(rap, "Failed to send real-time notification");
+	ras_realtime_segment_free(segment);
+
+	if (!queue_isempty(rap->realtime_segments))
+		rap->realtime_send_id = timeout_add(RAS_SEGMENT_NFY_PACE_MS,
+					send_realtime_segment_cb, rap, NULL);
+
+	return false;
+}
+
 static void send_ras_segment_data(struct bt_rap *rap,
 				struct cs_procedure_data *proc)
 {
-	struct ras *ras;
 	uint16_t value_max;
 	const uint16_t header_len = ras_segment_header_size;
 	uint16_t raw_payload_size;
@@ -1184,7 +2365,10 @@ static void send_ras_segment_data(struct bt_rap *rap,
 	if (!rap->lrapdb || !rap->lrapdb->ras)
 		return;
 
-	ras = rap->lrapdb->ras;
+	/* Ranging data must only reach a client that subscribed to it. */
+	if (!rap->ras_ccc.realtime)
+		return;
+
 	value_max = ras_att_value_payload_max(rap);
 
 	if (value_max == 0) {
@@ -1208,7 +2392,6 @@ static void send_ras_segment_data(struct bt_rap *rap,
 		uint16_t seg_len;
 		uint8_t *seg;
 		uint16_t wr = 0;
-		bool ok = true;
 
 		if (index > total_len)
 			index = total_len;
@@ -1218,23 +2401,14 @@ static void send_ras_segment_data(struct bt_rap *rap,
 		if (unsent_data_size == 0)
 			return;
 
-		/* Set last_segment if procedure complete or fits in segment */
-		if ((proc->local_status != CS_PROC_PARTIAL_RESULTS &&
-				unsent_data_size <= raw_payload_size) ||
-			(proc->contains_complete_subevent_ &&
-				unsent_data_size <= raw_payload_size)) {
+		/* Only the final completed procedure segment terminates
+		 * the stream.
+		 */
+		if (proc->local_status != CS_PROC_PARTIAL_RESULTS &&
+				unsent_data_size <= raw_payload_size) {
 			proc->segmentation_header_.last_segment = 1;
 		} else {
 			proc->segmentation_header_.last_segment = 0;
-		}
-
-		/* Wait for more data if needed and not last segment */
-		if (unsent_data_size < raw_payload_size &&
-				proc->segmentation_header_.last_segment == 0) {
-			DBG(rap, "waiting for more data (unsent=%zu < "
-				"payload=%u)", unsent_data_size,
-				raw_payload_size);
-			return;
 		}
 
 		copy_size = (uint16_t)((unsent_data_size < raw_payload_size) ?
@@ -1255,22 +2429,32 @@ static void send_ras_segment_data(struct bt_rap *rap,
 			copy_size);
 		wr += copy_size;
 
-		/* Try sending to real-time characteristic */
-		if (ras->realtime_chrc)
-			ok = gatt_db_attribute_notify(ras->realtime_chrc, seg,
-						wr, bt_rap_get_att(rap));
+		{
+			struct ras_realtime_segment *segment;
 
-		/* Try sending to on-demand characteristic */
-		if (ras->ondemand_chrc && ok)
-			ok = gatt_db_attribute_notify(ras->ondemand_chrc, seg,
-						wr, bt_rap_get_att(rap));
+			if (queue_length(rap->realtime_segments) >=
+					RAS_REALTIME_MAX_SEGMENTS) {
+				free(seg);
+				DBG(rap, "Real-time RAS segment queue full");
+				return;
+			}
 
-		free(seg);
+			segment = new0(struct ras_realtime_segment, 1);
+			if (!segment || !queue_push_tail(rap->realtime_segments,
+							segment)) {
+				free(segment);
+				free(seg);
+				DBG(rap, "Failed to queue real-time "
+							"RAS segment");
+				return;
+			}
 
-		if (!ok) {
-			DBG(rap, "Failed to send RAS notification");
-			return;
+			segment->value = seg;
+			segment->len = wr;
 		}
+
+		if (!rap->realtime_send_id && !rap->realtime_indicating)
+			send_realtime_segment_cb(rap);
 
 		/* Advance read cursor and update segmentation state */
 		proc->ras_raw_data_index_ += copy_size;
@@ -1643,11 +2827,28 @@ static void handle_local_subevent_result(struct bt_rap *rap,
 
 	resptracker = rap->resptracker;
 
+	/* A connection can hold several CS configurations at once. Only the one
+	 * the responder tracker was set up for by CS Config Complete may feed
+	 * this procedure, otherwise subevents of a different configuration
+	 * would be appended to the same ranging data.
+	 */
+	if (resptracker->config_id != CS_INVALID_CONFIG_ID &&
+			resptracker->config_id != config_id) {
+		DBG(rap, "Ignoring subevent for config_id %u (tracking %u)",
+			config_id, resptracker->config_id);
+		return;
+	}
+
 	if (resptracker->current_proc) {
 		struct cs_procedure_data *cur = resptracker->current_proc;
 
 		if (has_header_fields && cur->counter != proc_counter) {
-			/* Safety: a new procedure; destroy the previous one */
+			/* A new real-time procedure supersedes queued
+			 * old ranging data.
+			 */
+			if (!ras_is_ondemand_mode(rap))
+				ras_realtime_segments_clear(rap);
+
 			resptracker_reset_current_proc(resptracker);
 		}
 	}
@@ -1721,12 +2922,28 @@ static void handle_local_subevent_result(struct bt_rap *rap,
 	/* Ensure first segment body starts with the 4-byte RangingHeader */
 	ras_maybe_prepend_ranging_header(proc);
 
-	if (subevt_done_status != SUBEVENT_DONE_PARTIAL_RESULTS)
-		/* Send RAS raw segment data */
+	/* Real-time Ranging mode */
+	if (subevt_done_status != SUBEVENT_DONE_PARTIAL_RESULTS &&
+			!ras_is_ondemand_mode(rap))
 		send_ras_segment_data(rap, proc);
 
 	/* Procedure complete? Clean up */
 	if (proc_done_status == CS_PROC_ALL_RESULTS_COMPLETE) {
+		struct ras *ras = rap->lrapdb ? rap->lrapdb->ras : NULL;
+
+		if (ras_is_ondemand_mode(rap)) {
+			if (rap->cache.valid) {
+				uint16_t evicted_counter = rap->cache.counter;
+
+				ras_ondemand_cache_clear(rap);
+				ras_send_ranging_data_overwritten(rap, ras,
+							evicted_counter);
+			}
+
+			ras_ondemand_cache_store(rap, proc);
+			ras_send_ranging_data_ready(rap, ras, proc->counter);
+		}
+
 		DBG(rap, "Destroying CsProcedureData counter=%u and "
 			"clearing current_proc", proc->counter);
 		resptracker_reset_current_proc(resptracker);
@@ -1804,12 +3021,196 @@ static void form_ras_data_with_cs_subevent_result_cont(struct bt_rap *rap,
 		cont->step_data);
 }
 
+static void write_procedure_data_to_bcs_algo(struct bt_rap *rap,
+					     struct bcs_procedure_data *bcs)
+{
+	if (!rap || !bcs)
+		return;
+
+	if (rap->reqtracker && rap->reqtracker->proc_start_timestamp_nanos) {
+		uint64_t elapsed_nanos = get_time_nanos() -
+				rap->reqtracker->proc_start_timestamp_nanos;
+		uint32_t k;
+
+		DBG(rap, "Procedure elapsed time: %llu nanos",
+		    (unsigned long long)elapsed_nanos);
+
+		for (k = 0; k < bcs->initiator_subevent_count; k++)
+			bcs->initiator_subevent_results[k].timestamp_nanos =
+								elapsed_nanos;
+		for (k = 0; k < bcs->reflector_subevent_count; k++)
+			bcs->reflector_subevent_results[k].timestamp_nanos =
+								elapsed_nanos;
+	}
+
+	DBG(rap, "procedure_counter=%u sequence=%u "
+	    "init_tx_pwr=%d refl_tx_pwr=%d "
+	    "init_abort=%d refl_abort=%d "
+	    "init_subevents=%u refl_subevents=%u",
+	    bcs->procedure_counter, bcs->procedure_sequence,
+	    bcs->initiator_selected_tx_power,
+	    bcs->reflector_selected_tx_power,
+	    bcs->initiator_procedure_abort_reason,
+	    bcs->reflector_procedure_abort_reason,
+	    bcs->initiator_subevent_count,
+	    bcs->reflector_subevent_count);
+
+	if (rap->procedure_data_cb)
+		rap->procedure_data_cb(rap, bcs,
+				       rap->procedure_data_user_data);
+
+	bcs_proc_data_clear(bcs);
+}
+
+static void check_cs_procedure_complete(struct bt_rap *rap,
+					 struct cstracker *reqtracker,
+					 struct cs_proc_state *state)
+{
+	struct bcs_procedure_data *bcs = &state->bcs_data;
+
+	if (!rap->procedure_data_cb)
+		return;
+
+	if (state->local_status != CS_PROC_ALL_RESULTS_COMPLETE ||
+	    state->remote_status != CS_PROC_ALL_RESULTS_COMPLETE) {
+		DBG(rap, "Procedure not complete: local=%d remote=%d",
+		    state->local_status, state->remote_status);
+		return;
+	}
+
+	if (!state->local_has_complete_subevent &&
+	    !state->remote_has_complete_subevent) {
+		DBG(rap, "No complete subevent available");
+		return;
+	}
+
+	reqtracker->procedure_sequence_after_enable++;
+	bcs->procedure_sequence = reqtracker->procedure_sequence_after_enable;
+	write_procedure_data_to_bcs_algo(rap, bcs);
+
+	queue_remove(reqtracker->proc_states, state);
+	free(state);
+}
+
+static void parse_cs_local_initiator_data(struct bt_rap *rap,
+					bool has_header_fields,
+					uint8_t config_id,
+					uint8_t num_ant_paths,
+					uint16_t proc_counter,
+					uint16_t start_acl_conn_evt_counter,
+					uint16_t freq_comp,
+					int8_t ref_pwr_lvl,
+					uint8_t proc_done_status,
+					uint8_t subevt_done_status,
+					uint8_t abort_reason,
+					uint8_t num_steps_reported,
+					const struct cs_step_data *hci_steps)
+{
+	struct cstracker *reqtracker = rap->reqtracker;
+	uint16_t effective_counter;
+	struct cs_proc_state *state;
+	struct bcs_procedure_data *bcs;
+
+	/* Same as the responder side: only the tracked CS configuration may
+	 * contribute steps to this procedure.
+	 */
+	if (reqtracker->config_id != CS_INVALID_CONFIG_ID &&
+			reqtracker->config_id != config_id) {
+		DBG(rap, "Ignoring subevent for config_id %u (tracking %u)",
+			config_id, reqtracker->config_id);
+		return;
+	}
+
+	effective_counter = has_header_fields ? proc_counter
+					      : reqtracker->last_proc_counter;
+
+	state = find_or_create_proc_state(reqtracker, effective_counter);
+	if (!state)
+		return;
+
+	bcs = &state->bcs_data;
+
+	bcs->initiator_selected_tx_power      = reqtracker->selected_tx_power;
+	bcs->initiator_procedure_abort_reason = abort_reason & 0x0F;
+
+	state->local_status =
+		(enum cs_procedure_done_status)(proc_done_status & 0x0F);
+	if ((subevt_done_status & 0x0F) == 0x00)
+		state->local_has_complete_subevent = true;
+
+	if (has_header_fields) {
+		struct cs_step_data *steps = NULL;
+
+		reqtracker->proc_start_timestamp_nanos = get_time_nanos();
+
+		bcs->procedure_counter        = proc_counter;
+		reqtracker->last_proc_counter = proc_counter;
+		reqtracker->last_start_acl_conn_evt_counter =
+					start_acl_conn_evt_counter;
+		reqtracker->last_freq_comp   = freq_comp;
+		reqtracker->last_ref_pwr_lvl = ref_pwr_lvl;
+
+		if (num_steps_reported > 0 && hci_steps) {
+			steps = calloc(num_steps_reported, sizeof(*steps));
+			if (!steps)
+				return;
+			memcpy(steps, hci_steps,
+			       num_steps_reported * sizeof(*steps));
+		}
+
+		bcs_proc_data_add_initiator_subevent(bcs,
+				start_acl_conn_evt_counter,
+				freq_comp, ref_pwr_lvl,
+				num_ant_paths,
+				(abort_reason >> 4) & 0x0F,
+				0,
+				steps, num_steps_reported);
+	} else {
+		struct cs_subevent_result_data *last;
+		struct cs_step_data *new_steps;
+		uint32_t old_count, new_count;
+
+		if (!bcs->initiator_subevent_results ||
+		    bcs->initiator_subevent_count == 0)
+			return;
+
+		last = &bcs->initiator_subevent_results[
+					bcs->initiator_subevent_count - 1];
+		old_count = last->num_steps;
+		new_count = old_count + num_steps_reported;
+
+		if (num_steps_reported > 0 && hci_steps) {
+			new_steps = realloc(last->step_data,
+					    new_count * sizeof(*new_steps));
+			if (!new_steps)
+				return;
+
+			memcpy(&new_steps[old_count], hci_steps,
+			       num_steps_reported * sizeof(*new_steps));
+			last->step_data = new_steps;
+			last->num_steps = new_count;
+		}
+
+		last->subevent_abort_reason = (abort_reason >> 4) & 0x0F;
+	}
+
+	DBG(rap, "Local initiator data: proc_counter=%u local_status=%d "
+		"remote_status=%d local_has_complete_subevent=%d "
+		"remote_has_complete_subevent=%d",
+	    state->proc_counter, state->local_status, state->remote_status,
+	    state->local_has_complete_subevent,
+	    state->remote_has_complete_subevent);
+
+	check_cs_procedure_complete(rap, reqtracker, state);
+}
+
 static void fill_initiator_data_from_cs_subevent_result_cont(struct bt_rap *rap,
 		const struct rap_ev_cs_subevent_result_cont *cont,
 		uint16_t length)
 {
 	size_t base_len = offsetof(struct rap_ev_cs_subevent_result_cont,
 					step_data);
+	struct cstracker *reqtracker;
 
 	if (!rap || !rap->reqtracker || !cont)
 		return;
@@ -1819,6 +3220,22 @@ static void fill_initiator_data_from_cs_subevent_result_cont(struct bt_rap *rap,
 
 	DBG(rap, "Received CS subevent result continue subevent: len=%u",
 		length);
+
+	reqtracker = rap->reqtracker;
+
+	parse_cs_local_initiator_data(rap,
+				false,
+				cont->config_id,
+				cont->num_ant_paths,
+				reqtracker->last_proc_counter,
+				reqtracker->last_start_acl_conn_evt_counter,
+				reqtracker->last_freq_comp,
+				reqtracker->last_ref_pwr_lvl,
+				cont->proc_done_status,
+				cont->subevt_done_status,
+				cont->abort_reason,
+				cont->num_steps_reported,
+				cont->step_data);
 }
 
 static void fill_initiator_data_from_cs_subevent_result(struct bt_rap *rap,
@@ -1836,7 +3253,20 @@ static void fill_initiator_data_from_cs_subevent_result(struct bt_rap *rap,
 		return;
 
 	DBG(rap, "Received CS subevent result subevent: len=%u", length);
-	/* TODO: Store initiator subevent result data */
+
+	parse_cs_local_initiator_data(rap,
+				true,
+				data->config_id,
+				data->num_ant_paths,
+				data->proc_counter,
+				data->start_acl_conn_evt_counter,
+				data->freq_comp,
+				data->ref_pwr_lvl,
+				data->proc_done_status,
+				data->subevt_done_status,
+				data->abort_reason,
+				data->num_steps_reported,
+				data->step_data);
 }
 
 void bt_rap_hci_cs_subevent_result_cont_callback(uint16_t length,
@@ -1880,6 +3310,7 @@ void bt_rap_hci_cs_procedure_enable_complete_callback(uint16_t length,
 	const struct rap_ev_cs_proc_enable_cmplt *data = param;
 	struct bt_rap *rap = user_data;
 	struct cstracker *resptracker;
+	struct cstracker *reqtracker;
 
 	DBG(rap, "Received CS procedure enable complete subevent: len=%u",
 	    length);
@@ -1895,6 +3326,21 @@ void bt_rap_hci_cs_procedure_enable_complete_callback(uint16_t length,
 	/* Populate responder tracker */
 	resptracker->config_id = data->config_id;
 	resptracker->selected_tx_power = data->sel_tx_pwr;
+
+	if (!rap->reqtracker) {
+		reqtracker = new0(struct cstracker, 1);
+		cs_tracker_init(reqtracker);
+		rap->reqtracker = reqtracker;
+	}
+
+	reqtracker = rap->reqtracker;
+	reqtracker->config_id = data->config_id;
+	reqtracker->selected_tx_power = data->sel_tx_pwr;
+	reqtracker->bcs_proc_data.initiator_selected_tx_power =
+							data->sel_tx_pwr;
+
+	/* Store procedure enable config in the session-level template */
+	reqtracker->bcs_proc_data.proc_enable_config = *data;
 }
 
 void bt_rap_hci_cs_sec_enable_complete_callback(uint16_t length,
@@ -1945,6 +3391,49 @@ void bt_rap_hci_cs_config_complete_callback(uint16_t length,
 	reqtracker->config_id = data->config_id;
 	reqtracker->role = data->role;
 	reqtracker->rtt_type = data->rtt_type;
+	reqtracker->procedure_sequence_after_enable = 0;
+
+	/* Store cs_config in session-level template for procedure data */
+	reqtracker->bcs_proc_data.cs_config = *data;
+	reqtracker->bcs_proc_data.t_sw_time_us_supported_by_local =
+						rap->local_sw_time;
+	reqtracker->bcs_proc_data.t_sw_time_us_supported_by_remote =
+						rap->remote_sw_time;
+	reqtracker->bcs_proc_data.ble_conn_interval = rap->conn_interval;
+}
+
+void bt_rap_set_local_sw_time(struct bt_rap *rap, uint8_t local_sw_time)
+{
+	if (!rap)
+		return;
+
+	rap->local_sw_time = local_sw_time;
+}
+
+void bt_rap_set_remote_sw_time(struct bt_rap *rap, uint8_t remote_sw_time)
+{
+	if (!rap)
+		return;
+
+	rap->remote_sw_time = remote_sw_time;
+}
+
+void bt_rap_set_conn_interval(struct bt_rap *rap, uint16_t conn_interval)
+{
+	if (!rap)
+		return;
+
+	rap->conn_interval = conn_interval;
+}
+
+bool bt_rap_set_ondemand_ranging(struct bt_rap *rap, bool enable)
+{
+	if (!rap)
+		return false;
+
+	rap->ondemand_mode = enable;
+
+	return true;
 }
 
 struct bt_rap *bt_rap_new(struct gatt_db *ldb, struct gatt_db *rdb)
@@ -1964,6 +3453,7 @@ struct bt_rap *bt_rap_new(struct gatt_db *ldb, struct gatt_db *rdb)
 	rap->pending = queue_new();
 	rap->ready_cbs = queue_new();
 	rap->notify = queue_new();
+	rap->realtime_segments = queue_new();
 
 	if (!rdb)
 		goto done;
@@ -2052,6 +3542,7 @@ static void rap_notify_destroy(void *data)
 
 static unsigned int bt_rap_register_notify(struct bt_rap *rap,
 					uint16_t value_handle,
+					uint16_t ccc_value,
 					rap_notify_t func,
 					void *user_data)
 {
@@ -2064,7 +3555,13 @@ static unsigned int bt_rap_register_notify(struct bt_rap *rap,
 
 	DBG(rap, "register for notifications");
 
-	notify->id = bt_gatt_client_register_notify(rap->client,
+	if (ccc_value)
+		notify->id = bt_gatt_client_register_notify_with_ccc(
+					rap->client, value_handle, ccc_value,
+					ras_register, rap_notify, notify,
+					rap_notify_destroy);
+	else
+		notify->id = bt_gatt_client_register_notify(rap->client,
 					value_handle, ras_register,
 					rap_notify, notify,
 					rap_notify_destroy);
@@ -2077,6 +3574,190 @@ static unsigned int bt_rap_register_notify(struct bt_rap *rap,
 	queue_push_tail(rap->notify, notify);
 
 	return notify->id;
+}
+
+bool bt_rap_disable_realtime_ranging(struct bt_rap *rap)
+{
+	unsigned int notify_id;
+
+	if (!rap || !rap->client)
+		return false;
+
+	if (rap->realtime_timeout_id) {
+		timeout_remove(rap->realtime_timeout_id);
+		rap->realtime_timeout_id = 0;
+	}
+
+	if (!rap->realtime_notify_id)
+		return true;
+
+	notify_id = rap->realtime_notify_id;
+	rap->realtime_notify_id = 0;
+
+	return bt_gatt_client_unregister_notify(rap->client, notify_id);
+}
+
+static bool ras_realtime_timeout_cb(void *user_data)
+{
+	struct bt_rap *rap = user_data;
+
+	rap->realtime_timeout_id = 0;
+	DBG(rap, "Real-time Ranging Data segment timeout; disabling CCCD");
+	bt_rap_disable_realtime_ranging(rap);
+
+	return false;
+}
+
+static void ras_realtime_arm_timeout(struct bt_rap *rap, unsigned int timeout)
+{
+	if (rap->realtime_timeout_id)
+		timeout_remove(rap->realtime_timeout_id);
+
+	rap->realtime_timeout_id = timeout_add(timeout, ras_realtime_timeout_cb,
+						rap, NULL);
+}
+
+static void ras_realtime_cancel_timeout(struct bt_rap *rap)
+{
+	if (!rap->realtime_timeout_id)
+		return;
+
+	timeout_remove(rap->realtime_timeout_id);
+	rap->realtime_timeout_id = 0;
+}
+
+static bool bt_rap_unregister_notify(struct bt_rap *rap, unsigned int *id)
+{
+	unsigned int notify_id;
+
+	if (!*id)
+		return true;
+
+	notify_id = *id;
+	*id = 0;
+	return bt_gatt_client_unregister_notify(rap->client, notify_id);
+}
+
+static bool bt_rap_disable_ranging_data(struct bt_rap *rap)
+{
+	bool success = true;
+
+	if (!rap || !rap->client)
+		return false;
+
+	ras_realtime_cancel_timeout(rap);
+
+	success &= bt_rap_unregister_notify(rap, &rap->realtime_notify_id);
+	success &= bt_rap_unregister_notify(rap, &rap->ondemand_notify_id);
+	success &= bt_rap_unregister_notify(rap, &rap->cp_notify_id);
+	success &= bt_rap_unregister_notify(rap, &rap->ready_notify_id);
+	success &= bt_rap_unregister_notify(rap, &rap->overwritten_notify_id);
+	return success;
+}
+
+static void ras_ondemand_client_reset(struct ras *ras)
+{
+	if (!ras)
+		return;
+
+	if (ras->client.cp_timeout_id) {
+		timeout_remove(ras->client.cp_timeout_id);
+		ras->client.cp_timeout_id = 0;
+	}
+
+	ras->client.pending_op = RAS_CP_PENDING_NONE;
+	ras->client.pending_counter = 0;
+}
+
+/* Initiator role: fires when the peer never answers an outstanding
+ * Get_Ranging_Data/ACK_Ranging_Data request. Without this, a dropped
+ * notification would leave client.pending_op stuck forever, silently
+ * blocking all future Ranging Data Ready handling for this connection.
+ */
+static bool ras_cp_timeout_cb(void *user_data)
+{
+	struct bt_rap *rap = user_data;
+	struct ras *ras = rap_get_ras(rap);
+
+	if (ras) {
+		DBG(rap, "RAS CP response timed out (pending_op=%d "
+		    "counter=%u)", ras->client.pending_op,
+		    ras->client.pending_counter);
+
+		/* The glib source is about to be destroyed on return; avoid
+		 * ras_ondemand_client_reset() also calling timeout_remove()
+		 * on it.
+		 */
+		ras->client.cp_timeout_id = 0;
+		if (ras->client.pending_op == RAS_CP_PENDING_GET &&
+				ras->client.abort_operation)
+			ras_cp_write_op(rap, ras, RAS_CP_OP_ABORT_OPERATION,
+					ras->client.pending_counter);
+		ras_ondemand_client_reset(ras);
+	}
+
+	return false;
+}
+
+static void ras_cp_arm_timeout(struct bt_rap *rap, struct ras *ras)
+{
+	if (!ras)
+		return;
+
+	if (ras->client.cp_timeout_id)
+		timeout_remove(ras->client.cp_timeout_id);
+
+	ras->client.cp_timeout_id = timeout_add(RAS_CP_RESPONSE_TIMEOUT,
+						ras_cp_timeout_cb, rap, NULL);
+}
+
+static void ras_cp_arm_segment_timeout(struct bt_rap *rap, struct ras *ras)
+{
+	if (!ras)
+		return;
+
+	if (ras->client.cp_timeout_id)
+		timeout_remove(ras->client.cp_timeout_id);
+
+	ras->client.cp_timeout_id = timeout_add(RAS_SEGMENT_TIMEOUT,
+						ras_cp_timeout_cb, rap, NULL);
+}
+
+static bool ras_cp_write_op(struct bt_rap *rap, struct ras *ras,
+				uint8_t opcode, uint16_t counter)
+{
+	uint8_t value[3];
+	uint16_t value_handle;
+	uint16_t length = 1;
+
+	if (!rap || !ras || !ras->cp_chrc || !rap->client)
+		return false;
+
+	if (!gatt_db_attribute_get_char_data(ras->cp_chrc, NULL,
+					&value_handle, NULL, NULL, NULL))
+		return false;
+
+	value[0] = opcode;
+	if (opcode != RAS_CP_OP_ABORT_OPERATION) {
+		put_le16(counter, value + 1);
+		length = sizeof(value);
+	}
+
+	return bt_gatt_client_write_without_response(rap->client,
+					value_handle, false,
+					value, length);
+}
+
+static bool ras_cp_send_get_ranging_data(struct bt_rap *rap, struct ras *ras,
+					uint16_t counter)
+{
+	return ras_cp_write_op(rap, ras, RAS_CP_OP_GET_RANGING_DATA, counter);
+}
+
+static bool ras_cp_send_ack_ranging_data(struct bt_rap *rap, struct ras *ras,
+					uint16_t counter)
+{
+	return ras_cp_write_op(rap, ras, RAS_CP_OP_ACK_RANGING_DATA, counter);
 }
 
 static inline bool parse_segmentation_header(struct iovec *iov,
@@ -2122,7 +3803,8 @@ static size_t get_mode_zero_length(enum cs_role remote_role)
 }
 
 static void parse_mode_zero(struct bt_rap *rap, struct iovec *mode_iov,
-			    enum cs_role remote_role)
+			    enum cs_role remote_role,
+			    struct cs_mode_zero_data *out)
 {
 	uint8_t packet_quality;
 	int8_t packet_rssi_dbm;
@@ -2143,7 +3825,12 @@ static void parse_mode_zero(struct bt_rap *rap, struct iovec *mode_iov,
 		}
 	}
 
-	/* TODO: Store this data as reflector data */
+	if (out) {
+		out->packet_quality = packet_quality;
+		out->packet_rssi_dbm = (uint8_t)packet_rssi_dbm;
+		out->packet_ant = packet_ant;
+		out->init_measured_freq_offset = init_measured_freq_offset;
+	}
 }
 
 static size_t get_mode_one_length(bool include_pct)
@@ -2154,7 +3841,8 @@ static size_t get_mode_one_length(bool include_pct)
 }
 
 static void parse_mode_one(struct bt_rap *rap, struct iovec *mode_iov,
-			   enum cs_role remote_role, bool include_pct)
+			   enum cs_role remote_role, bool include_pct,
+			   struct cs_mode_one_data *out)
 {
 	uint8_t packet_quality;
 	uint8_t packet_nadm;
@@ -2178,7 +3866,20 @@ static void parse_mode_one(struct bt_rap *rap, struct iovec *mode_iov,
 		parse_i_q_sample(mode_iov, &pct2_i, &pct2_q);
 	}
 
-	/* TODO: Store this data as reflector data */
+	if (out) {
+		out->packet_quality = packet_quality;
+		out->packet_nadm = packet_nadm;
+		out->packet_rssi_dbm = (uint8_t)packet_rssi_dbm;
+		out->packet_ant = packet_ant;
+		if (remote_role == CS_ROLE_REFLECTOR)
+			out->tod_toa_refl = time_value;
+		else
+			out->toa_tod_init = time_value;
+		out->packet_pct1.i_sample = pct1_i;
+		out->packet_pct1.q_sample = pct1_q;
+		out->packet_pct2.i_sample = pct2_i;
+		out->packet_pct2.q_sample = pct2_q;
+	}
 }
 
 static size_t get_mode_two_length(uint8_t num_antenna_paths)
@@ -2189,7 +3890,8 @@ static size_t get_mode_two_length(uint8_t num_antenna_paths)
 }
 
 static void parse_mode_two(struct bt_rap *rap, struct iovec *mode_iov,
-			   uint8_t num_antenna_paths)
+			   uint8_t num_antenna_paths,
+			   struct cs_mode_two_data *out)
 {
 	uint8_t ant_perm_index;
 	int16_t tone_pct_i[5];
@@ -2228,7 +3930,14 @@ static void parse_mode_two(struct bt_rap *rap, struct iovec *mode_iov,
 	DBG(rap, "    cs_mode_two_data: ant_perm_idx=%u",
 		ant_perm_index);
 
-	/* TODO: Store this data as reflector data */
+	if (out) {
+		out->ant_perm_index = ant_perm_index;
+		for (k = 0; k < num_paths; k++) {
+			out->tone_pct[k].i_sample = tone_pct_i[k];
+			out->tone_pct[k].q_sample = tone_pct_q[k];
+			out->tone_quality_indicator[k] = tone_quality[k];
+		}
+	}
 }
 
 static size_t get_mode_three_length(uint8_t num_antenna_paths, bool include_pct)
@@ -2239,13 +3948,17 @@ static size_t get_mode_three_length(uint8_t num_antenna_paths, bool include_pct)
 
 static void parse_mode_three(struct bt_rap *rap, struct iovec *mode_iov,
 			     enum cs_role remote_role, bool include_pct,
-			     uint8_t num_antenna_paths)
+			     uint8_t num_antenna_paths,
+			     struct cs_mode_three_data *out)
 {
+	struct cs_mode_one_data *out_m1 = out ? &out->mode_one_data : NULL;
+	struct cs_mode_two_data *out_m2 = out ? &out->mode_two_data : NULL;
+
 	/* Mode 3 = Mode 1 + Mode 2 */
-	parse_mode_one(rap, mode_iov, remote_role, include_pct);
+	parse_mode_one(rap, mode_iov, remote_role, include_pct, out_m1);
 
 	if (mode_iov->iov_len > 0)
-		parse_mode_two(rap, mode_iov, num_antenna_paths);
+		parse_mode_two(rap, mode_iov, num_antenna_paths, out_m2);
 }
 
 static bool parse_subevent_header(struct iovec *iov,
@@ -2278,7 +3991,8 @@ static bool parse_subevent_header(struct iovec *iov,
 
 static bool parse_step(struct bt_rap *rap, struct iovec *iov,
 			struct cstracker *reqtracker,
-			uint8_t num_antenna_paths, uint8_t step_idx)
+			uint8_t num_antenna_paths, uint8_t step_idx,
+			struct cs_step_data *out_step)
 {
 	uint8_t mode_byte, step_mode;
 	bool include_pct;
@@ -2337,20 +4051,42 @@ static bool parse_step(struct bt_rap *rap, struct iovec *iov,
 	mode_iov.iov_base = payload;
 	mode_iov.iov_len = step_payload_len;
 
+	if (out_step) {
+		out_step->step_mode = step_mode;
+		out_step->step_chnl = 0;
+		out_step->step_data_length = (uint8_t)step_payload_len;
+	}
+
 	switch (step_mode) {
-	case CS_MODE_ZERO:
-		parse_mode_zero(rap, &mode_iov, remote_role);
+	case CS_MODE_ZERO: {
+		struct cs_mode_zero_data *out = out_step ?
+			&out_step->step_mode_data.mode_zero_data : NULL;
+
+		parse_mode_zero(rap, &mode_iov, remote_role, out);
 		break;
-	case CS_MODE_ONE:
-		parse_mode_one(rap, &mode_iov, remote_role, include_pct);
+	}
+	case CS_MODE_ONE: {
+		struct cs_mode_one_data *out = out_step ?
+			&out_step->step_mode_data.mode_one_data : NULL;
+
+		parse_mode_one(rap, &mode_iov, remote_role, include_pct, out);
 		break;
-	case CS_MODE_TWO:
-		parse_mode_two(rap, &mode_iov, num_antenna_paths);
+	}
+	case CS_MODE_TWO: {
+		struct cs_mode_two_data *out = out_step ?
+			&out_step->step_mode_data.mode_two_data : NULL;
+
+		parse_mode_two(rap, &mode_iov, num_antenna_paths, out);
 		break;
-	case CS_MODE_THREE:
+	}
+	case CS_MODE_THREE: {
+		struct cs_mode_three_data *out = out_step ?
+			&out_step->step_mode_data.mode_three_data : NULL;
+
 		parse_mode_three(rap, &mode_iov, remote_role, include_pct,
-						num_antenna_paths);
+					num_antenna_paths, out);
 		break;
+	}
 	default:
 		break;
 	}
@@ -2360,12 +4096,16 @@ static bool parse_step(struct bt_rap *rap, struct iovec *iov,
 
 static void parse_subevent_steps(struct bt_rap *rap, struct iovec *iov,
 				struct cstracker *reqtracker,
-				uint8_t num_antenna_paths, uint8_t num_steps)
+				uint8_t num_antenna_paths, uint8_t num_steps,
+				struct cs_step_data *out_steps)
 {
 	uint8_t i;
 
 	for (i = 0; i < num_steps; i++) {
-		if (!parse_step(rap, iov, reqtracker, num_antenna_paths, i))
+		struct cs_step_data *out = out_steps ? &out_steps[i] : NULL;
+
+		if (!parse_step(rap, iov, reqtracker, num_antenna_paths, i,
+				out))
 			break;
 	}
 }
@@ -2376,6 +4116,10 @@ static void parse_ras_data_segments(struct bt_rap *rap,
 	struct iovec iov;
 	uint8_t antenna_mask;
 	uint8_t num_antenna_paths;
+	uint16_t ranging_counter;
+	struct cs_proc_state *state = NULL;
+	struct bcs_procedure_data *bcs = NULL;
+	bool is_initiator;
 
 	if (!rap || !reqtracker)
 		return;
@@ -2387,10 +4131,30 @@ static void parse_ras_data_segments(struct bt_rap *rap,
 		ranging_header_get_antenna_mask(&reqtracker->ranging_header_);
 	num_antenna_paths = antenna_mask_count_paths(antenna_mask);
 
+	ranging_counter =
+		ranging_header_get_counter(&reqtracker->ranging_header_);
+
+	/* Find the per-procedure state that matches this RAS counter */
+	if (rap->procedure_data_cb) {
+		state = find_proc_state_for_ras(reqtracker, ranging_counter);
+		if (state) {
+			bcs = &state->bcs_data;
+			bcs->reflector_selected_tx_power =
+				reqtracker->ranging_header_.selected_tx_power;
+		}
+	}
+
+	/* When local role=INITIATOR, remote data goes to
+	 * reflector_subevent_results. When local role=REFLECTOR,
+	 * remote data goes to initiator_subevent_results.
+	 */
+	is_initiator = (reqtracker->role == CS_ROLE_INITIATOR);
+
 	iov = reqtracker->segment_data;
 
 	while (iov.iov_len >= RAS_SUBEVENT_HEADER_SIZE) {
 		struct ras_subevent_header hdr;
+		struct cs_step_data *steps = NULL;
 
 		if (!parse_subevent_header(&iov, &hdr))
 			break;
@@ -2402,17 +4166,73 @@ static void parse_ras_data_segments(struct bt_rap *rap,
 		    hdr.reference_power_level,
 		    hdr.num_steps_reported);
 
+		if (bcs && hdr.num_steps_reported > 0)
+			steps = calloc(hdr.num_steps_reported, sizeof(*steps));
+
 		parse_subevent_steps(rap, &iov, reqtracker,
 					num_antenna_paths,
-					hdr.num_steps_reported);
+					hdr.num_steps_reported,
+					steps);
 
-		if (hdr.subevent_done_status ==
-		    SUBEVENT_DONE_ALL_RESULTS_COMPLETE ||
-		    hdr.ranging_done_status ==
+		if (bcs) {
+			uint32_t stored_steps =
+					steps ? hdr.num_steps_reported : 0;
+
+			if (is_initiator)
+				bcs_proc_data_add_reflector_subevent(bcs,
+					hdr.start_acl_conn_event,
+					hdr.frequency_compensation,
+					hdr.reference_power_level,
+					num_antenna_paths,
+					hdr.subevent_abort_reason,
+					0,
+					steps, stored_steps);
+			else
+				bcs_proc_data_add_initiator_subevent(bcs,
+					hdr.start_acl_conn_event,
+					hdr.frequency_compensation,
+					hdr.reference_power_level,
+					num_antenna_paths,
+					hdr.subevent_abort_reason,
+					0,
+					steps, stored_steps);
+			steps = NULL; /* ownership transferred */
+		} else {
+			free(steps);
+			steps = NULL;
+		}
+
+		if (state) {
+			if (hdr.subevent_done_status ==
+			    SUBEVENT_DONE_ALL_RESULTS_COMPLETE)
+				state->remote_has_complete_subevent = true;
+			if (hdr.ranging_done_status ==
+			    RANGING_DONE_ALL_RESULTS_COMPLETE)
+				state->remote_status =
+						CS_PROC_ALL_RESULTS_COMPLETE;
+		}
+
+		if (bcs && hdr.ranging_abort_reason)
+			bcs->reflector_procedure_abort_reason =
+					hdr.ranging_abort_reason & 0x0F;
+
+		if (hdr.ranging_done_status ==
 		    RANGING_DONE_ALL_RESULTS_COMPLETE) {
 			DBG(rap, "Ranging procedure complete");
 			break;
 		}
+	}
+
+	if (state) {
+		DBG(rap, "RAS data segments parsed: proc_counter=%u "
+			"local_status=%d remote_status=%d "
+			"local_has_complete_subevent=%d "
+			"remote_has_complete_subevent=%d",
+		    state->proc_counter, state->local_status,
+		    state->remote_status,
+		    state->local_has_complete_subevent,
+		    state->remote_has_complete_subevent);
+		check_cs_procedure_complete(rap, reqtracker, state);
 	}
 
 	free(reqtracker->segment_data.iov_base);
@@ -2422,7 +4242,7 @@ static void parse_ras_data_segments(struct bt_rap *rap,
 
 static bool process_first_segment(struct bt_rap *rap,
 					struct cstracker *reqtracker,
-					struct iovec *iov, bool last_segment)
+					struct iovec *iov)
 {
 	uint16_t counter_config_val;
 	int8_t selected_tx_power;
@@ -2464,16 +4284,11 @@ static bool process_first_segment(struct bt_rap *rap,
 		    "with %zu bytes", iov->iov_len);
 	}
 
-	if (!last_segment)
-		return false;
-
-	DBG(rap, "Single-segment: first=1, last=1");
 	return true;
 }
 
-static void ras_realtime_notify_cb(struct bt_rap *rap, uint16_t value_handle,
-				   const uint8_t *value, uint16_t length,
-				   void *user_data)
+static void ras_reassemble_segment_notify(struct bt_rap *rap,
+					const uint8_t *value, uint16_t length)
 {
 	struct iovec iov = { .iov_base = (void *)value, .iov_len = length };
 	struct segmentation_header seg_hdr;
@@ -2483,9 +4298,6 @@ static void ras_realtime_notify_cb(struct bt_rap *rap, uint16_t value_handle,
 		DBG(rap, "Invalid notification data");
 		return;
 	}
-
-	DBG(rap, "Received real-time notification: handle=0x%04x len=%u",
-	    value_handle, length);
 
 	if (!parse_segmentation_header(&iov, &seg_hdr)) {
 		DBG(rap, "Failed to parse segmentation header");
@@ -2504,14 +4316,40 @@ static void ras_realtime_notify_cb(struct bt_rap *rap, uint16_t value_handle,
 	reqtracker = rap->reqtracker;
 
 	if (seg_hdr.first_segment) {
-		if (!process_first_segment(rap, reqtracker, &iov,
-						seg_hdr.last_segment))
+		if (!process_first_segment(rap, reqtracker, &iov))
 			return;
+
+		reqtracker->reassembly_active = true;
+		reqtracker->expected_segment_counter =
+			(seg_hdr.rolling_segment_counter + 1) & 0x3F;
 	} else {
+		if (!reqtracker->reassembly_active) {
+			DBG(rap, "Continuation segment with no first "
+			    "segment received this cycle - dropping");
+			return;
+		}
+
+		if (seg_hdr.rolling_segment_counter !=
+				reqtracker->expected_segment_counter) {
+			DBG(rap, "Segment counter gap (got=%u want=%u) - "
+			    "discarding in-progress transfer",
+			    seg_hdr.rolling_segment_counter,
+			    reqtracker->expected_segment_counter);
+			free(reqtracker->segment_data.iov_base);
+			reqtracker->segment_data.iov_base = NULL;
+			reqtracker->segment_data.iov_len = 0;
+			reqtracker->reassembly_active = false;
+			return;
+		}
+
+		reqtracker->expected_segment_counter =
+			(seg_hdr.rolling_segment_counter + 1) & 0x3F;
+
 		if (iov.iov_len > 0) {
 			if (!util_iov_append(&reqtracker->segment_data,
 						iov.iov_base, iov.iov_len)) {
 				DBG(rap, "Failed to append segment data");
+				reqtracker->reassembly_active = false;
 				return;
 			}
 			DBG(rap, "Continuation segment: appended "
@@ -2521,9 +4359,328 @@ static void ras_realtime_notify_cb(struct bt_rap *rap, uint16_t value_handle,
 		}
 	}
 
-	/* Last segment: parse complete RAS data */
+	/* Last segment: parse the RAS data accumulated so far.
+	 *
+	 * Do NOT clear reassembly_active here. On real hardware a single
+	 * ranging procedure's data can arrive as several ATT-level
+	 * first/last segment cycles - one per subevent - with the 4-byte
+	 * Ranging Header (and first_segment=1) sent only once, on the very
+	 * first cycle. Later cycles are continuation-only (first_segment=0)
+	 * even though they each close with last_segment=1. Leaving
+	 * reassembly_active set lets those later continuation segments be
+	 * accepted instead of being dropped as "no first segment received".
+	 * parse_ras_data_segments() already frees segment_data before
+	 * returning, so the next continuation simply starts a fresh
+	 * accumulation; a genuinely new procedure still resets all of this
+	 * state unconditionally via its own first_segment=1.
+	 */
 	if (seg_hdr.last_segment)
 		parse_ras_data_segments(rap, reqtracker);
+}
+
+/* Real-time and on-demand notifications share identical segment
+ * reassembly (see ras_reassemble_segment_notify()); the only difference
+ * is the log label, passed in via user_data at registration time. For
+ * on-demand, the last segment does not itself trigger ACK, the ACK is
+ * driven by the RAS Control Point's Complete_Ranging_Data response
+ * (see ras_cp_response_notify_cb()).
+ */
+static void ras_segment_notify_cb(struct bt_rap *rap, uint16_t value_handle,
+				   const uint8_t *value, uint16_t length,
+				   void *user_data)
+{
+	const char *label = user_data ? user_data : "real-time";
+	struct ras *ras = rap_get_ras(rap);
+	struct iovec iov = { .iov_base = (void *)value, .iov_len = length };
+	struct segmentation_header seg_hdr;
+	bool realtime = !strcmp(label, "real-time");
+
+	DBG(rap, "Received %s notification: handle=0x%04x len=%u",
+	    label, value_handle, length);
+
+	ras_reassemble_segment_notify(rap, value, length);
+
+	if (realtime && parse_segmentation_header(&iov, &seg_hdr)) {
+		if (seg_hdr.last_segment)
+			ras_realtime_cancel_timeout(rap);
+		else
+			ras_realtime_arm_timeout(rap, RAS_SEGMENT_TIMEOUT);
+	}
+
+	if (ras && ras->client.pending_op == RAS_CP_PENDING_GET)
+		ras_cp_arm_segment_timeout(rap, ras);
+}
+
+/* Initiator role: reacts to a Ranging Data Ready notification/indication
+ * by requesting the newly-available data via Get_Ranging_Data.
+ */
+static void ras_data_ready_notify_cb(struct bt_rap *rap, uint16_t value_handle,
+				   const uint8_t *value, uint16_t length,
+				   void *user_data)
+{
+	struct ras *ras = rap_get_ras(rap);
+	uint16_t counter;
+
+	if (!rap || !ras || length < 2) {
+		DBG(rap, "Invalid Ranging Data Ready notification");
+		return;
+	}
+
+	counter = get_le16(value);
+
+	if (ras->client.pending_op != RAS_CP_PENDING_NONE) {
+		DBG(rap, "CP busy (pending_op=%d pending_counter=%u), "
+		    "dropping Ready for counter=%u", ras->client.pending_op,
+		    ras->client.pending_counter, counter);
+		return;
+	}
+
+	ras->client.pending_op = RAS_CP_PENDING_GET;
+	ras->client.pending_counter = counter;
+
+	if (!ras_cp_send_get_ranging_data(rap, ras, counter)) {
+		DBG(rap, "Failed to send Get_Ranging_Data for counter=%u",
+		    counter);
+		ras_ondemand_client_reset(ras);
+		return;
+	}
+
+	ras_cp_arm_timeout(rap, ras);
+}
+
+/* Initiator role: reacts to a Ranging Data Overwritten notification
+ * by abandoning any pending request for that counter.
+ */
+static void ras_data_overwritten_notify_cb(struct bt_rap *rap,
+				   uint16_t value_handle,
+				   const uint8_t *value, uint16_t length,
+				   void *user_data)
+{
+	struct ras *ras = rap_get_ras(rap);
+	uint16_t counter;
+
+	if (!rap || !ras || length < 2) {
+		DBG(rap, "Invalid Ranging Data Overwritten notification");
+		return;
+	}
+
+	counter = get_le16(value);
+
+	DBG(rap, "Ranging Data Overwritten: counter=%u", counter);
+
+	if (ras->client.pending_counter == counter)
+		ras_ondemand_client_reset(ras);
+}
+
+/* Initiator role: handles RAS Control Point responses sent by the remote
+ * reflector.
+ */
+static void ras_cp_response_notify_cb(struct bt_rap *rap,
+				   uint16_t value_handle,
+				   const uint8_t *value, uint16_t length,
+				   void *user_data)
+{
+	struct ras *ras = rap_get_ras(rap);
+	uint16_t counter;
+	uint8_t code;
+
+	if (!rap || !ras || length < 2) {
+		DBG(rap, "Invalid RAS Control Point response");
+		return;
+	}
+
+	switch (value[0]) {
+	case RAS_CP_RSP_COMPLETE_RANGING_DATA:
+		if (ras->client.pending_op != RAS_CP_PENDING_GET) {
+			DBG(rap, "Unexpected Complete_Ranging_Data "
+			    "(pending_op=%d)", ras->client.pending_op);
+			return;
+		}
+
+		if (length < 3) {
+			DBG(rap, "Complete_Ranging_Data too short (len=%u)",
+			    length);
+			ras_ondemand_client_reset(ras);
+			return;
+		}
+
+		counter = get_le16(value + 1);
+		if (counter != ras->client.pending_counter) {
+			DBG(rap, "Complete_Ranging_Data counter mismatch "
+			    "(got=%u want=%u)", counter,
+			    ras->client.pending_counter);
+			ras_ondemand_client_reset(ras);
+			return;
+		}
+
+		ras->client.pending_op = RAS_CP_PENDING_ACK;
+		if (!ras_cp_send_ack_ranging_data(rap, ras, counter))
+			ras_ondemand_client_reset(ras);
+		else
+			ras_cp_arm_timeout(rap, ras);
+		break;
+	case RAS_CP_RSP_RESPONSE_CODE:
+		code = value[1];
+		DBG(rap, "RAS CP response code=0x%02x (pending_op=%d "
+		    "counter=%u)", code, ras->client.pending_op,
+		    ras->client.pending_counter);
+		switch (code) {
+		case RAS_CP_RSP_CODE_SUCCESS:
+		case RAS_CP_RSP_CODE_OPCODE_NOT_SUPPORTED:
+		case RAS_CP_RSP_CODE_INVALID_PARAMETER:
+		case RAS_CP_RSP_CODE_PROCEDURE_NOT_COMPLETED:
+		case RAS_CP_RSP_CODE_SERVER_BUSY:
+		case RAS_CP_RSP_CODE_NO_RECORDS_FOUND:
+			ras_ondemand_client_reset(ras);
+			break;
+		default:
+			DBG(rap, "Ignoring RFU RAS CP response code 0x%02x",
+									code);
+			break;
+		}
+		break;
+	default:
+		DBG(rap, "Unknown RAS CP response opcode 0x%02x", value[0]);
+		break;
+	}
+}
+
+/* Initiator role: subscribe to a single on-demand-related characteristic,
+ * logging (not failing) on any missing attribute/handle so a
+ * partially-capable peer doesn't block subscription to the others.
+ */
+static void rap_subscribe_ondemand_chrc(struct bt_rap *rap,
+					struct gatt_db_attribute *chrc,
+					uint16_t ccc_value, rap_notify_t func,
+					const char *name,
+					unsigned int *notify_id_out)
+{
+	uint16_t value_handle;
+	unsigned int notify_id;
+
+	if (!chrc) {
+		DBG(rap, "%s characteristic not found on peer", name);
+		return;
+	}
+
+	if (!gatt_db_attribute_get_char_data(chrc, NULL, &value_handle,
+					NULL, NULL, NULL)) {
+		DBG(rap, "Unable to resolve %s value handle", name);
+		return;
+	}
+
+	notify_id = bt_rap_register_notify(rap, value_handle, ccc_value, func,
+							(void *)name);
+	if (!notify_id)
+		DBG(rap, "Failed to register for %s notifications", name);
+	else
+		DBG(rap, "Registered for %s notifications: id=%u", name,
+							notify_id);
+
+	if (notify_id_out)
+		*notify_id_out = notify_id;
+}
+
+static void ras_data_ready_read_complete(struct bt_rap *rap, bool success,
+					uint8_t att_ecode, const uint8_t *value,
+					uint16_t length, void *user_data)
+{
+	if (!success) {
+		DBG(rap, "Unable to read Ranging Data Ready: error 0x%02x",
+			att_ecode);
+		return;
+	}
+
+	/* This read only synchronizes the characteristic as required by RAS.
+	 * A Ready notification, not its current value, starts a retrieval.
+	 */
+	DBG(rap, "Read Ranging Data Ready (%u bytes)", length);
+}
+
+static bool rap_subscribe_ranging_data(struct bt_rap *rap,
+			enum bt_rap_ranging_data_mode mode)
+{
+	struct ras *ras = rap_get_ras(rap);
+
+	if (!ras || !rap->client)
+		return false;
+
+	if (mode == BT_RAP_RANGING_DATA_REALTIME) {
+		uint16_t value_handle;
+
+		if (!(rap->ras_features & 0x01) || !ras->realtime_chrc ||
+			!gatt_db_attribute_get_char_data(ras->realtime_chrc,
+						NULL, &value_handle,
+						NULL, NULL, NULL))
+			return false;
+
+		rap->realtime_notify_id = bt_rap_register_notify(rap,
+				value_handle, rap->realtime_ccc_value,
+				ras_segment_notify_cb, "real-time");
+		if (rap->realtime_notify_id)
+			ras_realtime_arm_timeout(rap,
+					RAS_REALTIME_FIRST_SEGMENT_TIMEOUT);
+		return rap->realtime_notify_id != 0;
+	}
+
+	if (mode == BT_RAP_RANGING_DATA_ONDEMAND) {
+		uint16_t value_handle;
+
+		/* Data is segmented and can be large, so keep it on
+		 * notifications. The control and status characteristics use
+		 * the requested transport.
+		 */
+		rap_subscribe_ondemand_chrc(rap, ras->ondemand_chrc,
+			BT_RAP_RANGING_NOTIFY, ras_segment_notify_cb,
+			"on-demand", &rap->ondemand_notify_id);
+		rap_subscribe_ondemand_chrc(rap, ras->cp_chrc,
+			rap->ondemand_ccc_value, ras_cp_response_notify_cb,
+			"RAS Control Point", &rap->cp_notify_id);
+		rap_subscribe_ondemand_chrc(rap, ras->ready_chrc,
+			rap->ondemand_ccc_value, ras_data_ready_notify_cb,
+			"Ranging Data Ready", &rap->ready_notify_id);
+		rap_subscribe_ondemand_chrc(rap, ras->overwritten_chrc,
+			rap->ondemand_ccc_value,
+			ras_data_overwritten_notify_cb,
+			"Ranging Data Overwritten",
+			&rap->overwritten_notify_id);
+		if (ras->ready_chrc &&
+			gatt_db_attribute_get_char_data(ras->ready_chrc, NULL,
+						&value_handle, NULL, NULL,
+						NULL))
+			rap_read_value(rap, value_handle,
+					ras_data_ready_read_complete, NULL);
+		return rap->ondemand_notify_id || rap->cp_notify_id ||
+			rap->ready_notify_id || rap->overwritten_notify_id;
+	}
+
+	return true;
+}
+
+bool bt_rap_set_ranging_data_mode(struct bt_rap *rap,
+			enum bt_rap_ranging_data_mode mode,
+			enum bt_rap_ranging_transport transport)
+{
+	if (!rap || !rap->client || !rap->ras_features)
+		return false;
+
+	if (mode == BT_RAP_RANGING_DATA_REALTIME &&
+			transport != BT_RAP_RANGING_NOTIFY &&
+			transport != BT_RAP_RANGING_INDICATE)
+		return false;
+
+	if (mode == BT_RAP_RANGING_DATA_ONDEMAND &&
+			transport != BT_RAP_RANGING_NOTIFY &&
+			transport != BT_RAP_RANGING_INDICATE)
+		return false;
+
+	if (!bt_rap_disable_ranging_data(rap))
+		return false;
+
+	rap->realtime_ccc_value = transport;
+	rap->ondemand_ccc_value = transport;
+
+	return rap_subscribe_ranging_data(rap, mode);
 }
 
 static void read_ras_features(struct bt_rap *rap, bool success,
@@ -2569,6 +4726,9 @@ static void read_ras_features(struct bt_rap *rap, bool success,
 	supports_realtime = (features & 0x01) != 0;
 	retrieve_lost = (features & 0x02) != 0;
 	abort_operation = (features & 0x04) != 0;
+	if (ras)
+		ras->client.abort_operation = abort_operation;
+	rap->ras_features = features;
 
 	DBG(rap, "RAS Features - Real-time: %s, Retrieve Lost: %s, Abort: %s",
 	    supports_realtime ? "Yes" : "No",
@@ -2577,32 +4737,15 @@ static void read_ras_features(struct bt_rap *rap, bool success,
 
 	DBG(rap, "RAS features read successfully, capabilities determined");
 
-	/* Register for real-time characteristic notifications if supported */
-	if (supports_realtime && ras && ras->realtime_chrc && rap->client) {
-		uint16_t value_handle;
-		bt_uuid_t uuid;
-
-		if (gatt_db_attribute_get_char_data(ras->realtime_chrc,
-					NULL, &value_handle,
-					NULL, NULL, &uuid)) {
-			unsigned int notify_id;
-
-			notify_id = bt_rap_register_notify(rap,
-						value_handle,
-						ras_realtime_notify_cb,
-						NULL);
-			if (!notify_id)
-				DBG(rap, "Failed to register for "
-					"real-time notifications");
-			else
-				DBG(rap, "Registered for real-time "
-					"features: id=%u", notify_id);
-		}
-	} else {
-		DBG(rap, "On demand ranging "
-			"remote device - skipping notification "
-			"registration");
+	if (!ras || !rap->client) {
+		DBG(rap, "No remote RAS attributes/client to subscribe to");
+		return;
 	}
+
+	if (!rap_subscribe_ranging_data(rap, rap->ondemand_mode ?
+				BT_RAP_RANGING_DATA_ONDEMAND :
+				BT_RAP_RANGING_DATA_REALTIME))
+		DBG(rap, "Failed to subscribe to requested Ranging Data mode");
 }
 
 static void foreach_rap_char(struct gatt_db_attribute *attr, void *user_data)
@@ -2794,28 +4937,74 @@ static void rap_idle(void *data)
 bool bt_rap_attach(struct bt_rap *rap, struct bt_gatt_client *client)
 {
 	bt_uuid_t uuid;
+	bool attached;
+
+	if (queue_find(sessions, NULL, rap)) {
+		if (client && !rap->client)
+			goto clone;
+		/*
+		 * Already attached: treat re-attach as idempotent rather
+		 * than failing, so e.g. a second rap_accept() on the same
+		 * session succeeds instead of erroring out.
+		 */
+		return true;
+	}
 
 	if (!sessions)
 		sessions = queue_new();
 
 	queue_push_tail(sessions, rap);
 
-	if (!client)
+	/*
+	 * Notify profile callbacks before rap_attach_att() below runs, so
+	 * bt_rap_get_att(rap) inside a rap_attached callback only sees the
+	 * att already set on rap (e.g. by bt_rap_get_session()), not the
+	 * one about to be registered a few lines down.
+	 *
+	 * A callback may reject this session (e.g. a duplicate ad-hoc
+	 * session for a device that already has one) by unref'ing rap,
+	 * which can free it. Hold our own reference across the
+	 * notification so a rejection can never drop the count to zero
+	 * while callbacks are still running.
+	 *
+	 * Releasing that reference below is what may actually free rap
+	 * (via rap_free() -> bt_rap_detach(), which removes it from
+	 * `sessions` before the object is freed). Check membership only
+	 * *after* the unref, and only by pointer identity - never by
+	 * dereferencing rap - so the check itself is safe even if rap no
+	 * longer exists.
+	 */
+	bt_rap_ref(rap);
+	queue_foreach(bt_rap_cbs, rap_attached, rap);
+	bt_rap_unref(rap);
+
+	attached = queue_find(sessions, NULL, rap);
+	if (!attached)
+		return false;
+
+	if (!client) {
+		if (rap->att)
+			rap_attach_att(rap, rap->att);
 		return true;
+	}
 
 	if (rap->client)
 		return false;
 
+clone:
 	rap->client = bt_gatt_client_clone(client);
 	if (!rap->client)
 		return false;
+
+	rap_attach_att(rap, bt_gatt_client_get_att(client));
 
 	bt_gatt_client_idle_register(rap->client, rap_idle, rap, NULL);
 
 	bt_uuid16_create(&uuid, RAS_UUID16);
 
-	gatt_db_foreach_service(rap->rrapdb->db, &uuid,
-				foreach_rap_service, rap);
+	if (rap->rrapdb)
+		gatt_db_foreach_service(rap->rrapdb->db, &uuid,
+					foreach_rap_service, rap);
 
 	return true;
 }

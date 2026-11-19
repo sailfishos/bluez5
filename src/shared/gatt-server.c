@@ -32,7 +32,7 @@
  */
 #define DEFAULT_MAX_PREP_QUEUE_LEN 30
 
-#define NFY_MULT_TIMEOUT 10
+#define MNOTIFY_TIMEOUT 0
 
 #define DBG(_server, _format, arg...) \
 	gatt_log(_server, "%s:%s() " _format, __FILE__, __func__, ## arg)
@@ -73,7 +73,7 @@ static void prep_write_data_destroy(void *user_data)
 	free(data);
 }
 
-struct nfy_mult_data {
+struct mnotify_data {
 	unsigned int id;
 	uint8_t *pdu;
 	uint16_t offset;
@@ -114,20 +114,21 @@ struct bt_gatt_server {
 	bt_gatt_server_authorize_cb_t authorize;
 	void *authorize_data;
 
-	struct nfy_mult_data *nfy_mult;
+	struct mnotify_data *mnotify;
+	int mnotify_timeout;
 };
 
-static void notify_multiple_free(struct bt_gatt_server *server)
+static void mnotify_free(struct bt_gatt_server *server)
 {
-	if (!server->nfy_mult)
+	if (!server->mnotify)
 		return;
 
-	if (server->nfy_mult->id)
-		timeout_remove(server->nfy_mult->id);
+	if (server->mnotify->id)
+		timeout_remove(server->mnotify->id);
 
-	free(server->nfy_mult->pdu);
-	free(server->nfy_mult);
-	server->nfy_mult = NULL;
+	free(server->mnotify->pdu);
+	free(server->mnotify);
+	server->mnotify = NULL;
 }
 
 static void bt_gatt_server_free(struct bt_gatt_server *server)
@@ -135,7 +136,7 @@ static void bt_gatt_server_free(struct bt_gatt_server *server)
 	if (server->debug_destroy)
 		server->debug_destroy(server->debug_data);
 
-	notify_multiple_free(server);
+	mnotify_free(server);
 
 	bt_att_unregister(server->att, server->mtu_id);
 	bt_att_unregister(server->att, server->read_by_grp_type_id);
@@ -268,7 +269,7 @@ static void read_by_grp_type_cb(struct bt_att_chan *chan, uint16_t mtu,
 	uint16_t start, end;
 	bt_uuid_t type;
 	bt_uuid_t prim, snd;
-	uint8_t rsp_pdu[mtu];
+	uint8_t *rsp_pdu = NULL;
 	uint16_t rsp_len;
 	uint8_t ecode = 0;
 	uint16_t ehandle = 0;
@@ -319,6 +320,12 @@ static void read_by_grp_type_cb(struct bt_att_chan *chan, uint16_t mtu,
 		goto error;
 	}
 
+	rsp_pdu = malloc(mtu);
+	if (!rsp_pdu) {
+		ecode = BT_ATT_ERROR_INSUFFICIENT_RESOURCES;
+		goto error;
+	}
+
 	if (!encode_read_by_grp_type_rsp(server->db, q, server->att, mtu,
 							rsp_pdu, &rsp_len)) {
 		ecode = BT_ATT_ERROR_UNLIKELY;
@@ -330,11 +337,14 @@ static void read_by_grp_type_cb(struct bt_att_chan *chan, uint16_t mtu,
 	bt_att_chan_send_rsp(chan, BT_ATT_OP_READ_BY_GRP_TYPE_RSP,
 						rsp_pdu, rsp_len);
 
+	free(rsp_pdu);
+
 	return;
 
 error:
 	queue_destroy(q, NULL);
 	bt_att_chan_send_error_rsp(chan, opcode, ehandle, ecode);
+	free(rsp_pdu);
 }
 
 static void async_read_op_destroy(struct async_read_op *op)
@@ -611,7 +621,7 @@ static void find_info_cb(struct bt_att_chan *chan, uint16_t mtu, uint8_t opcode,
 {
 	struct bt_gatt_server *server = user_data;
 	uint16_t start, end;
-	uint8_t rsp_pdu[mtu];
+	uint8_t *rsp_pdu = NULL;
 	uint16_t rsp_len;
 	uint8_t ecode = 0;
 	uint16_t ehandle = 0;
@@ -648,6 +658,12 @@ static void find_info_cb(struct bt_att_chan *chan, uint16_t mtu, uint8_t opcode,
 		goto error;
 	}
 
+	rsp_pdu = malloc(mtu);
+	if (!rsp_pdu) {
+		ecode = BT_ATT_ERROR_INSUFFICIENT_RESOURCES;
+		goto error;
+	}
+
 	if (!encode_find_info_rsp(server->db, q, mtu, rsp_pdu, &rsp_len)) {
 		ecode = BT_ATT_ERROR_UNLIKELY;
 		goto error;
@@ -657,11 +673,14 @@ static void find_info_cb(struct bt_att_chan *chan, uint16_t mtu, uint8_t opcode,
 
 	queue_destroy(q, NULL);
 
+	free(rsp_pdu);
+
 	return;
 
 error:
 	bt_att_chan_send_error_rsp(chan, opcode, ehandle, ecode);
 	queue_destroy(q, NULL);
+	free(rsp_pdu);
 
 }
 
@@ -709,12 +728,18 @@ static void find_by_type_val_cb(struct bt_att_chan *chan, uint16_t mtu,
 	struct bt_gatt_server *server = user_data;
 	uint16_t start, end, uuid16;
 	struct find_by_type_val_data data;
-	uint8_t rsp_pdu[mtu];
+	uint8_t *rsp_pdu = NULL;
 	uint16_t ehandle = 0;
 	bt_uuid_t uuid;
 
 	if (length < 6) {
 		data.ecode = BT_ATT_ERROR_INVALID_PDU;
+		goto error;
+	}
+
+	rsp_pdu = malloc(mtu);
+	if (!rsp_pdu) {
+		data.ecode = BT_ATT_ERROR_INSUFFICIENT_RESOURCES;
 		goto error;
 	}
 
@@ -752,10 +777,13 @@ static void find_by_type_val_cb(struct bt_att_chan *chan, uint16_t mtu,
 	bt_att_chan_send_rsp(chan, BT_ATT_OP_FIND_BY_TYPE_RSP,
 					data.pdu, data.len);
 
+	free(rsp_pdu);
+
 	return;
 
 error:
 	bt_att_chan_send_error_rsp(chan, opcode, ehandle, data.ecode);
+	free(rsp_pdu);
 }
 
 static void async_write_op_destroy(struct async_write_op *op)
@@ -1174,12 +1202,14 @@ static bool append_prep_data(struct prep_write_data *prep_data, uint16_t handle,
 					uint16_t length, uint8_t *value)
 {
 	uint8_t *val;
-	uint16_t len;
+	size_t len;
 
 	if (!length)
 		return true;
 
-	len = prep_data->length + length;
+	len = (size_t)prep_data->length + (size_t)length;
+	if (len > UINT16_MAX)
+		return false;
 
 	val = realloc(prep_data->value, len);
 	if (!val)
@@ -1188,7 +1218,7 @@ static bool append_prep_data(struct prep_write_data *prep_data, uint16_t handle,
 	memcpy(val + prep_data->length, value, length);
 
 	prep_data->value = val;
-	prep_data->length = len;
+	prep_data->length = (uint16_t)len;
 
 	return true;
 }
@@ -1652,6 +1682,7 @@ struct bt_gatt_server *bt_gatt_server_new(struct gatt_db *db,
 	server->max_prep_queue_len = DEFAULT_MAX_PREP_QUEUE_LEN;
 	server->prep_queue = queue_new();
 	server->min_enc_size = min_enc_size;
+	server->mnotify_timeout = MNOTIFY_TIMEOUT;
 
 	if (!gatt_server_register_att_handlers(server)) {
 		bt_gatt_server_free(server);
@@ -1724,31 +1755,48 @@ bool bt_gatt_server_set_debug(struct bt_gatt_server *server,
 	return true;
 }
 
-static void notify_multiple_timeout_remove(struct bt_gatt_server *server)
+static void mnotify_timeout_remove(struct bt_gatt_server *server)
 {
-	if (!server->nfy_mult->id)
+	if (!server->mnotify->id)
 		return;
 
-	timeout_remove(server->nfy_mult->id);
-	server->nfy_mult->id = 0;
+	timeout_remove(server->mnotify->id);
+	server->mnotify->id = 0;
 }
 
-static bool notify_multiple(void *user_data)
+static bool mnotify_send(void *user_data)
 {
 	struct bt_gatt_server *server = user_data;
 
-	server->nfy_mult->id = 0;
+	server->mnotify->id = 0;
 
 	bt_att_send(server->att, BT_ATT_OP_HANDLE_NFY_MULT,
-			server->nfy_mult->pdu, server->nfy_mult->offset, NULL,
+			server->mnotify->pdu, server->mnotify->offset, NULL,
 			NULL, NULL);
 
-	notify_multiple_free(server);
+	mnotify_free(server);
 
 	return false;
 }
 
-static bool notify_append_le16(struct nfy_mult_data *data, uint16_t value)
+bool bt_gatt_server_set_mnotify_timeout(struct bt_gatt_server *server,
+							int timeout)
+{
+	if (!server)
+		return false;
+
+	server->mnotify_timeout = timeout;
+
+	/* Flush any pending data if Notify Multiple is being disabled */
+	if (timeout < 0 && server->mnotify) {
+		mnotify_timeout_remove(server);
+		mnotify_send(server);
+	}
+
+	return true;
+}
+
+static bool notify_append_le16(struct mnotify_data *data, uint16_t value)
 {
 	if (data->offset + sizeof(value) > data->len)
 		return false;
@@ -1763,27 +1811,31 @@ bool bt_gatt_server_send_notification(struct bt_gatt_server *server,
 					uint16_t handle, const uint8_t *value,
 					uint16_t length, bool multiple)
 {
-	struct nfy_mult_data *data = NULL;
+	struct mnotify_data *data = NULL;
 	bool result;
 
 	if (!server || (length && !value))
 		return false;
 
+	/* Notify Multiple disabled, send as regular notification */
+	if (server->mnotify_timeout < 0)
+		multiple = false;
+
 	if (multiple) {
-		data = server->nfy_mult;
+		data = server->mnotify;
 
 		/* flush buffered data if this request hits buffer size limit */
 		if (data && data->offset > 0 &&
 				data->len - data->offset < 4 + length) {
-			notify_multiple_timeout_remove(server);
-			notify_multiple(server);
-			/* data has been freed by notify_multiple */
+			mnotify_timeout_remove(server);
+			mnotify_send(server);
+			/* data has been freed by mnotify_send */
 			data = NULL;
 		}
 	}
 
 	if (!data) {
-		data = new0(struct nfy_mult_data, 1);
+		data = new0(struct mnotify_data, 1);
 		data->len = bt_att_get_mtu(server->att) - 1;
 		data->pdu = malloc(data->len);
 	}
@@ -1805,13 +1857,13 @@ bool bt_gatt_server_send_notification(struct bt_gatt_server *server,
 	data->offset += length;
 
 	if (multiple) {
-		if (!server->nfy_mult)
-			server->nfy_mult = data;
+		if (!server->mnotify)
+			server->mnotify = data;
 
-		if (!server->nfy_mult->id)
-			server->nfy_mult->id = timeout_add(NFY_MULT_TIMEOUT,
-						   notify_multiple, server,
-						   NULL);
+		if (!server->mnotify->id)
+			server->mnotify->id = timeout_add(
+						server->mnotify_timeout,
+						mnotify_send, server, NULL);
 
 		return true;
 	}

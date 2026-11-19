@@ -681,14 +681,43 @@ static void set_event_mask_cmd(uint16_t index, const void *data, uint8_t size)
 						"(0x%16.16" PRIx64 ")", mask);
 }
 
+#define DDC_ID_LE_EXT_FEATURES	0x031f
+
+/* LE extended features: page 0 is 8 octets, pages 1-10 are 24 octets each */
+static void print_ddc_le_ext_features(const uint8_t *features, uint8_t len)
+{
+	uint8_t i;
+
+	if (len < 8) {
+		packet_hexdump(features, len);
+		return;
+	}
+
+	packet_print_features_ext_ll(0, features);
+
+	for (i = 0; i < 10 && len >= 8 + (i + 1) * 24; i++)
+		packet_print_features_ext_ll(i + 1, features + 8 + i * 24);
+}
+
 static void ddc_config_write_cmd(uint16_t index, const void *data, uint8_t size)
 {
-	while (size > 0) {
+	while (size > 2) {
 		uint8_t param_len = get_u8(data);
 		uint16_t param_id = get_le16(data + 1);
 
+		if (param_len < 2 || param_len + 1 > size)
+			break;
+
 		print_field("Identifier: 0x%4.4x", param_id);
-		packet_hexdump(data + 3, param_len - 2);
+
+		switch (param_id) {
+		case DDC_ID_LE_EXT_FEATURES:
+			print_ddc_le_ext_features(data + 3, param_len - 2);
+			break;
+		default:
+			packet_hexdump(data + 3, param_len - 2);
+			break;
+		}
 
 		data += param_len + 1;
 		size -= param_len + 1;
@@ -1262,7 +1291,7 @@ static void system_exception_evt(struct timeval *tv, uint16_t index,
 	packet_hexdump(data + 1, size - 1);
 }
 
-static const struct vendor_evt vendor_evt_table[] = {
+static const struct evt_vendor evt_vendor_table[] = {
 	{ 0x00, "Startup",
 			startup_evt, 0, true },
 	{ 0x01, "Fatal Exception",
@@ -1837,7 +1866,7 @@ static void intel_vendor_ext_evt(struct timeval *tv, uint16_t index,
 }
 
 /* Vendor extended events with a vendor prefix. */
-static const struct vendor_evt vendor_prefix_evt_table[] = {
+static const struct evt_vendor vendor_prefix_evt_table[] = {
 	{ 0x03, "Extended Telemetry", intel_vendor_ext_evt },
 	{ }
 };
@@ -1859,7 +1888,7 @@ struct vendor_prefix_evt {
 	uint8_t subopcode;
 };
 
-static const struct vendor_evt *intel_vendor_prefix_evt(const void *data,
+static const struct evt_vendor *intel_vendor_prefix_evt(const void *data,
 							int *consumed_size)
 {
 	unsigned int i;
@@ -1890,7 +1919,7 @@ static const struct vendor_evt *intel_vendor_prefix_evt(const void *data,
 	return NULL;
 }
 
-const struct vendor_evt *intel_vendor_evt(const void *data, int *consumed_size)
+const struct evt_vendor *intel_evt_vendor(const void *data, int *consumed_size)
 {
 	uint8_t evt = *((const uint8_t *) data);
 	int i;
@@ -1898,11 +1927,11 @@ const struct vendor_evt *intel_vendor_evt(const void *data, int *consumed_size)
 	/*
 	 * Handle the vendor event without a vendor prefix.
 	 *   0xff <length> <evt> <data>
-	 * This loop checks whether the <evt> exists in the vendor_evt_table.
+	 * This loop checks whether the <evt> exists in the evt_vendor_table.
 	 */
-	for (i = 0; vendor_evt_table[i].str; i++) {
-		if (vendor_evt_table[i].evt == evt)
-			return &vendor_evt_table[i];
+	for (i = 0; evt_vendor_table[i].str; i++) {
+		if (evt_vendor_table[i].evt == evt)
+			return &evt_vendor_table[i];
 	}
 
 	/*

@@ -9,6 +9,7 @@
  *
  */
 
+#include "bluetooth/uuid.h"
 #include "src/shared/queue.h"
 
 #define DEVICE_INTERFACE	"org.bluez.Device1"
@@ -23,7 +24,7 @@ char *btd_device_get_storage_path(struct btd_device *device,
 				const char *filename);
 
 
-void btd_device_device_set_name(struct btd_device *device, const char *name);
+void btd_device_set_name(struct btd_device *device, const char *name);
 void device_store_cached_name(struct btd_device *dev, const char *name);
 void device_get_name(struct btd_device *device, char *name, size_t len);
 bool device_name_known(struct btd_device *device);
@@ -67,6 +68,18 @@ void btd_device_set_record(struct btd_device *device, const char *uuid,
 							const char *record);
 const sdp_record_t *btd_device_get_record(struct btd_device *device,
 						const char *uuid);
+struct gatt_primary {
+	char uuid[MAX_LEN_UUID_STR + 1];
+	gboolean changed;
+	struct {
+		uint16_t start;
+		uint16_t end;
+	} range;
+};
+
+gboolean gatt_parse_record(const sdp_record_t *rec, uuid_t *prim_uuid,
+				uint16_t *psm, uint16_t *start, uint16_t *end);
+
 struct gatt_primary *btd_device_get_primary(struct btd_device *device,
 							const char *uuid);
 GSList *btd_device_get_primaries(struct btd_device *device);
@@ -75,7 +88,6 @@ bool btd_device_set_gatt_db(struct btd_device *device, struct gatt_db *db);
 struct bt_gatt_client *btd_device_get_gatt_client(struct btd_device *device);
 struct bt_gatt_server *btd_device_get_gatt_server(struct btd_device *device);
 bool btd_device_is_initiator(struct btd_device *device);
-void *btd_device_get_attrib(struct btd_device *device);
 void btd_device_gatt_set_service_changed(struct btd_device *device,
 						uint16_t start, uint16_t end);
 bool device_attach_att(struct btd_device *dev, GIOChannel *io);
@@ -115,6 +127,9 @@ void device_set_flags(struct btd_device *device, uint8_t flags);
 bool btd_device_is_connected(struct btd_device *dev);
 bool btd_device_bearer_is_connected(struct btd_device *dev);
 bool btd_device_bdaddr_type_connected(struct btd_device *dev, uint8_t type);
+bool btd_device_bdaddr_type_connectable(struct btd_device *dev, uint8_t type);
+bool btd_device_bdaddr_type_seen(struct btd_device *dev, uint8_t type);
+bool btd_device_bdaddr_type_initiator(struct btd_device *dev, uint8_t type);
 uint8_t btd_device_get_bdaddr_type(struct btd_device *dev);
 bool device_is_retrying(struct btd_device *device);
 void device_bonding_complete(struct btd_device *device, uint8_t bdaddr_type,
@@ -149,9 +164,9 @@ void device_request_disconnect(struct btd_device *device, DBusMessage *msg);
 bool device_is_disconnecting(struct btd_device *device);
 bool device_is_connecting(struct btd_device *device);
 void device_set_ltk(struct btd_device *device, const uint8_t val[16],
-				bool central, uint8_t enc_size);
+				bool central, uint8_t type, uint8_t enc_size);
 bool btd_device_get_ltk(struct btd_device *device, uint8_t val[16],
-				bool *central, uint8_t *enc_size);
+				uint8_t *enc_size);
 void device_set_csrk(struct btd_device *device, const uint8_t val[16],
 				uint32_t counter, uint8_t type,
 				bool store_hint);
@@ -240,6 +255,9 @@ void btd_device_foreach_ad(struct btd_device *dev, bt_device_ad_func_t func,
 void btd_device_set_conn_param(struct btd_device *device, uint16_t min_interval,
 					uint16_t max_interval, uint16_t latency,
 					uint16_t timeout);
+void device_set_le_conn_params(struct btd_device *device, uint32_t interval,
+				uint16_t latency, uint16_t supv_timeout,
+				uint16_t subrate);
 void btd_device_foreach_service_data(struct btd_device *dev,
 					bt_device_ad_func_t func,
 					void *data);
@@ -251,3 +269,6 @@ void btd_device_foreach_service(struct btd_device *dev,
 				void *user_data);
 void device_remove_pending_services(struct btd_device *dev,
 					uint8_t bdaddr_type);
+
+void btd_device_sec_level_changed(struct btd_device *dev, const uint8_t *data,
+					uint16_t size);
