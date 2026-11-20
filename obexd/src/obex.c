@@ -98,7 +98,11 @@ static void os_set_response(struct obex_session *os, int err)
 {
 	uint8_t rsp;
 
-	rsp = g_obex_errno_to_rsp(err);
+	if (err == -ENOTSUP && os->service &&
+					os->service->service == OBEX_BIP)
+		rsp = G_OBEX_RSP_NOT_ACCEPTABLE;
+	else
+		rsp = g_obex_errno_to_rsp(err);
 
 	print_event(-1, rsp);
 
@@ -133,6 +137,11 @@ static void os_reset_session(struct obex_session *os)
 		g_free(os->name);
 		os->name = NULL;
 	}
+	if (os->img_handle) {
+		g_free(os->img_handle);
+		os->img_handle = NULL;
+	}
+	g_clear_pointer(&os->img_descriptor, g_bytes_unref);
 	if (os->type) {
 		g_free(os->type);
 		os->type = NULL;
@@ -582,6 +591,44 @@ static void parse_name(struct obex_session *os, GObexPacket *req)
 	DBG("NAME: %s", os->name);
 }
 
+/*
+ * BIP carries the image handle in an application specific header rather
+ * than in Name; see the Basic Imaging Profile, Img-Handle.
+ */
+#define OBEX_HDR_IMG_HANDLE 0x30
+#define OBEX_HDR_IMG_DESCRIPTOR 0x71
+
+static void parse_img_descriptor(struct obex_session *os, GObexPacket *req)
+{
+	GObexHeader *hdr;
+	const guint8 *data;
+	gsize len;
+
+	g_clear_pointer(&os->img_descriptor, g_bytes_unref);
+	hdr = g_obex_packet_get_header(req, OBEX_HDR_IMG_DESCRIPTOR);
+	if (hdr && g_obex_header_get_bytes(hdr, &data, &len))
+		os->img_descriptor = g_bytes_new(data, len);
+}
+
+static void parse_img_handle(struct obex_session *os, GObexPacket *req)
+{
+	GObexHeader *hdr;
+	const char *handle;
+
+	g_free(os->img_handle);
+	os->img_handle = NULL;
+
+	hdr = g_obex_packet_get_header(req, OBEX_HDR_IMG_HANDLE);
+	if (hdr == NULL)
+		return;
+
+	if (!g_obex_header_get_unicode(hdr, &handle))
+		return;
+
+	os->img_handle = g_strdup(handle);
+	DBG("IMG-HANDLE: %s", os->img_handle);
+}
+
 static void parse_apparam(struct obex_session *os, GObexPacket *req)
 {
 	GObexHeader *hdr;
@@ -637,6 +684,9 @@ static void cmd_get(GObex *obex, GObexPacket *req, gpointer user_data)
 	os->cmd = G_OBEX_OP_GET;
 
 	parse_name(os, req);
+
+	parse_img_handle(os, req);
+	parse_img_descriptor(os, req);
 
 	parse_apparam(os, req);
 
@@ -1006,6 +1056,18 @@ int obex_session_start(GIOChannel *io, uint16_t tx_mtu, uint16_t rx_mtu,
 const char *obex_get_name(struct obex_session *os)
 {
 	return os->name;
+}
+
+const char *obex_get_img_handle(struct obex_session *os)
+{
+	return os->img_handle;
+}
+
+const void *obex_get_img_descriptor(struct obex_session *os, size_t *len)
+{
+	*len = 0;
+	return os->img_descriptor ?
+			g_bytes_get_data(os->img_descriptor, len) : NULL;
 }
 
 const char *obex_get_destname(struct obex_session *os)
