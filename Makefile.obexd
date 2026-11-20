@@ -56,7 +56,13 @@ EXTRA_DIST += obexd/plugins/phonebook-dummy.c obexd/plugins/phonebook-ebook.c \
 obexd_builtin_modules += mas
 obexd_builtin_sources += obexd/plugins/mas.c obexd/src/map_ap.h \
 				obexd/plugins/messages.h \
-				obexd/plugins/messages-dummy.c
+				obexd/plugins/map-mns.c obexd/plugins/map-mns.h
+if MAP_SAILFISH
+obexd_builtin_sources += obexd/plugins/messages-sailfish.cpp \
+			obexd/plugins/map-sms.c obexd/plugins/map-sms.h
+else
+obexd_builtin_sources += obexd/plugins/messages-dummy.c
+endif
 
 obexd_builtin_modules += mns
 obexd_builtin_sources += obexd/client/mns.c obexd/src/map_ap.h \
@@ -118,6 +124,11 @@ obexd_src_obexd_CPPFLAGS = $(AM_CPPFLAGS) $(GLIB_CFLAGS) $(DBUS_CFLAGS) \
 				-DPLUGINDIR=\""$(obex_plugindir)"\" \
 				-D_FILE_OFFSET_BITS=64 \
 				-I$(builddir)/obexd/src
+
+if MAP_SAILFISH
+obexd_src_obexd_CXXFLAGS = $(MAP_SAILFISH_CFLAGS) -fPIC
+obexd_src_obexd_LDADD += $(MAP_SAILFISH_LIBS)
+endif
 
 else
 obexd-add-service-symlink:

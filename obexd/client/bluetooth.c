@@ -22,6 +22,7 @@
 #include "bluetooth/rfcomm.h"
 #include "bluetooth/sdp.h"
 #include "bluetooth/sdp_lib.h"
+#include "bluetooth/uuid.h"
 
 #include "gdbus/gdbus.h"
 #include "btio/btio.h"
@@ -37,6 +38,8 @@
 
 struct bluetooth_session {
 	guint id;
+	guint sdp_watch;
+	BtIOSecLevel security;
 	bdaddr_t src;
 	bdaddr_t dst;
 	uint16_t port;
@@ -63,6 +66,9 @@ static void session_destroy(struct bluetooth_session *session)
 		return;
 
 	sessions = g_slist_remove(sessions, session);
+
+	if (session->sdp_watch)
+		g_source_remove(session->sdp_watch);
 
 	if (session->io != NULL) {
 		g_io_channel_shutdown(session->io, TRUE, NULL);
@@ -93,7 +99,8 @@ static void transport_callback(GIOChannel *io, GError *err, gpointer user_data)
 }
 
 static GIOChannel *transport_connect(const bdaddr_t *src, const bdaddr_t *dst,
-					uint16_t port, BtIOConnect function,
+					uint16_t port, BtIOSecLevel security,
+					BtIOConnect function,
 					gpointer user_data)
 {
 	GIOChannel *io;
@@ -110,7 +117,7 @@ static GIOChannel *transport_connect(const bdaddr_t *src, const bdaddr_t *dst,
 				BT_IO_OPT_MODE, BT_IO_MODE_ERTM,
 				BT_IO_OPT_OMTU, BT_TX_MTU,
 				BT_IO_OPT_IMTU, BT_RX_MTU,
-				BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_LOW,
+				BT_IO_OPT_SEC_LEVEL, security,
 				BT_IO_OPT_INVALID);
 	} else {
 		io = bt_io_connect(function, user_data,
@@ -118,7 +125,7 @@ static GIOChannel *transport_connect(const bdaddr_t *src, const bdaddr_t *dst,
 				BT_IO_OPT_SOURCE_BDADDR, src,
 				BT_IO_OPT_DEST_BDADDR, dst,
 				BT_IO_OPT_CHANNEL, port,
-				BT_IO_OPT_SEC_LEVEL, BT_IO_SEC_LOW,
+				BT_IO_OPT_SEC_LEVEL, security,
 				BT_IO_OPT_INVALID);
 	}
 
@@ -202,8 +209,10 @@ static void search_callback(uint8_t type, uint16_t status,
 	g_io_channel_set_close_on_unref(session->io, FALSE);
 	g_io_channel_unref(session->io);
 
+	g_source_remove(session->sdp_watch);
+	session->sdp_watch = 0;
 	session->io = transport_connect(&session->src, &session->dst, port,
-						transport_callback, session);
+				session->security, transport_callback, session);
 	if (session->io != NULL) {
 		sdp_close(session->sdp);
 		session->sdp = NULL;
@@ -232,13 +241,23 @@ static gboolean process_callback(GIOChannel *io, GIOCondition cond,
 {
 	struct bluetooth_session *session = user_data;
 
+	int result;
+
 	if (cond & (G_IO_ERR | G_IO_HUP | G_IO_NVAL))
+		goto failed;
+
+	result = sdp_process(session->sdp);
+
+	/* The SDP result callback may have removed the session or watch. */
+	if (!g_slist_find(sessions, session) || !session->sdp_watch)
 		return FALSE;
 
-	if (sdp_process(session->sdp) < 0)
-		return FALSE;
+	if (result >= 0)
+		return TRUE;
 
-	return TRUE;
+failed:
+	search_callback(0, 0, NULL, 0, session);
+	return FALSE;
 }
 
 static int bt_string2uuid(uuid_t *uuid, const char *string)
@@ -281,10 +300,9 @@ static gboolean service_callback(GIOChannel *io, GIOCondition cond,
 	GError *gerr = NULL;
 	uuid_t uuid;
 
-	if (cond & G_IO_NVAL)
-		return FALSE;
+	session->sdp_watch = 0;
 
-	if (cond & G_IO_ERR)
+	if (cond & (G_IO_ERR | G_IO_HUP | G_IO_NVAL))
 		goto failed;
 
 	if (sdp_set_notify(session->sdp, search_callback, session) < 0)
@@ -308,8 +326,9 @@ static gboolean service_callback(GIOChannel *io, GIOCondition cond,
 	sdp_list_free(attrid, NULL);
 	sdp_list_free(search, NULL);
 
-	g_io_add_watch(io, G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL,
-						process_callback, session);
+	session->sdp_watch = g_io_add_watch(io,
+			G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL,
+			process_callback, session);
 
 	return FALSE;
 
@@ -347,8 +366,9 @@ static sdp_session_t *service_connect(const bdaddr_t *src, const bdaddr_t *dst,
 		return NULL;
 	}
 
-	g_io_add_watch(io, G_IO_OUT | G_IO_HUP | G_IO_ERR | G_IO_NVAL,
-							function, user_data);
+	session->sdp_watch = g_io_add_watch(io,
+			G_IO_OUT | G_IO_HUP | G_IO_ERR | G_IO_NVAL,
+			function, user_data);
 
 	session->io = io;
 
@@ -364,6 +384,7 @@ static int session_connect(struct bluetooth_session *session)
 	if (session->port > 0) {
 		session->io = transport_connect(&session->src, &session->dst,
 							session->port,
+							session->security,
 							transport_callback,
 							session);
 		err = (session->io == NULL) ? -EINVAL : 0;
@@ -397,6 +418,8 @@ static guint bluetooth_connect(const char *source, const char *destination,
 	session->func = func;
 	session->port = port;
 	session->user_data = user_data;
+	session->security = g_strcmp0(service, OBEX_MNS_UUID) == 0 ?
+					BT_IO_SEC_MEDIUM : BT_IO_SEC_LOW;
 
 	str2ba(destination, &session->dst);
 	str2ba(source, &session->src);

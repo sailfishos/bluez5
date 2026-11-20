@@ -97,6 +97,10 @@ Conflicts:  bluez-tools
 
 %package obexd
 Summary:    OBEX server (bluez5)
+BuildRequires: gcc-c++
+BuildRequires: pkgconfig(Qt5Core)
+BuildRequires: pkgconfig(Qt5DBus)
+BuildRequires: pkgconfig(commhistory-qt5) >= 1.12.6
 Requires:   %{name} = %{version}-%{release}
 Requires:   obex-capability
 Conflicts:  obexd
@@ -132,6 +136,7 @@ autoreconf --force --install
 %configure \
     --with-contentfilter=helperapp \
     --with-phonebook=sailfish \
+    --enable-map-sailfish \
     --with-systemdsystemunitdir=%{_unitdir} \
     --with-systemduserunitdir=%{_userunitdir} \
     --enable-deprecated \

@@ -39,6 +39,7 @@ struct transfer {
 	GObexDataProducer data_producer;
 	GObexDataConsumer data_consumer;
 	GObexFunc complete_func;
+	GObexFunc final_func;
 
 	gpointer user_data;
 };
@@ -352,6 +353,17 @@ static guint8 put_get_bytes(struct transfer *transfer, GObexPacket *req)
 	return rsp;
 }
 
+static gboolean transfer_put_final(struct transfer *transfer, guint8 rsp)
+{
+	if (rsp != G_OBEX_RSP_SUCCESS || !transfer->final_func)
+		return FALSE;
+
+	transfer->final_func(transfer->obex, NULL, transfer->user_data);
+	transfer_free(transfer);
+
+	return TRUE;
+}
+
 static void transfer_put_req_first(struct transfer *transfer, GObexPacket *req,
 					guint8 first_hdr_id, va_list args)
 {
@@ -362,6 +374,9 @@ static void transfer_put_req_first(struct transfer *transfer, GObexPacket *req,
 	g_obex_debug(G_OBEX_DEBUG_TRANSFER, "transfer %u", transfer->id);
 
 	rspcode = put_get_bytes(transfer, req);
+
+	if (transfer_put_final(transfer, rspcode))
+		return;
 
 	rsp = g_obex_packet_new_valist(rspcode, TRUE, first_hdr_id, args);
 
@@ -386,6 +401,9 @@ static void transfer_put_req(GObex *obex, GObexPacket *req, gpointer user_data)
 
 	rspcode = put_get_bytes(transfer, req);
 
+	if (transfer_put_final(transfer, rspcode))
+		return;
+
 	/* Don't send continue while SRM is active */
 	if (g_obex_srm_active(transfer->obex) &&
 				rspcode == G_OBEX_RSP_CONTINUE)
@@ -404,23 +422,21 @@ done:
 		transfer_complete(transfer, NULL);
 }
 
-guint g_obex_put_rsp(GObex *obex, GObexPacket *req,
+static guint put_rsp(GObex *obex, GObexPacket *req,
 			GObexDataConsumer data_func, GObexFunc complete_func,
-			gpointer user_data, GError **err,
-			guint first_hdr_id, ...)
+			GObexFunc final_func, gpointer user_data,
+			guint first_hdr_id, va_list args)
 {
 	struct transfer *transfer;
-	va_list args;
 	guint id;
 
 	g_obex_debug(G_OBEX_DEBUG_TRANSFER, "obex %p", obex);
 
 	transfer = transfer_new(obex, G_OBEX_OP_PUT, complete_func, user_data);
 	transfer->data_consumer = data_func;
+	transfer->final_func = final_func;
 
-	va_start(args, first_hdr_id);
 	transfer_put_req_first(transfer, req, first_hdr_id, args);
-	va_end(args);
 	if (!g_slist_find(transfers, transfer))
 		return 0;
 
@@ -435,6 +451,43 @@ guint g_obex_put_rsp(GObex *obex, GObexPacket *req,
 	g_obex_debug(G_OBEX_DEBUG_TRANSFER, "transfer %u", transfer->id);
 
 	return transfer->id;
+}
+
+guint g_obex_put_rsp(GObex *obex, GObexPacket *req,
+			GObexDataConsumer data_func, GObexFunc complete_func,
+			gpointer user_data, GError **err,
+			guint first_hdr_id, ...)
+{
+	va_list args;
+	guint id;
+
+	va_start(args, first_hdr_id);
+	id = put_rsp(obex, req, data_func, complete_func, NULL, user_data,
+							first_hdr_id, args);
+	va_end(args);
+
+	return id;
+}
+
+static void put_rsp_deferred(GObex *obex, GObexPacket *req,
+			GObexDataConsumer data_func, GObexFunc complete_func,
+			GObexFunc final_func, gpointer user_data,
+			guint first_hdr_id, ...)
+{
+	va_list args;
+
+	va_start(args, first_hdr_id);
+	put_rsp(obex, req, data_func, complete_func, final_func, user_data,
+							first_hdr_id, args);
+	va_end(args);
+}
+
+void g_obex_put_rsp_deferred(GObex *obex, GObexPacket *req,
+			GObexDataConsumer data_func, GObexFunc complete_func,
+			GObexFunc final_func, gpointer user_data)
+{
+	put_rsp_deferred(obex, req, data_func, complete_func, final_func,
+						user_data, G_OBEX_HDR_INVALID);
 }
 
 guint g_obex_get_req_pkt(GObex *obex, GObexPacket *req,

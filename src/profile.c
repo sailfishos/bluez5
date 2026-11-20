@@ -518,10 +518,10 @@
 			<uint8 value=\"0x00\"/>				\
 		</attribute>						\
 		<attribute id=\"0x0316\">				\
-			<uint8 value=\"0x0F\"/>				\
+			<uint8 value=\"0x%02x\"/>			\
 		</attribute>						\
 		<attribute id=\"0x0317\">				\
-			<uint32 value=\"0x0000007f\"/>			\
+			<uint32 value=\"0x%08x\"/>			\
 		</attribute>						\
 		<attribute id=\"0x0200\">				\
 			<uint16 value=\"%u\" name=\"psm\"/>		\
@@ -658,6 +658,8 @@ struct ext_profile {
 	char *uuid;
 	char *service;
 	char *role;
+	uint8_t supported_message_types;
+	uint32_t supported_features;
 
 	char *record;
 	char *(*get_record)(struct ext_profile *ext, struct ext_io *l2cap,
@@ -1988,7 +1990,9 @@ static char *get_mas_record(struct ext_profile *ext, struct ext_io *l2cap,
 	if (rfcomm)
 		chan = rfcomm->chan;
 
-	return g_strdup_printf(MAS_RECORD, chan, ext->version, ext->name, psm);
+	return g_strdup_printf(MAS_RECORD, chan, ext->version, ext->name,
+				ext->supported_message_types,
+				ext->supported_features, psm);
 }
 
 static char *get_mns_record(struct ext_profile *ext, struct ext_io *l2cap,
@@ -2250,6 +2254,10 @@ static void ext_set_defaults(struct ext_profile *ext)
 	ext->enable_client = true;
 	ext->enable_server = true;
 	ext->remote_uuid = NULL;
+	if (strcasecmp(ext->uuid, OBEX_MAS_UUID) == 0) {
+		ext->supported_message_types = 0x0f;
+		ext->supported_features = 0x7f;
+	}
 
 	for (i = 0; i < G_N_ELEMENTS(defaults); i++) {
 		struct default_settings *settings = &defaults[i];
@@ -2385,6 +2393,17 @@ static int parse_ext_opt(struct ext_profile *ext, const char *key,
 
 		dbus_message_iter_get_basic(value, &feat);
 		ext->features = feat;
+	} else if (strcasecmp(key, "SupportedMessageTypes") == 0) {
+		if (type != DBUS_TYPE_BYTE)
+			return -EINVAL;
+
+		dbus_message_iter_get_basic(value,
+					&ext->supported_message_types);
+	} else if (strcasecmp(key, "SupportedFeatures") == 0) {
+		if (type != DBUS_TYPE_UINT32)
+			return -EINVAL;
+
+		dbus_message_iter_get_basic(value, &ext->supported_features);
 	} else if (strcasecmp(key, "Service") == 0) {
 		if (type != DBUS_TYPE_STRING)
 			return -EINVAL;

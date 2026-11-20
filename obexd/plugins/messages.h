@@ -289,6 +289,29 @@ int messages_set_read(void *session, const char *handle, uint8_t value,
 int messages_set_delete(void *session, const char *handle, uint8_t value,
 				messages_status_cb callback, void *user_data);
 
+/* Backend capabilities advertised in the MAS service record. */
+void messages_get_capabilities(uint8_t *types, uint32_t *features);
+
+#define MESSAGES_TRANSPARENT (1 << 4)
+#define MESSAGES_RETRY       (1 << 5)
+
+typedef void (*messages_push_cb)(void *session, int err, const char *handle,
+							void *user_data);
+
+/* Start an upload to name (or the current folder when empty). flags contains
+ * MESSAGES_UTF8, MESSAGES_TRANSPARENT and MESSAGES_RETRY. size may be NULL
+ * when unknown. The backend owns buffering and validates its supported formats.
+ * Feed the bMessage with messages_push_write(), then call messages_push_end().
+ * On successful end, invoke callback asynchronously with the stored handle.
+ * Negative returns abort the request without a callback. messages_abort() must
+ * discard upload state and cancel pending callbacks.
+ */
+int messages_push_message(void *session, const char *name, unsigned long flags,
+		const size_t *size, messages_push_cb callback, void *user_data);
+ssize_t messages_push_write(void *session, const void *buf, size_t count);
+int messages_push_end(void *session);
+
+
 /* Aborts currently pending request.
  *
  * session: Backend session.

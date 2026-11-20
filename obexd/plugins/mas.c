@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <sys/time.h>
+#include <time.h>
 
 #include "gobex/gobex.h"
 #include "gobex/gobex-apparam.h"
@@ -33,6 +34,8 @@
 #include "obexd/src/map_ap.h"
 #include "filesystem.h"
 #include "messages.h"
+
+#include "map-mns.h"
 
 #define READ_STATUS_REQ 0
 #define DELETE_STATUS_REQ 1
@@ -59,7 +62,8 @@ struct mas_session {
 	GObexApparam *inparams;
 	GObexApparam *outparams;
 	gboolean ap_sent;
-	uint8_t notification_status;
+	struct obex_session *os;
+	struct map_mns *mns;
 };
 
 static const uint8_t MAS_TARGET[TARGET_SIZE] = {
@@ -119,6 +123,7 @@ static void *mas_connect(struct obex_session *os, int *err)
 	DBG("");
 
 	mas = g_new0(struct mas_session, 1);
+	mas->os = os;
 
 	*err = messages_connect(&mas->backend_data);
 	if (*err < 0)
@@ -142,7 +147,7 @@ static void mas_disconnect(struct obex_session *os, void *user_data)
 
 	manager_unregister_session(os);
 	messages_disconnect(mas->backend_data);
-
+	map_mns_free(mas->mns);
 	mas_clean(mas);
 }
 
@@ -599,29 +604,76 @@ done:
 		return mas;
 }
 
+static void message_pushed(void *session, int err, const char *handle,
+							void *data)
+{
+	struct mas_session *mas = data;
+
+	mas->finished = TRUE;
+	obex_put_complete(mas->os, err, handle);
+}
+
+static int message_finish_put(void *data)
+{
+	struct mas_session *mas = data;
+
+	return messages_push_end(mas->backend_data);
+}
+
+static ssize_t message_write(void *data, const void *buf, size_t count)
+{
+	struct mas_session *mas = data;
+
+	return messages_push_write(mas->backend_data, buf, count);
+}
+
 static void *message_open(const char *name, int oflag, mode_t mode,
 				void *driver_data, size_t *size, int *err)
 {
 	struct mas_session *mas = driver_data;
+	unsigned long flags = 0;
+	uint8_t charset = 1, transparent = 0, retry = 1;
 
-	DBG("");
+	if (mas->inparams)
+		g_obex_apparam_get_uint8(mas->inparams, MAP_AP_CHARSET,
+								&charset);
 
-	if (oflag != O_RDONLY) {
-		DBG("Message pushing unsupported");
-		*err = -ENOSYS;
-
+	if (charset > 1) {
+		*err = -EBADR;
 		return NULL;
 	}
 
-	mas->buffer = g_string_new("");
+	if (charset)
+		flags |= MESSAGES_UTF8;
 
-	*err = messages_get_message(mas->backend_data, name, 0,
-			get_message_cb, mas);
+	if (oflag != O_RDONLY) {
+		if (mas->inparams) {
+			g_obex_apparam_get_uint8(mas->inparams,
+						MAP_AP_TRANSPARENT,
+								&transparent);
+			g_obex_apparam_get_uint8(mas->inparams, MAP_AP_RETRY,
+								&retry);
+		}
 
-	if (*err < 0)
-		return NULL;
-	else
-		return mas;
+		if (transparent > 1 || retry > 1) {
+			*err = -EBADR;
+			return NULL;
+		}
+
+		if (transparent)
+			flags |= MESSAGES_TRANSPARENT;
+		if (retry)
+			flags |= MESSAGES_RETRY;
+
+		*err = messages_push_message(mas->backend_data, name, flags,
+						size, message_pushed, mas);
+	} else {
+		mas->buffer = g_string_new("");
+		*err = messages_get_message(mas->backend_data, name, flags,
+							get_message_cb, mas);
+	}
+
+	return *err < 0 ? NULL : mas;
 }
 
 static void *message_update_open(const char *name, int oflag, mode_t mode,
@@ -755,6 +807,54 @@ static int any_close(void *obj)
 	return 0;
 }
 
+static void notify_message(void *session, const struct messages_event *event,
+							void *user_data)
+{
+	struct mas_session *mas = user_data;
+
+	map_mns_send(mas->mns, event);
+}
+
+static int enable_notifications(struct mas_session *mas, uint8_t status)
+{
+	char *local = NULL, *peer = NULL;
+	int err;
+
+	if (status > 1)
+		return -EBADR;
+
+	if (!status) {
+		err = messages_set_notification_registration(mas->backend_data,
+								NULL, NULL);
+		g_clear_pointer(&mas->mns, map_mns_free);
+
+		return err;
+	}
+
+	if (mas->mns)
+		return 0;
+
+	err = messages_set_notification_registration(mas->backend_data,
+							notify_message, mas);
+	if (err < 0)
+		return err;
+
+	if (!obex_getsockname(mas->os, &local) &&
+					!obex_getpeername(mas->os, &peer))
+		mas->mns = map_mns_new(local, peer);
+
+	g_free(local);
+	g_free(peer);
+
+	if (!mas->mns) {
+		messages_set_notification_registration(mas->backend_data,
+								NULL, NULL);
+		return -EFAULT;
+	}
+
+	return 0;
+}
+
 static void *notification_registration_open(const char *name, int oflag,
 						mode_t mode, void *driver_data,
 						size_t *size, int *err)
@@ -764,18 +864,21 @@ static void *notification_registration_open(const char *name, int oflag,
 
 	DBG("");
 
-	if (O_RDONLY) {
+	if (oflag == O_RDONLY) {
 		*err = -EBADR;
 		return NULL;
 	}
 
-	if (!g_obex_apparam_get_uint8(mas->inparams, MAP_AP_NOTIFICATIONSTATUS,
-								&status)) {
+	if (!mas->inparams ||
+			!g_obex_apparam_get_uint8(mas->inparams,
+					MAP_AP_NOTIFICATIONSTATUS, &status)) {
 		*err = -EBADR;
 		return NULL;
 	}
 
-	mas->notification_status = status;
+	*err = enable_notifications(mas, status);
+	if (*err < 0)
+		return NULL;
 	mas->finished = TRUE;
 	*err = 0;
 
@@ -841,7 +944,8 @@ static const struct obex_mime_type_driver mime_message = {
 	.open = message_open,
 	.close = any_close,
 	.read = any_read,
-	.write = any_write,
+	.write = message_write,
+	.finish_put = message_finish_put,
 };
 
 static const struct obex_mime_type_driver mime_folder_listing = {
@@ -944,6 +1048,8 @@ static int mas_init(void)
 			goto failed;
 	}
 
+	messages_get_capabilities(&mas.supported_message_types,
+						&mas.supported_features);
 	err = obex_service_driver_register(&mas);
 	if (err < 0)
 		goto failed;

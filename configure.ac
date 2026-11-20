@@ -21,6 +21,7 @@ AC_LANG([C])
 AC_C_RESTRICT
 
 AC_PROG_CC
+AC_PROG_CXX
 AM_PROG_CC_C_O
 AC_PROG_CC_PIE
 AC_PROG_CC_ASAN
@@ -535,6 +536,13 @@ if (test "${plugin_phonebook}" = "ebook"); then
 	PKG_CHECK_MODULES(LIBEDATESERVER, libedataserver-1.2 >= 3.3)
 fi
 AC_SUBST(PLUGIN_PHONEBOOK, [${plugin_phonebook}])
+
+AC_ARG_ENABLE(map-sailfish, AS_HELP_STRING([--enable-map-sailfish],
+			[build the Sailfish SMS backend for obexd]))
+AM_CONDITIONAL(MAP_SAILFISH, test "${enable_map_sailfish}" = "yes")
+if (test "${enable_map_sailfish}" = "yes"); then
+	PKG_CHECK_MODULES(MAP_SAILFISH, [Qt5Core Qt5DBus commhistory-qt5 >= 1.12.6])
+fi
 
 AC_ARG_ENABLE(jolla_dbus_access, AC_HELP_STRING([--enable-jolla-dbus-access],
 				[compile with Jolla D-Bus access control plugin]),

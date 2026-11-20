@@ -259,6 +259,14 @@ static int register_profile(struct bluetooth_profile *profile)
 					&opt);
 	g_dbus_dict_append_entry(&opt, "AutoConnect", DBUS_TYPE_BOOLEAN,
 								&auto_connect);
+	if (profile->driver->service == OBEX_MAS) {
+		g_dbus_dict_append_entry(&opt, "SupportedMessageTypes",
+					DBUS_TYPE_BYTE,
+				&profile->driver->supported_message_types);
+		g_dbus_dict_append_entry(&opt, "SupportedFeatures",
+					DBUS_TYPE_UINT32,
+					&profile->driver->supported_features);
+	}
 	if (profile->driver->record) {
 		if (profile->driver->port != 0)
 			xml = g_markup_printf_escaped(profile->driver->record,
